@@ -42,17 +42,28 @@ struct MediaItem {
     int thumbH = 0;
 };
 
+struct VolPoint {
+    float norm = 0.0f;
+    float gain = 1.0f;
+};
+
 struct Clip {
     int mediaId = -1;
     float startTime = 0.0f;
     float duration = 5.0f;
     float sourceOffset = 0.0f;
+    float speed = 1.0f;
+    bool fadeIn = false;
+    bool fadeOut = false;
     int track = 0;
+    std::vector<VolPoint> volume;
 };
 
 struct ThumbBlit {
     ImVec2 a;
     ImVec2 b;
+    ImVec2 c0;
+    ImVec2 c1;
     GLuint tex = 0;
     int w = 0;
     int h = 0;
@@ -77,6 +88,11 @@ int trimmingClip = -1;
 int trimSide = 0;
 float trimAnchorX = 0;
 float trimOrigStart = 0, trimOrigDur = 0, trimOrigOffset = 0;
+int contextClip = -1;
+bool openClipMenu = false;
+int dragVolClip = -1;
+int dragVolPt = -1;
+float frameDebt = 0.0f;
 
 typedef void (APIENTRY *PFN_glUseProgramProc)(GLuint);
 PFN_glUseProgramProc pglUseProgram = nullptr;
@@ -226,7 +242,7 @@ float ProbeDuration(const std::string& path) {
 }
 
 void MakeThumbnail(MediaItem& m) {
-    if (m.type != "video") return;
+    if (m.type != "video" && m.type != "image") return;
     AVFormatContext* fmt = nullptr;
     if (avformat_open_input(&fmt, m.path.c_str(), nullptr, nullptr) < 0) return;
     if (avformat_find_stream_info(fmt, nullptr) < 0) { avformat_close_input(&fmt); return; }
@@ -417,10 +433,38 @@ void SetPlaying(bool play) {
     if (audioDev) SDL_PauseAudioDevice(audioDev, play ? 0 : 1);
 }
 
+float GainAt(const Clip& c, float localTime) {
+    if (c.duration <= 0.0001f) return 1.0f;
+    if (localTime < 0) localTime = 0;
+    if (localTime > c.duration) localTime = c.duration;
+    float g = 1.0f;
+    if (!c.volume.empty()) {
+        float n = localTime / c.duration;
+        if (n <= c.volume.front().norm) g = c.volume.front().gain;
+        else if (n >= c.volume.back().norm) g = c.volume.back().gain;
+        else {
+            for (size_t i = 1; i < c.volume.size(); i++) {
+                if (n <= c.volume[i].norm) {
+                    float d = c.volume[i].norm - c.volume[i - 1].norm;
+                    float u = d > 0.0001f ? (n - c.volume[i - 1].norm) / d : 0.0f;
+                    g = c.volume[i - 1].gain + (c.volume[i].gain - c.volume[i - 1].gain) * u;
+                    break;
+                }
+            }
+        }
+    }
+    float fadeDur = std::min(0.75f, c.duration * 0.45f);
+    if (fadeDur < 0.02f) fadeDur = 0.02f;
+    if (c.fadeIn) g *= std::min(1.0f, localTime / fadeDur);
+    if (c.fadeOut) g *= std::min(1.0f, (c.duration - localTime) / fadeDur);
+    if (g < 0) g = 0;
+    if (g > 1) g = 1;
+    return g;
+}
+
 void QueueAudioBlock(double timelineTime, int sampleCount) {
     if (!audioDev || sampleCount <= 0) return;
     std::vector<int32_t> mix((size_t)sampleCount * 2, 0);
-    std::vector<int16_t> tmp((size_t)sampleCount * 2, 0);
     for (int ci = 0; ci < (int)clips.size(); ci++) {
         const Clip& c = clips[ci];
         if (c.mediaId < 0 || c.mediaId >= (int)media.size()) continue;
@@ -428,9 +472,26 @@ void QueueAudioBlock(double timelineTime, int sampleCount) {
         if (timelineTime < c.startTime || timelineTime >= c.startTime + c.duration) continue;
         int idx = EnsureAudio(c.mediaId);
         if (audioSrcs[idx].noAudio || audioSrcs[idx].failed) continue;
-        double mediaT = c.sourceOffset + (timelineTime - c.startTime);
-        PullSamples(audioSrcs[idx], mediaT, sampleCount, tmp.data());
-        for (int i = 0; i < sampleCount * 2; i++) mix[i] += tmp[i];
+        float speed = c.speed < 0.05f ? 1.0f : c.speed;
+        double mediaT = c.sourceOffset + (timelineTime - c.startTime) * speed;
+        int srcN = std::max(1, (int)std::lround(sampleCount * speed));
+        std::vector<int16_t> src((size_t)srcN * 2, 0);
+        PullSamples(audioSrcs[idx], mediaT, srcN, src.data());
+        float local = (float)(timelineTime - c.startTime);
+        float blockDur = sampleCount / 48000.0f;
+        float g0 = GainAt(c, local);
+        float g1 = GainAt(c, local + blockDur);
+        for (int i = 0; i < sampleCount; i++) {
+            float pos = (sampleCount <= 1) ? 0.0f : (float)i * (float)(srcN - 1) / (float)(sampleCount - 1);
+            int i0 = (int)pos;
+            int i1 = std::min(srcN - 1, i0 + 1);
+            float fr = pos - (float)i0;
+            float g = g0 + (g1 - g0) * ((float)i / (float)sampleCount);
+            for (int ch = 0; ch < 2; ch++) {
+                float s = src[(size_t)i0 * 2 + ch] * (1.0f - fr) + src[(size_t)i1 * 2 + ch] * fr;
+                mix[i * 2 + ch] += (int32_t)(s * g);
+            }
+        }
     }
     std::vector<int16_t> out((size_t)sampleCount * 2);
     for (int i = 0; i < sampleCount * 2; i++) {
@@ -457,7 +518,7 @@ void PumpAudio() {
 }
 #endif
 
-void BlitVideo(ImVec2 p0, ImVec2 p1, GLuint tex, int vw, int vh) {
+void BlitVideo(ImVec2 p0, ImVec2 p1, GLuint tex, int vw, int vh, ImVec2 clip0, ImVec2 clip1) {
     if (!tex || vw <= 0 || vh <= 0) return;
     float areaW = p1.x - p0.x;
     float areaH = p1.y - p0.y;
@@ -474,14 +535,21 @@ void BlitVideo(ImVec2 p0, ImVec2 p1, GLuint tex, int vw, int vh) {
         float off = (areaW - w) * 0.5f;
         a.x += off; b.x -= off;
     }
+    ImGuiIO& io = ImGui::GetIO();
+    float sx0 = std::max(a.x, std::max(0.0f, clip0.x));
+    float sy0 = std::max(a.y, std::max(0.0f, clip0.y));
+    float sx1 = std::min(b.x, std::min(io.DisplaySize.x, clip1.x));
+    float sy1 = std::min(b.y, std::min(io.DisplaySize.y, clip1.y));
+    if (sx1 - sx0 < 1.0f || sy1 - sy0 < 1.0f) return;
+
     if (pglUseProgram) pglUseProgram(0);
-    glDisable(GL_SCISSOR_TEST);
     glDisable(GL_BLEND);
     glDisable(GL_DEPTH_TEST);
+    glEnable(GL_SCISSOR_TEST);
+    glScissor((int)sx0, (int)(io.DisplaySize.y - sy1), std::max(1, (int)(sx1 - sx0)), std::max(1, (int)(sy1 - sy0)));
     glEnable(GL_TEXTURE_2D);
     glBindTexture(GL_TEXTURE_2D, tex);
     glColor3f(1.f, 1.f, 1.f);
-    ImGuiIO& io = ImGui::GetIO();
     glMatrixMode(GL_PROJECTION);
     glPushMatrix();
     glLoadIdentity();
@@ -500,6 +568,7 @@ void BlitVideo(ImVec2 p0, ImVec2 p1, GLuint tex, int vw, int vh) {
     glPopMatrix();
     glMatrixMode(GL_MODELVIEW);
     glDisable(GL_TEXTURE_2D);
+    glDisable(GL_SCISSOR_TEST);
 }
 
 float SnapTime(int ignore, float proposed) {
@@ -549,6 +618,78 @@ float SnapStart(int ignore, float dur, float proposed) {
     return best;
 }
 
+void EnsureEnvelope(Clip& c) {
+    if (c.volume.empty()) {
+        c.volume.push_back({0.0f, 1.0f});
+        c.volume.push_back({1.0f, 1.0f});
+    }
+}
+
+float EnvAtNorm(const Clip& c, float n) {
+    if (c.volume.empty()) return 1.0f;
+    if (n <= c.volume.front().norm) return c.volume.front().gain;
+    if (n >= c.volume.back().norm) return c.volume.back().gain;
+    for (size_t i = 1; i < c.volume.size(); i++) {
+        if (n <= c.volume[i].norm) {
+            float d = c.volume[i].norm - c.volume[i - 1].norm;
+            float u = d > 0.0001f ? (n - c.volume[i - 1].norm) / d : 0.0f;
+            return c.volume[i - 1].gain + (c.volume[i].gain - c.volume[i - 1].gain) * u;
+        }
+    }
+    return c.volume.back().gain;
+}
+
+void SetClipSpeed(Clip& c, float sp) {
+    if (sp < 0.1f) sp = 0.1f;
+    float span = c.duration * std::max(0.1f, c.speed);
+    c.speed = sp;
+    c.duration = std::max(0.1f, span / sp);
+    shownLocal = -1000.0f;
+#ifdef HAVE_FFMPEG
+    ResetAudioSync();
+#endif
+}
+
+void SplitSelected() {
+    if (selectedClip < 0 || selectedClip >= (int)clips.size()) return;
+    Clip& c = clips[selectedClip];
+    float cut = currentTime;
+    if (cut <= c.startTime + 0.05f || cut >= c.startTime + c.duration - 0.05f)
+        cut = c.startTime + c.duration * 0.5f;
+    float leftDur = cut - c.startTime;
+    float rightDur = c.duration - leftDur;
+    if (leftDur < 0.05f || rightDur < 0.05f) return;
+    EnsureEnvelope(c);
+    float cutN = leftDur / c.duration;
+    float gCut = EnvAtNorm(c, cutN);
+    Clip right = c;
+    right.startTime = cut;
+    right.duration = rightDur;
+    right.sourceOffset = c.sourceOffset + leftDur * std::max(0.05f, c.speed);
+    right.fadeIn = false;
+    right.fadeOut = c.fadeOut;
+    c.fadeOut = false;
+    c.duration = leftDur;
+    std::vector<VolPoint> leftPts, rightPts;
+    leftPts.push_back({0.0f, c.volume.front().gain});
+    for (const auto& p : c.volume) {
+        if (p.norm > 0.001f && p.norm < cutN - 0.001f)
+            leftPts.push_back({p.norm / cutN, p.gain});
+        else if (p.norm > cutN + 0.001f && p.norm < 0.999f)
+            rightPts.push_back({(p.norm - cutN) / (1.0f - cutN), p.gain});
+    }
+    leftPts.push_back({1.0f, gCut});
+    rightPts.insert(rightPts.begin(), {0.0f, gCut});
+    rightPts.push_back({1.0f, c.volume.back().gain});
+    c.volume = leftPts;
+    right.volume = rightPts;
+    clips.insert(clips.begin() + selectedClip + 1, right);
+    shownLocal = -1000.0f;
+#ifdef HAVE_FFMPEG
+    ResetAudioSync();
+#endif
+}
+
 HWND GetSDLWindowHandle(SDL_Window* window) {
 #ifdef _WIN32
     SDL_SysWMinfo wmInfo;
@@ -558,20 +699,35 @@ HWND GetSDLWindowHandle(SDL_Window* window) {
     return NULL;
 }
 
-std::string OpenFileDialog(HWND owner) {
+void AddMedia(const std::string& path);
+
+void ImportFiles(HWND owner) {
 #ifdef _WIN32
-    char filename[MAX_PATH] = {0};
+    std::vector<char> buf(65536, 0);
     OPENFILENAMEA ofn = {0};
     ofn.lStructSize = sizeof(OPENFILENAMEA);
     ofn.hwndOwner = owner;
-    ofn.lpstrFilter = "Video Files\0*.mp4;*.mov;*.avi;*.mkv\0Audio Files\0*.mp3;*.wav;*.aac\0Image Files\0*.jpg;*.jpeg;*.png;*.bmp\0All Files\0*.*\0";
-    ofn.lpstrFile = filename;
-    ofn.nMaxFile = MAX_PATH;
+    ofn.lpstrFilter = "Media\0*.mp4;*.mov;*.avi;*.mkv;*.webm;*.mp3;*.wav;*.aac;*.flac;*.m4a;*.ogg;*.jpg;*.jpeg;*.png;*.bmp;*.webp;*.gif\0All Files\0*.*\0";
+    ofn.lpstrFile = buf.data();
+    ofn.nMaxFile = (DWORD)buf.size();
     ofn.lpstrTitle = "Import Media";
-    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER | OFN_NOCHANGEDIR;
-    if (GetOpenFileNameA(&ofn)) return std::string(filename);
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER | OFN_NOCHANGEDIR | OFN_ALLOWMULTISELECT;
+    if (!GetOpenFileNameA(&ofn)) return;
+    char* p = buf.data();
+    std::string first = p;
+    p += first.size() + 1;
+    if (*p == 0) {
+        AddMedia(first);
+    } else {
+        while (*p) {
+            std::string name = p;
+            AddMedia(first + "\\" + name);
+            p += name.size() + 1;
+        }
+    }
+#else
+    (void)owner;
 #endif
-    return "";
 }
 
 void AddMedia(const std::string& path) {
@@ -583,9 +739,12 @@ void AddMedia(const std::string& path) {
     std::string lower = m.name;
     std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
     if (lower.find(".mp4") != std::string::npos || lower.find(".mov") != std::string::npos ||
-        lower.find(".avi") != std::string::npos || lower.find(".mkv") != std::string::npos)
+        lower.find(".avi") != std::string::npos || lower.find(".mkv") != std::string::npos ||
+        lower.find(".webm") != std::string::npos)
         m.type = "video";
-    else if (lower.find(".mp3") != std::string::npos || lower.find(".wav") != std::string::npos || lower.find(".aac") != std::string::npos)
+    else if (lower.find(".mp3") != std::string::npos || lower.find(".wav") != std::string::npos ||
+             lower.find(".aac") != std::string::npos || lower.find(".flac") != std::string::npos ||
+             lower.find(".m4a") != std::string::npos || lower.find(".ogg") != std::string::npos)
         m.type = "audio";
     else
         m.type = "image";
@@ -620,7 +779,7 @@ void EnsurePlayerForClip(int clipIdx) {
         playingMediaId = mid;
         float localTime = currentTime - clips[clipIdx].startTime;
         if (localTime < 0) localTime = 0;
-        float mediaT = clips[clipIdx].sourceOffset + localTime;
+        float mediaT = clips[clipIdx].sourceOffset + localTime * std::max(0.05f, clips[clipIdx].speed);
         player->Seek(mediaT);
         if (player->GrabFrame()) {
             char buf[64];
@@ -642,11 +801,12 @@ void EnsurePlayerForClip(int clipIdx) {
 void ApplyTrim(int idx, float mouseX) {
     if (idx < 0 || idx >= (int)clips.size()) return;
     Clip& c = clips[idx];
-    float srcDur = (c.mediaId >= 0 && c.mediaId < (int)media.size()) ? media[c.mediaId].duration : c.duration;
+    float srcDur = (c.mediaId >= 0 && c.mediaId < (int)media.size()) ? media[c.mediaId].duration : (c.duration * c.speed);
+    float speed = c.speed < 0.05f ? 1.0f : c.speed;
     float dt = (mouseX - trimAnchorX) / pixelsPerSecond;
     if (trimSide == 1) {
         float nd = trimOrigDur + dt;
-        float maxD = srcDur - trimOrigOffset;
+        float maxD = (srcDur - trimOrigOffset) / speed;
         if (nd < 0.1f) nd = 0.1f;
         if (nd > maxD) nd = maxD;
         float end = SnapTime(idx, trimOrigStart + nd);
@@ -658,36 +818,32 @@ void ApplyTrim(int idx, float mouseX) {
         c.startTime = trimOrigStart;
     } else {
         float nstart = trimOrigStart + dt;
-        float noff = trimOrigOffset + dt;
+        float noff = trimOrigOffset + dt * speed;
         float ndur = trimOrigDur - dt;
         if (nstart < 0) {
-            noff -= nstart;
-            ndur += nstart;
+            float back = -nstart;
             nstart = 0;
+            noff -= back * speed;
+            ndur -= back;
         }
         if (noff < 0) {
-            nstart += noff;
-            ndur -= noff;
+            float back = -noff / speed;
             noff = 0;
-            if (nstart < 0) nstart = 0;
-        }
-        float maxOff = srcDur - 0.1f;
-        if (noff > maxOff) {
-            float over = noff - maxOff;
-            noff = maxOff;
-            nstart -= over;
-            ndur += over;
+            nstart -= back;
+            ndur += back;
             if (nstart < 0) nstart = 0;
         }
         if (ndur < 0.1f) ndur = 0.1f;
-        if (noff + ndur > srcDur) ndur = std::max(0.1f, srcDur - noff);
-        nstart = SnapTime(idx, nstart);
-        float applied = nstart - trimOrigStart;
-        noff = trimOrigOffset + applied;
+        if (noff + ndur * speed > srcDur) ndur = std::max(0.1f, (srcDur - noff) / speed);
+        float snapped = SnapTime(idx, nstart);
+        float applied = snapped - trimOrigStart;
+        nstart = snapped;
+        noff = trimOrigOffset + applied * speed;
         ndur = trimOrigDur - applied;
-        if (noff < 0) { ndur += noff; noff = 0; }
+        if (noff < 0) { ndur += (-noff) / speed; noff = 0; }
+        if (nstart < 0) nstart = 0;
         if (ndur < 0.1f) ndur = 0.1f;
-        if (noff + ndur > srcDur) ndur = std::max(0.1f, srcDur - noff);
+        if (noff + ndur * speed > srcDur) ndur = std::max(0.1f, (srcDur - noff) / speed);
         c.startTime = nstart;
         c.sourceOffset = noff;
         c.duration = ndur;
@@ -718,7 +874,7 @@ int main(int argc, char* argv[]) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
-    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 2",
+    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 3",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900,
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!window) { SDL_Quit(); return 1; }
@@ -753,12 +909,16 @@ int main(int argc, char* argv[]) {
                     isPlaying = !isPlaying;
 #endif
                 }
+                if (event.key.keysym.sym == SDLK_c && !event.key.repeat && !io.WantTextInput)
+                    SplitSelected();
                 if (event.key.keysym.sym == SDLK_DELETE || event.key.keysym.sym == SDLK_BACKSPACE) {
                     if (selectedClip >= 0 && selectedClip < (int)clips.size()) {
                         clips.erase(clips.begin() + selectedClip);
                         selectedClip = -1;
                         draggingClip = -1;
                         trimmingClip = -1;
+                        dragVolClip = -1;
+                        contextClip = -1;
                     }
                 }
             }
@@ -773,10 +933,7 @@ int main(int argc, char* argv[]) {
         ImGui::SetNextWindowSize(io.DisplaySize);
         ImGui::Begin("Editor", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
 
-        if (ImGui::Button("Import")) {
-            std::string path = OpenFileDialog(hwnd);
-            if (!path.empty()) AddMedia(path);
-        }
+        if (ImGui::Button("Import")) ImportFiles(hwnd);
         ImGui::SameLine();
         if (ImGui::Button(snapEnabled ? "Snap ON" : "Snap OFF")) snapEnabled = !snapEnabled;
         ImGui::SameLine();
@@ -793,20 +950,29 @@ int main(int argc, char* argv[]) {
         ImGui::BeginChild("Media", ImVec2(io.DisplaySize.x * 0.26f, topH), true);
         ImGui::Text("Media Library");
         ImGui::Separator();
+        ImVec2 mediaClip0 = ImGui::GetWindowPos();
+        ImVec2 mediaClip1(mediaClip0.x + ImGui::GetWindowSize().x, mediaClip0.y + ImGui::GetWindowSize().y);
+        float gap = 6.0f;
+        float cellW = std::max(70.0f, (ImGui::GetContentRegionAvail().x - gap * 2.0f) / 3.0f);
+        float thumbH = cellW * 9.0f / 16.0f;
         for (int i = 0; i < (int)media.size(); i++) {
             const auto& m = media[i];
+            if (i % 3 != 0) ImGui::SameLine(0, gap);
             ImGui::PushID(i);
             ImGui::BeginGroup();
-            ImGui::Button("##dragitem", ImVec2(160, 90));
+            ImGui::InvisibleButton("##dragitem", ImVec2(cellW, thumbH));
             ImDrawList* dl = ImGui::GetWindowDrawList();
             ImVec2 p0 = ImGui::GetItemRectMin();
             ImVec2 p1 = ImGui::GetItemRectMax();
-            if (m.thumb)
-                thumbBlits.push_back({p0, p1, m.thumb, m.thumbW, m.thumbH});
-            else
+            bool vis = p1.y > mediaClip0.y && p0.y < mediaClip1.y && p1.x > mediaClip0.x && p0.x < mediaClip1.x;
+            if (m.thumb && vis)
+                thumbBlits.push_back({p0, p1, mediaClip0, mediaClip1, m.thumb, m.thumbW, m.thumbH});
+            else if (vis)
                 DrawPlaceholder(dl, p0, p1, m);
-            ImGui::TextWrapped("%s", m.name.c_str());
-            ImGui::Text("%.1fs  %s", m.duration, m.type.c_str());
+            ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + cellW);
+            ImGui::TextUnformatted(m.name.c_str());
+            ImGui::Text("%.1fs %s", m.duration, m.type.c_str());
+            ImGui::PopTextWrapPos();
             ImGui::EndGroup();
             if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
                 ImGui::SetDragDropPayload("MEDIA", &i, sizeof(int));
@@ -814,7 +980,6 @@ int main(int argc, char* argv[]) {
                 ImGui::EndDragDropSource();
             }
             ImGui::PopID();
-            ImGui::Separator();
         }
         ImGui::EndChild();
 
@@ -878,7 +1043,7 @@ int main(int argc, char* argv[]) {
         if (ImGui::RadioButton("Select", activeTool == 0)) activeTool = 0; ImGui::SameLine();
         if (ImGui::RadioButton("Trim", activeTool == 1)) activeTool = 1; ImGui::SameLine();
         if (ImGui::RadioButton("Split", activeTool == 2)) activeTool = 2; ImGui::SameLine();
-        ImGui::Text("| Del = Delete | Drag between tracks | Edges trim up to source length");
+        ImGui::Text("| C = split at playhead | Right click clip for fade / speed");
         ImGui::Separator();
 
         ImGui::BeginChild("Timeline", ImVec2(0, 0), true);
@@ -919,6 +1084,8 @@ int main(int argc, char* argv[]) {
             }
 
             ImDrawList* tdl = ImGui::GetWindowDrawList();
+            ImVec2 trackClip0 = ImGui::GetWindowPos();
+            ImVec2 trackClip1(trackClip0.x + ImGui::GetWindowSize().x, trackClip0.y + ImGui::GetWindowSize().y);
             for (int i = 0; i < (int)clips.size(); i++) {
                 if (clips[i].track != t) continue;
                 float x = trackStart.x + clips[i].startTime * pixelsPerSecond;
@@ -929,20 +1096,36 @@ int main(int argc, char* argv[]) {
                 tdl->AddRectFilled(cp0, cp1, ccol, 3.0f);
                 int mid = clips[i].mediaId;
                 if (mid >= 0 && mid < (int)media.size() && media[mid].thumb) {
-                    float tw = std::min(52.0f, w - 8.0f);
+                    float tw = std::min(40.0f, w - 8.0f);
                     if (tw > 10.0f)
-                        thumbBlits.push_back({cp0, ImVec2(cp0.x + tw, cp1.y), media[mid].thumb, media[mid].thumbW, media[mid].thumbH});
+                        thumbBlits.push_back({cp0, ImVec2(cp0.x + tw, cp1.y), trackClip0, trackClip1, media[mid].thumb, media[mid].thumbW, media[mid].thumbH});
                 }
                 if (i == selectedClip) {
+                    EnsureEnvelope(clips[i]);
                     tdl->AddRect(cp0, cp1, IM_COL32(255, 220, 60, 255), 3.0f, 0, 2.0f);
                     tdl->AddLine(cp0, ImVec2(cp0.x, cp1.y), IM_COL32(255, 255, 255, 255), 4.0f);
                     tdl->AddLine(ImVec2(cp1.x, cp0.y), cp1, IM_COL32(255, 255, 255, 255), 4.0f);
+                    ImVec2 prev(0, 0);
+                    for (int p = 0; p < (int)clips[i].volume.size(); p++) {
+                        float px = cp0.x + clips[i].volume[p].norm * w;
+                        float py = cp1.y - clips[i].volume[p].gain * (cp1.y - cp0.y);
+                        if (p > 0) tdl->AddLine(prev, ImVec2(px, py), IM_COL32(255, 210, 70, 255), 2.0f);
+                        tdl->AddCircleFilled(ImVec2(px, py), 4.5f, IM_COL32(255, 255, 255, 255));
+                        prev = ImVec2(px, py);
+                    }
                 }
-                std::string label = media[clips[i].mediaId].name.substr(0, 16);
-                char extra[32];
+                std::string label = media[clips[i].mediaId].name.substr(0, 14);
+                char extra[48];
                 snprintf(extra, sizeof(extra), " %.1fs", clips[i].duration);
                 label += extra;
-                tdl->AddText(ImVec2(cp0.x + 8, cp0.y + 4), IM_COL32(255, 255, 255, 230), label.c_str());
+                if (clips[i].speed > 1.01f) {
+                    char sp[16];
+                    snprintf(sp, sizeof(sp), " x%.2g", clips[i].speed);
+                    label += sp;
+                }
+                if (clips[i].fadeIn) label += " FI";
+                if (clips[i].fadeOut) label += " FO";
+                tdl->AddText(ImVec2(cp0.x + 44, cp0.y + 4), IM_COL32(255, 255, 255, 230), label.c_str());
 
                 if (ImGui::IsMouseHoveringRect(cp0, cp1)) {
                     float mx = ImGui::GetMousePos().x;
@@ -951,7 +1134,7 @@ int main(int argc, char* argv[]) {
                 }
             }
 
-            if (ImGui::IsMouseClicked(0) && draggingClip < 0 && trimmingClip < 0) {
+            if (draggingClip < 0 && trimmingClip < 0 && dragVolClip < 0) {
                 for (int i = (int)clips.size() - 1; i >= 0; --i) {
                     if (clips[i].track != t) continue;
                     float x = trackStart.x + clips[i].startTime * pixelsPerSecond;
@@ -959,27 +1142,99 @@ int main(int argc, char* argv[]) {
                     ImVec2 cp0(x, trackStart.y);
                     ImVec2 cp1(x + w, trackStart.y + trackH - 8);
                     if (!ImGui::IsMouseHoveringRect(cp0, cp1)) continue;
+                    ImVec2 mouse = ImGui::GetMousePos();
+                    if (ImGui::IsMouseClicked(1)) {
+                        selectedClip = i;
+                        contextClip = i;
+                        EnsureEnvelope(clips[i]);
+                        openClipMenu = true;
+                        break;
+                    }
+                    if (ImGui::IsMouseDoubleClicked(0)) {
+                        selectedClip = i;
+                        EnsureEnvelope(clips[i]);
+                        float n = (mouse.x - cp0.x) / w;
+                        float g = (cp1.y - mouse.y) / std::max(1.0f, cp1.y - cp0.y);
+                        if (n < 0) n = 0;
+                        if (n > 1) n = 1;
+                        if (g < 0) g = 0;
+                        if (g > 1) g = 1;
+                        auto& pts = clips[i].volume;
+                        size_t at = 0;
+                        while (at < pts.size() && pts[at].norm < n) at++;
+                        pts.insert(pts.begin() + at, {n, g});
+                        break;
+                    }
+                    if (!ImGui::IsMouseClicked(0)) continue;
                     selectedClip = i;
-                    float mx = ImGui::GetMousePos().x;
-                    bool edge = (mx < cp0.x + 8.0f) || (mx > cp1.x - 8.0f);
-                    if (edge || activeTool == 1) {
-                        trimmingClip = i;
-                        trimSide = (mx < (cp0.x + cp1.x) * 0.5f) ? -1 : 1;
-                        if (mx > cp1.x - 8.0f) trimSide = 1;
-                        if (mx < cp0.x + 8.0f) trimSide = -1;
-                        trimAnchorX = mx;
-                        trimOrigStart = clips[i].startTime;
-                        trimOrigDur = clips[i].duration;
-                        trimOrigOffset = clips[i].sourceOffset;
+                    EnsureEnvelope(clips[i]);
+                    int hit = -1;
+                    for (int p = 0; p < (int)clips[i].volume.size(); p++) {
+                        float px = cp0.x + clips[i].volume[p].norm * w;
+                        float py = cp1.y - clips[i].volume[p].gain * (cp1.y - cp0.y);
+                        float dx = mouse.x - px, dy = mouse.y - py;
+                        if (dx * dx + dy * dy <= 64.0f) { hit = p; break; }
+                    }
+                    if (hit >= 0) {
+                        dragVolClip = i;
+                        dragVolPt = hit;
                     } else {
-                        draggingClip = i;
-                        dragOffsetX = mx - cp0.x;
+                        float mx = mouse.x;
+                        bool edge = (mx < cp0.x + 8.0f) || (mx > cp1.x - 8.0f);
+                        if (edge || activeTool == 1) {
+                            trimmingClip = i;
+                            trimSide = (mx < cp0.x + 8.0f) ? -1 : 1;
+                            if (mx > cp1.x - 8.0f) trimSide = 1;
+                            trimAnchorX = mx;
+                            trimOrigStart = clips[i].startTime;
+                            trimOrigDur = clips[i].duration;
+                            trimOrigOffset = clips[i].sourceOffset;
+                        } else {
+                            draggingClip = i;
+                            dragOffsetX = mx - cp0.x;
+                        }
                     }
                     break;
                 }
             }
             ImGui::EndChild();
             ImGui::PopID();
+        }
+
+        if (dragVolClip >= 0 && dragVolClip < (int)clips.size()) {
+            if (ImGui::IsMouseDown(0) && dragVolPt >= 0 && dragVolPt < (int)clips[dragVolClip].volume.size()) {
+                ImVec2 mouse = ImGui::GetMousePos();
+                int tr = clips[dragVolClip].track;
+                float top = trackPositions[tr].y;
+                float bot = top + trackH - 8.0f;
+                float x0 = trackPositions[tr].x + clips[dragVolClip].startTime * pixelsPerSecond;
+                float w = std::max(24.0f, clips[dragVolClip].duration * pixelsPerSecond);
+                float n = (mouse.x - x0) / w;
+                float g = (bot - mouse.y) / std::max(1.0f, bot - top);
+                if (n < 0) n = 0;
+                if (n > 1) n = 1;
+                if (g < 0) g = 0;
+                if (g > 1) g = 1;
+                auto& pts = clips[dragVolClip].volume;
+                if (dragVolPt == 0) n = 0;
+                if (dragVolPt == (int)pts.size() - 1) n = 1;
+                if (dragVolPt > 0 && dragVolPt < (int)pts.size() - 1) {
+                    float lo = pts[dragVolPt - 1].norm + 0.01f;
+                    float hi = pts[dragVolPt + 1].norm - 0.01f;
+                    if (n < lo) n = lo;
+                    if (n > hi) n = hi;
+                }
+                pts[dragVolPt].norm = n;
+                pts[dragVolPt].gain = g;
+                ImGui::SetTooltip("%d", (int)std::lround(g * 128.0f));
+                shownLocal = -1000.0f;
+#ifdef HAVE_FFMPEG
+                ResetAudioSync();
+#endif
+            } else {
+                dragVolClip = -1;
+                dragVolPt = -1;
+            }
         }
 
         if (trimmingClip >= 0 && trimmingClip < (int)clips.size()) {
@@ -1035,23 +1290,62 @@ int main(int argc, char* argv[]) {
         }
 
         ImGui::EndChild();
+
+        if (openClipMenu) {
+            ImGui::OpenPopup("clipctx");
+            openClipMenu = false;
+        }
+        if (ImGui::BeginPopup("clipctx")) {
+            if (contextClip >= 0 && contextClip < (int)clips.size()) {
+                Clip& c = clips[contextClip];
+                ImGui::TextUnformatted("Clip");
+                ImGui::Separator();
+                if (ImGui::MenuItem("Fade In", nullptr, &c.fadeIn)) {
+                    shownLocal = -1000.0f;
+#ifdef HAVE_FFMPEG
+                    ResetAudioSync();
+#endif
+                }
+                if (ImGui::MenuItem("Fade Out", nullptr, &c.fadeOut)) {
+                    shownLocal = -1000.0f;
+#ifdef HAVE_FFMPEG
+                    ResetAudioSync();
+#endif
+                }
+                if (ImGui::BeginMenu("Speed")) {
+                    const float speeds[] = {1.0f, 1.1f, 1.25f, 1.5f, 1.75f, 2.0f};
+                    const char* labels[] = {"1.0x", "1.1x", "1.25x", "1.5x", "1.75x", "2x"};
+                    for (int s = 0; s < 6; s++) {
+                        bool on = std::fabs(c.speed - speeds[s]) < 0.02f;
+                        if (ImGui::MenuItem(labels[s], nullptr, on))
+                            SetClipSpeed(c, speeds[s]);
+                    }
+                    ImGui::EndMenu();
+                }
+            }
+            ImGui::EndPopup();
+        }
         ImGui::End();
 
 #ifdef HAVE_FFMPEG
         if (topClip >= 0 && player && player->fmtCtx) {
             float local = currentTime - clips[topClip].startTime;
             if (local < 0) local = 0;
-            float mediaT = clips[topClip].sourceOffset + local;
+            float mediaT = clips[topClip].sourceOffset + local * std::max(0.05f, clips[topClip].speed);
             if (isPlaying && !draggingPlayhead) {
                 currentTime += io.DeltaTime;
                 static float accum = 0;
                 accum += io.DeltaTime;
                 if (accum > 0.033f) {
-                    if (player->GrabFrame()) {
-                        char buf[64];
-                        snprintf(buf, sizeof(buf), "FFmpeg %dx%d play", player->width, player->height);
-                        previewStatus = buf;
-                    }
+                    frameDebt += std::max(0.05f, clips[topClip].speed);
+                    int grabs = (int)frameDebt;
+                    if (grabs < 1) grabs = 1;
+                    frameDebt -= grabs;
+                    if (frameDebt < 0) frameDebt = 0;
+                    for (int g = 0; g < grabs; g++) player->GrabFrame();
+                    char buf[64];
+                    snprintf(buf, sizeof(buf), "FFmpeg %dx%d x%.2g", player->width, player->height, clips[topClip].speed);
+                    previewStatus = buf;
                     shownLocal = mediaT;
                     accum = 0;
                 }
@@ -1080,9 +1374,9 @@ int main(int argc, char* argv[]) {
 
 #ifdef HAVE_FFMPEG
         if (player && player->hasFrame && player->texture)
-            BlitVideo(previewMin, previewMax, player->texture, player->width, player->height);
-        for (const auto& t : thumbBlits)
-            BlitVideo(t.a, t.b, t.tex, t.w, t.h);
+            BlitVideo(previewMin, previewMax, player->texture, player->width, player->height, previewMin, previewMax);
+        for (const auto& tb : thumbBlits)
+            BlitVideo(tb.a, tb.b, tb.tex, tb.w, tb.h, tb.c0, tb.c1);
 #endif
         SDL_GL_SwapWindow(window);
     }
