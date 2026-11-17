@@ -13,6 +13,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <commdlg.h>
+#include <objbase.h>
 #include <mfapi.h>
 #include <mfidl.h>
 #include <mfreadwrite.h>
@@ -47,6 +48,7 @@ bool isPlaying = false;
 bool snapEnabled = true;
 int selectedClip = -1;
 int activeTool = 0;
+std::string previewStatus = "Ready";
 
 #ifdef _WIN32
 class VideoPlayer {
@@ -55,48 +57,46 @@ public:
     UINT32 width = 0, height = 0;
     GLuint texture = 0;
     bool hasFrame = false;
-    LONGLONG duration100ns = 0;
+    std::string lastError;
 
     ~VideoPlayer() { Close(); }
 
     bool Open(const std::string& path) {
         Close();
         HRESULT hr = MFStartup(MF_VERSION);
-        if (FAILED(hr)) return false;
+        if (FAILED(hr)) { lastError = "MFStartup failed"; return false; }
 
         std::wstring wpath(path.begin(), path.end());
         IMFAttributes* attrs = nullptr;
-        MFCreateAttributes(&attrs, 1);
+        MFCreateAttributes(&attrs, 2);
         attrs->SetUINT32(MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, TRUE);
 
         hr = MFCreateSourceReaderFromURL(wpath.c_str(), attrs, &reader);
         if (attrs) attrs->Release();
-        if (FAILED(hr)) return false;
+        if (FAILED(hr)) { lastError = "Cannot open file"; return false; }
 
         IMFMediaType* type = nullptr;
         MFCreateMediaType(&type);
         type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
         type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
-        reader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, type);
+        hr = reader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, type);
         type->Release();
+        if (FAILED(hr)) { lastError = "Set media type failed"; return false; }
 
         IMFMediaType* actual = nullptr;
         reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, &actual);
         MFGetAttributeSize(actual, MF_MT_FRAME_SIZE, &width, &height);
         actual->Release();
 
-        PROPVARIANT var;
-        PropVariantInit(&var);
-        if (SUCCEEDED(reader->GetPresentationAttribute(MF_SOURCE_READER_MEDIASOURCE, MF_PD_DURATION, &var))) {
-            duration100ns = var.hVal.QuadPart;
-            PropVariantClear(&var);
-        }
+        if (width == 0 || height == 0) { lastError = "Invalid size"; return false; }
 
         glGenTextures(1, &texture);
         glBindTexture(GL_TEXTURE_2D, texture);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_BGRA, GL_UNSIGNED_BYTE, nullptr);
+
+        lastError.clear();
         return true;
     }
 
@@ -115,10 +115,11 @@ public:
         DWORD flags = 0;
         IMFSample* sample = nullptr;
         HRESULT hr = reader->ReadSample(MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, nullptr, &flags, nullptr, &sample);
+        if (flags & MF_SOURCE_READERF_ENDOFSTREAM) return false;
         if (FAILED(hr) || !sample) return false;
 
         IMFMediaBuffer* buffer = nullptr;
-        sample->ConvertToContiguousBuffer(&buffer);
+        if (FAILED(sample->ConvertToContiguousBuffer(&buffer))) { sample->Release(); return false; }
         BYTE* data = nullptr;
         DWORD len = 0;
         buffer->Lock(&data, nullptr, &len);
@@ -139,8 +140,6 @@ public:
         MFShutdown();
         hasFrame = false;
     }
-
-    float GetDuration() const { return (float)(duration100ns / 10000000.0); }
 };
 
 VideoPlayer* player = nullptr;
@@ -209,17 +208,28 @@ void EnsurePlayerForClip(int clipIdx) {
     int mid = clips[clipIdx].mediaId;
     if (mid == playingMediaId && player && player->reader) return;
     if (!player) player = new VideoPlayer();
+    previewStatus = "Opening...";
     if (player->Open(media[mid].path)) {
         playingMediaId = mid;
         float localTime = currentTime - clips[clipIdx].startTime;
         if (localTime < 0) localTime = 0;
         player->Seek(localTime);
-        player->GrabFrame();
+        if (player->GrabFrame()) {
+            previewStatus = "Frame OK";
+        } else {
+            previewStatus = "Grab failed";
+        }
+    } else {
+        previewStatus = player->lastError.empty() ? "Open failed" : player->lastError;
     }
 #endif
 }
 
 int main(int argc, char* argv[]) {
+#ifdef _WIN32
+    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+#endif
+
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_TIMER) < 0) return 1;
 
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
@@ -317,7 +327,7 @@ int main(int argc, char* argv[]) {
         ImGui::SameLine();
 
         ImGui::BeginChild("Preview", ImVec2(0, topH), true);
-        ImGui::Text("Preview");
+        ImGui::Text("Preview | %s", previewStatus.c_str());
         ImVec2 avail = ImGui::GetContentRegionAvail();
         ImVec2 prevSize(avail.x, avail.y - 8);
         ImGui::InvisibleButton("prev", prevSize);
@@ -339,10 +349,10 @@ int main(int argc, char* argv[]) {
             if (player && player->hasFrame && player->texture) {
                 ImVec2 texP0 = p0;
                 ImVec2 texP1 = p1;
-                float aspect = (player->height > 0) ? (float)player->width / player->height : 16.0f/9.0f;
+                float aspect = (player->height > 0) ? (float)player->width / (float)player->height : 16.0f/9.0f;
                 float areaW = p1.x - p0.x;
                 float areaH = p1.y - p0.y;
-                float areaAspect = areaW / areaH;
+                float areaAspect = areaW / std::max(1.0f, areaH);
                 if (aspect > areaAspect) {
                     float h = areaW / aspect;
                     float off = (areaH - h) * 0.5f;
@@ -354,13 +364,14 @@ int main(int argc, char* argv[]) {
                 }
                 dl->AddImage((ImTextureID)(intptr_t)player->texture, texP0, texP1);
             } else {
-                dl->AddText(ImVec2(p0.x+12, p0.y+12), IM_COL32(200,200,200,255), "Loading frame...");
+                dl->AddText(ImVec2(p0.x+12, p0.y+12), IM_COL32(200,200,200,255), previewStatus.c_str());
             }
         } else {
-            dl->AddText(ImVec2(p0.x+12, p0.y+12), IM_COL32(140,140,140,255), "No video");
+            dl->AddText(ImVec2(p0.x+12, p0.y+12), IM_COL32(140,140,140,255), "No video on timeline");
+            previewStatus = "No video";
         }
 #else
-        dl->AddText(ImVec2(p0.x+12, p0.y+12), IM_COL32(140,140,140,255), "Video preview (Windows only for now)");
+        dl->AddText(ImVec2(p0.x+12, p0.y+12), IM_COL32(140,140,140,255), "Video preview (Windows only)");
 #endif
         ImGui::EndChild();
 
@@ -437,7 +448,7 @@ int main(int argc, char* argv[]) {
             if (topClip >= 0 && player) {
                 static float accum = 0;
                 accum += io.DeltaTime;
-                if (accum > 0.033f) {
+                if (accum > 0.04f) {
                     player->GrabFrame();
                     accum = 0;
                 }
@@ -455,6 +466,7 @@ int main(int argc, char* argv[]) {
 
 #ifdef _WIN32
     if (player) { delete player; player = nullptr; }
+    CoUninitialize();
 #endif
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplSDL2_Shutdown();
