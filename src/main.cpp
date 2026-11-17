@@ -28,15 +28,19 @@ struct Clip {
     int mediaId = -1;
     float startTime = 0.0f;
     float duration = 5.0f;
+    float trimStart = 0.0f;
+    float trimEnd = 0.0f;
     int track = 0;
 };
 
 std::vector<MediaItem> media;
 std::vector<Clip> clips;
 float currentTime = 0.0f;
-float pixelsPerSecond = 40.0f;
+float pixelsPerSecond = 50.0f;
 bool isPlaying = false;
 bool snapEnabled = true;
+int selectedClip = -1;
+int activeTool = 0;
 
 HWND GetSDLWindowHandle(SDL_Window* window) {
 #ifdef _WIN32
@@ -58,11 +62,9 @@ std::string OpenFileDialog(HWND owner) {
     ofn.lpstrFilter = "Video Files\0*.mp4;*.mov;*.avi;*.mkv\0Audio Files\0*.mp3;*.wav;*.aac\0Image Files\0*.jpg;*.jpeg;*.png;*.bmp\0All Files\0*.*\0";
     ofn.lpstrFile = filename;
     ofn.nMaxFile = MAX_PATH;
-    ofn.lpstrTitle = "Import Media - DaniWorldsStudio";
+    ofn.lpstrTitle = "Import Media";
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER | OFN_NOCHANGEDIR;
-    if (GetOpenFileNameA(&ofn)) {
-        return std::string(filename);
-    }
+    if (GetOpenFileNameA(&ofn)) return std::string(filename);
 #endif
     return "";
 }
@@ -82,8 +84,22 @@ void AddMedia(const std::string& path) {
         m.type = "audio";
     else
         m.type = "image";
-    m.duration = (m.type == "image") ? 5.0f : 8.0f;
+    m.duration = (m.type == "image") ? 5.0f : 10.0f;
     media.push_back(m);
+}
+
+void DrawThumbnail(ImDrawList* dl, ImVec2 p0, ImVec2 p1, const MediaItem& m) {
+    ImU32 bg = (m.type == "video") ? IM_COL32(50, 90, 160, 255) :
+               (m.type == "audio") ? IM_COL32(50, 130, 70, 255) : IM_COL32(120, 70, 140, 255);
+    dl->AddRectFilled(p0, p1, bg, 4.0f);
+    dl->AddRect(p0, p1, IM_COL32(180, 180, 180, 100), 4.0f);
+    const char* icon = (m.type == "video") ? "VID" : (m.type == "audio") ? "AUD" : "IMG";
+    ImVec2 textSize = ImGui::CalcTextSize(icon);
+    dl->AddText(ImVec2(p0.x + (p1.x - p0.x - textSize.x) * 0.5f, p0.y + (p1.y - p0.y - textSize.y) * 0.4f),
+                IM_COL32(255, 255, 255, 220), icon);
+    char dur[16];
+    snprintf(dur, sizeof(dur), "%.1fs", m.duration);
+    dl->AddText(ImVec2(p0.x + 4, p1.y - 16), IM_COL32(255, 255, 255, 200), dur);
 }
 
 int main(int argc, char* argv[]) {
@@ -94,8 +110,7 @@ int main(int argc, char* argv[]) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
 
     SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio Desktop",
-        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-        1600, 900,
+        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900,
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
 
     if (!window) { SDL_Quit(); return 1; }
@@ -109,6 +124,10 @@ int main(int argc, char* argv[]) {
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
     ImGui::StyleColorsDark();
+    ImGuiStyle& style = ImGui::GetStyle();
+    style.FrameRounding = 3.0f;
+    style.WindowRounding = 4.0f;
+
     ImGui_ImplSDL2_InitForOpenGL(window, gl_context);
     ImGui_ImplOpenGL3_Init("#version 130");
 
@@ -120,6 +139,12 @@ int main(int argc, char* argv[]) {
             ImGui_ImplSDL2_ProcessEvent(&event);
             if (event.type == SDL_QUIT) running = false;
             if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_ESCAPE) running = false;
+            if (event.type == SDL_KEYDOWN && (event.key.keysym.sym == SDLK_DELETE || event.key.keysym.sym == SDLK_BACKSPACE)) {
+                if (selectedClip >= 0 && selectedClip < (int)clips.size()) {
+                    clips.erase(clips.begin() + selectedClip);
+                    selectedClip = -1;
+                }
+            }
         }
 
         ImGui_ImplOpenGL3_NewFrame();
@@ -132,12 +157,10 @@ int main(int argc, char* argv[]) {
 
         if (ImGui::Button("Import")) {
             std::string path = OpenFileDialog(hwnd);
-            if (!path.empty()) {
-                AddMedia(path);
-            }
+            if (!path.empty()) AddMedia(path);
         }
         ImGui::SameLine();
-        if (ImGui::Button(snapEnabled ? "Snap: ON" : "Snap: OFF")) snapEnabled = !snapEnabled;
+        if (ImGui::Button(snapEnabled ? "Snap ON" : "Snap OFF")) snapEnabled = !snapEnabled;
         ImGui::SameLine();
         if (ImGui::Button("Play")) isPlaying = true;
         ImGui::SameLine();
@@ -145,32 +168,29 @@ int main(int argc, char* argv[]) {
         ImGui::SameLine();
         if (ImGui::Button("Stop")) { isPlaying = false; currentTime = 0; }
         ImGui::SameLine();
-        ImGui::Text("| Time: %.2f | Media: %d | ESC=Exit", currentTime, (int)media.size());
+        ImGui::Text("| %.2fs | Media: %d | ESC=Exit", currentTime, (int)media.size());
 
         ImGui::Separator();
 
-        float topH = io.DisplaySize.y * 0.40f;
-        ImGui::BeginChild("Media", ImVec2(io.DisplaySize.x * 0.28f, topH), true);
-        ImGui::Text("Media Library (%d)", (int)media.size());
+        float topH = io.DisplaySize.y * 0.38f;
+
+        ImGui::BeginChild("Media", ImVec2(io.DisplaySize.x * 0.26f, topH), true);
+        ImGui::Text("Media Library");
         ImGui::Separator();
         for (int i = 0; i < (int)media.size(); i++) {
             const auto& m = media[i];
             ImGui::PushID(i);
-            float thumbW = 110.0f;
-            float thumbH = thumbW / m.aspect;
+            float thumbW = 100.0f;
+            float thumbH = 56.0f;
             ImGui::Button("##thumb", ImVec2(thumbW, thumbH));
             ImDrawList* dl = ImGui::GetWindowDrawList();
             ImVec2 p0 = ImGui::GetItemRectMin();
             ImVec2 p1 = ImGui::GetItemRectMax();
-            ImU32 col = (m.type == "video") ? IM_COL32(70,120,200,255) :
-                        (m.type == "audio") ? IM_COL32(80,160,90,255) : IM_COL32(160,100,180,255);
-            dl->AddRectFilled(p0, p1, col);
-            dl->AddText(ImVec2(p0.x + 4, p1.y - 16), IM_COL32(255,255,255,255), m.type.c_str());
+            DrawThumbnail(dl, p0, p1, m);
             ImGui::TextUnformatted(m.name.c_str());
-            ImGui::Text("%.1fs", m.duration);
             if (ImGui::BeginDragDropSource()) {
                 ImGui::SetDragDropPayload("MEDIA", &i, sizeof(int));
-                ImGui::TextUnformatted(m.name.c_str());
+                ImGui::Text("%s", m.name.c_str());
                 ImGui::EndDragDropSource();
             }
             ImGui::PopID();
@@ -183,28 +203,41 @@ int main(int argc, char* argv[]) {
         ImGui::BeginChild("Preview", ImVec2(0, topH), true);
         ImGui::Text("Preview");
         ImVec2 avail = ImGui::GetContentRegionAvail();
-        ImGui::InvisibleButton("prev", ImVec2(avail.x, avail.y - 10));
+        ImGui::InvisibleButton("prev", ImVec2(avail.x, avail.y - 8));
         ImDrawList* dl = ImGui::GetWindowDrawList();
         ImVec2 p0 = ImGui::GetItemRectMin();
         ImVec2 p1 = ImGui::GetItemRectMax();
-        dl->AddRectFilled(p0, p1, IM_COL32(0,0,0,255));
+        dl->AddRectFilled(p0, p1, IM_COL32(0, 0, 0, 255));
         int topClip = -1;
         for (int i = (int)clips.size() - 1; i >= 0; --i) {
             if (clips[i].track >= 3) continue;
             if (currentTime >= clips[i].startTime && currentTime < clips[i].startTime + clips[i].duration)
                 topClip = i;
         }
-        if (topClip >= 0 && topClip < (int)clips.size()) {
-            dl->AddText(ImVec2(p0.x + 10, p0.y + 10), IM_COL32(220,220,220,255), media[clips[topClip].mediaId].name.c_str());
+        if (topClip >= 0) {
+            dl->AddText(ImVec2(p0.x + 12, p0.y + 12), IM_COL32(220, 220, 220, 255), media[clips[topClip].mediaId].name.c_str());
         } else {
-            dl->AddText(ImVec2(p0.x + 10, p0.y + 10), IM_COL32(150,150,150,255), "No video");
+            dl->AddText(ImVec2(p0.x + 12, p0.y + 12), IM_COL32(140, 140, 140, 255), "No video");
         }
         ImGui::EndChild();
 
+        ImGui::Separator();
+        ImGui::Text("Tools:");
+        ImGui::SameLine();
+        if (ImGui::RadioButton("Select", activeTool == 0)) activeTool = 0;
+        ImGui::SameLine();
+        if (ImGui::RadioButton("Trim", activeTool == 1)) activeTool = 1;
+        ImGui::SameLine();
+        if (ImGui::RadioButton("Split", activeTool == 2)) activeTool = 2;
+        ImGui::SameLine();
+        ImGui::Text("| Del = Delete selected");
+
+        ImGui::Separator();
+
         ImGui::BeginChild("Timeline", ImVec2(0, 0), true);
-        ImGui::Text("Timeline");
         const char* trackNames[] = {"V1", "V2", "V3", "A1", "A2", "A3"};
-        float trackH = 34.0f;
+        float trackH = 40.0f;
+
         for (int t = 0; t < 6; t++) {
             ImGui::PushID(t);
             ImGui::BeginChild("track", ImVec2(0, trackH), true);
@@ -213,47 +246,61 @@ int main(int argc, char* argv[]) {
             ImVec2 trackStart = ImGui::GetCursorScreenPos();
             float trackW = ImGui::GetContentRegionAvail().x;
             ImGui::InvisibleButton("trackbg", ImVec2(trackW, trackH - 6));
+
             if (ImGui::BeginDragDropTarget()) {
                 if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("MEDIA")) {
                     int mid = *(const int*)payload->Data;
                     if (mid >= 0 && mid < (int)media.size()) {
-                        Clip c;
-                        c.mediaId = mid;
-                        c.duration = media[mid].duration;
-                        c.startTime = 0.0f;
-                        c.track = t;
-                        clips.push_back(c);
+                        bool isVideo = (media[mid].type == "video" || media[mid].type == "image");
+                        bool isAudio = (media[mid].type == "audio");
+                        if ((t < 3 && isVideo) || (t >= 3 && isAudio)) {
+                            Clip c;
+                            c.mediaId = mid;
+                            c.duration = media[mid].duration;
+                            c.startTime = 0.0f;
+                            c.track = t;
+                            clips.push_back(c);
+                        }
                     }
                 }
                 ImGui::EndDragDropTarget();
             }
+
             ImDrawList* tdl = ImGui::GetWindowDrawList();
             for (int i = 0; i < (int)clips.size(); i++) {
                 if (clips[i].track != t) continue;
                 float x = trackStart.x + clips[i].startTime * pixelsPerSecond;
-                float w = std::max(20.0f, clips[i].duration * pixelsPerSecond);
+                float w = std::max(24.0f, clips[i].duration * pixelsPerSecond);
                 ImVec2 cp0(x, trackStart.y);
                 ImVec2 cp1(x + w, trackStart.y + trackH - 8);
-                ImU32 ccol = (t < 3) ? IM_COL32(70,140,220,200) : IM_COL32(90,180,100,200);
+                ImU32 ccol = (t < 3) ? IM_COL32(60, 120, 200, 210) : IM_COL32(70, 160, 90, 210);
                 tdl->AddRectFilled(cp0, cp1, ccol, 3.0f);
-                std::string label = media[clips[i].mediaId].name.substr(0, 14);
-                tdl->AddText(ImVec2(cp0.x + 4, cp0.y + 2), IM_COL32(255,255,255,255), label.c_str());
+                if (i == selectedClip)
+                    tdl->AddRect(cp0, cp1, IM_COL32(255, 220, 60, 255), 3.0f, 0, 2.0f);
+
+                std::string label = media[clips[i].mediaId].name.substr(0, 16);
+                tdl->AddText(ImVec2(cp0.x + 4, cp0.y + 4), IM_COL32(255, 255, 255, 230), label.c_str());
+
+                if (ImGui::IsMouseClicked(0) && ImGui::IsMouseHoveringRect(cp0, cp1)) {
+                    selectedClip = i;
+                }
             }
             ImGui::EndChild();
             ImGui::PopID();
         }
-        ImVec2 tlMin = ImGui::GetWindowPos();
-        float phX = tlMin.x + 50 + currentTime * pixelsPerSecond;
-        ImGui::GetWindowDrawList()->AddLine(ImVec2(phX, tlMin.y + 18), ImVec2(phX, tlMin.y + 240), IM_COL32(255,60,60,255), 2.0f);
-        ImGui::EndChild();
 
+        ImVec2 tlMin = ImGui::GetWindowPos();
+        float phX = tlMin.x + 48 + currentTime * pixelsPerSecond;
+        ImGui::GetWindowDrawList()->AddLine(ImVec2(phX, tlMin.y + 10), ImVec2(phX, tlMin.y + 280), IM_COL32(255, 50, 50, 255), 2.0f);
+
+        ImGui::EndChild();
         ImGui::End();
 
         if (isPlaying) currentTime += io.DeltaTime;
 
         ImGui::Render();
         glViewport(0, 0, (int)io.DisplaySize.x, (int)io.DisplaySize.y);
-        glClearColor(0.04f, 0.04f, 0.04f, 1.0f);
+        glClearColor(0.05f, 0.05f, 0.05f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         SDL_GL_SwapWindow(window);
