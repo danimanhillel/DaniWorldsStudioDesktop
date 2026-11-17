@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(DaniWorldsStudioDesktop VERSION 0.2.0 LANGUAGES CXX)
+project(DaniWorldsStudioDesktop VERSION 0.3.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -28,6 +28,20 @@ FetchContent_MakeAvailable(imgui)
 
 find_package(OpenGL REQUIRED)
 
+# FFmpeg (user must have it installed or use vcpkg)
+# On Windows with vcpkg: cmake .. -DCMAKE_TOOLCHAIN_FILE=[vcpkg]/scripts/buildsystems/vcpkg.cmake
+find_package(PkgConfig QUIET)
+if(PkgConfig_FOUND)
+    pkg_check_modules(FFMPEG QUIET libavcodec libavformat libavutil libswscale)
+endif()
+
+if(NOT FFMPEG_FOUND)
+    # Fallback: look for common locations or let user set FFMPEG_DIR
+    set(FFMPEG_INCLUDE_DIRS "" CACHE PATH "FFmpeg include directory")
+    set(FFMPEG_LIBRARIES "" CACHE STRING "FFmpeg libraries")
+    message(STATUS "FFmpeg not found via pkg-config. Set FFMPEG_INCLUDE_DIRS and FFMPEG_LIBRARIES or use vcpkg.")
+endif()
+
 add_executable(DaniWorldsStudioDesktop
     src/main.cpp
     ${imgui_SOURCE_DIR}/imgui.cpp
@@ -43,6 +57,14 @@ target_include_directories(DaniWorldsStudioDesktop PRIVATE
     ${imgui_SOURCE_DIR}
     ${imgui_SOURCE_DIR}/backends
 )
+
+if(FFMPEG_FOUND)
+    target_include_directories(DaniWorldsStudioDesktop PRIVATE ${FFMPEG_INCLUDE_DIRS})
+    target_link_libraries(DaniWorldsStudioDesktop PRIVATE ${FFMPEG_LIBRARIES})
+    target_compile_definitions(DaniWorldsStudioDesktop PRIVATE HAVE_FFMPEG)
+else()
+    message(WARNING "FFmpeg not linked. Video preview will be limited.")
+endif()
 
 target_link_libraries(DaniWorldsStudioDesktop
     PRIVATE
