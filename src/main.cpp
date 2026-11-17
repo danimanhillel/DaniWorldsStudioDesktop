@@ -98,6 +98,7 @@ float timeOriginX = 0.0f;
 int exAspect = 0;
 int exRes = 1;
 int exFpsIdx = 1;
+bool requestExport = false;
 int mediaMenuIndex = -1;
 bool openMediaMenu = false;
 
@@ -1643,7 +1644,7 @@ int main(int argc, char* argv[]) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
-    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 7",
+    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 8",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900,
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!window) { SDL_Quit(); return 1; }
