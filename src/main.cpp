@@ -49,6 +49,7 @@ bool snapEnabled = true;
 int selectedClip = -1;
 int activeTool = 0;
 std::string previewStatus = "Ready";
+bool draggingPlayhead = false;
 
 #ifdef _WIN32
 class VideoPlayer {
@@ -94,6 +95,9 @@ public:
         glBindTexture(GL_TEXTURE_2D, texture);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        // Allocate empty texture first
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_BGRA, GL_UNSIGNED_BYTE, nullptr);
 
         lastError.clear();
@@ -111,7 +115,7 @@ public:
     }
 
     bool GrabFrame() {
-        if (!reader) return false;
+        if (!reader || texture == 0) return false;
         DWORD flags = 0;
         IMFSample* sample = nullptr;
         HRESULT hr = reader->ReadSample(MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, nullptr, &flags, nullptr, &sample);
@@ -124,8 +128,10 @@ public:
         DWORD len = 0;
         buffer->Lock(&data, nullptr, &len);
 
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
         glBindTexture(GL_TEXTURE_2D, texture);
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_BGRA, GL_UNSIGNED_BYTE, data);
+        glGenerateMipmap(GL_TEXTURE_2D);
 
         buffer->Unlock();
         buffer->Release();
@@ -436,13 +442,30 @@ int main(int argc, char* argv[]) {
             ImGui::PopID();
         }
 
+        // Playhead (draggable)
         ImVec2 tlMin = ImGui::GetWindowPos();
         float phX = tlMin.x + 50 + currentTime * pixelsPerSecond;
         ImGui::GetWindowDrawList()->AddLine(ImVec2(phX, tlMin.y+8), ImVec2(phX, tlMin.y+290), IM_COL32(255,50,50,255), 2.0f);
+
+        // Drag playhead
+        if (ImGui::IsMouseClicked(0) && ImGui::IsMouseHoveringRect(ImVec2(phX-6, tlMin.y), ImVec2(phX+6, tlMin.y+290))) {
+            draggingPlayhead = true;
+        }
+        if (draggingPlayhead) {
+            if (ImGui::IsMouseDown(0)) {
+                float mouseX = ImGui::GetMousePos().x;
+                float newTime = (mouseX - (tlMin.x + 50)) / pixelsPerSecond;
+                if (newTime < 0) newTime = 0;
+                currentTime = newTime;
+            } else {
+                draggingPlayhead = false;
+            }
+        }
+
         ImGui::EndChild();
         ImGui::End();
 
-        if (isPlaying) {
+        if (isPlaying && !draggingPlayhead) {
             currentTime += io.DeltaTime;
 #ifdef _WIN32
             if (topClip >= 0 && player) {
