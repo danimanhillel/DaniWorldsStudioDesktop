@@ -941,11 +941,11 @@ void ExportSession::Step() {
     if (frameIndex >= total) { Finish(true); return; }
     double t = (double)frameIndex / (double)fps;
     std::fill(canvas.begin(), canvas.end(), 0);
-    int top = -1, bestTrack = -1;
+    int top = -1, bestTrack = 99;
     for (int i = 0; i < (int)clips.size(); i++) {
         if (clips[i].track >= 3) continue;
         if (t < clips[i].startTime || t >= clips[i].startTime + clips[i].duration) continue;
-        if (clips[i].track >= bestTrack) { bestTrack = clips[i].track; top = i; }
+        if (clips[i].track <= bestTrack) { bestTrack = clips[i].track; top = i; }
     }
     if (top >= 0) {
         const Clip& c = clips[top];
@@ -1592,7 +1592,7 @@ int main(int argc, char* argv[]) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
-    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 5",
+    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 6",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900,
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!window) { SDL_Quit(); return 1; }
@@ -1727,11 +1727,11 @@ int main(int argc, char* argv[]) {
         previewMax = p1;
 
         topClip = -1;
-        int bestTrack = -1;
+        int bestTrack = 99;
         for (int i = 0; i < (int)clips.size(); i++) {
             if (clips[i].track >= 3) continue;
             if (currentTime < clips[i].startTime || currentTime >= clips[i].startTime + clips[i].duration) continue;
-            if (clips[i].track >= bestTrack) {
+            if (clips[i].track <= bestTrack) {
                 bestTrack = clips[i].track;
                 topClip = i;
             }
