@@ -28,18 +28,24 @@ FetchContent_MakeAvailable(imgui)
 
 find_package(OpenGL REQUIRED)
 
-# FFmpeg (user must have it installed or use vcpkg)
-# On Windows with vcpkg: cmake .. -DCMAKE_TOOLCHAIN_FILE=[vcpkg]/scripts/buildsystems/vcpkg.cmake
-find_package(PkgConfig QUIET)
-if(PkgConfig_FOUND)
-    pkg_check_modules(FFMPEG QUIET libavcodec libavformat libavutil libswscale)
-endif()
+# FFmpeg - prefer user-provided paths
+set(FFMPEG_INCLUDE_DIRS "" CACHE PATH "FFmpeg include directory")
+set(FFMPEG_LIBRARIES "" CACHE STRING "FFmpeg libraries (semicolon-separated)")
 
-if(NOT FFMPEG_FOUND)
-    # Fallback: look for common locations or let user set FFMPEG_DIR
-    set(FFMPEG_INCLUDE_DIRS "" CACHE PATH "FFmpeg include directory")
-    set(FFMPEG_LIBRARIES "" CACHE STRING "FFmpeg libraries")
-    message(STATUS "FFmpeg not found via pkg-config. Set FFMPEG_INCLUDE_DIRS and FFMPEG_LIBRARIES or use vcpkg.")
+set(HAVE_FFMPEG FALSE)
+if(FFMPEG_INCLUDE_DIRS AND FFMPEG_LIBRARIES)
+    set(HAVE_FFMPEG TRUE)
+    message(STATUS "Using user-provided FFmpeg")
+else()
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(FFMPEG QUIET libavcodec libavformat libavutil libswscale)
+        if(FFMPEG_FOUND)
+            set(HAVE_FFMPEG TRUE)
+            set(FFMPEG_INCLUDE_DIRS ${FFMPEG_INCLUDE_DIRS})
+            set(FFMPEG_LIBRARIES ${FFMPEG_LIBRARIES})
+        endif()
+    endif()
 endif()
 
 add_executable(DaniWorldsStudioDesktop
@@ -58,10 +64,11 @@ target_include_directories(DaniWorldsStudioDesktop PRIVATE
     ${imgui_SOURCE_DIR}/backends
 )
 
-if(FFMPEG_FOUND)
+if(HAVE_FFMPEG)
     target_include_directories(DaniWorldsStudioDesktop PRIVATE ${FFMPEG_INCLUDE_DIRS})
     target_link_libraries(DaniWorldsStudioDesktop PRIVATE ${FFMPEG_LIBRARIES})
     target_compile_definitions(DaniWorldsStudioDesktop PRIVATE HAVE_FFMPEG)
+    message(STATUS "FFmpeg enabled")
 else()
     message(WARNING "FFmpeg not linked. Video preview will be limited.")
 endif()
