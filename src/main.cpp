@@ -13,7 +13,15 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <commdlg.h>
+#include <mfapi.h>
+#include <mfidl.h>
+#include <mfreadwrite.h>
+#include <mferror.h>
+#pragma comment(lib, "mfplat.lib")
+#pragma comment(lib, "mfreadwrite.lib")
+#pragma comment(lib, "mfuuid.lib")
 #pragma comment(lib, "comdlg32.lib")
+#pragma comment(lib, "ole32.lib")
 #endif
 
 struct MediaItem {
@@ -39,6 +47,105 @@ bool isPlaying = false;
 bool snapEnabled = true;
 int selectedClip = -1;
 int activeTool = 0;
+
+#ifdef _WIN32
+class VideoPlayer {
+public:
+    IMFSourceReader* reader = nullptr;
+    UINT32 width = 0, height = 0;
+    GLuint texture = 0;
+    bool hasFrame = false;
+    LONGLONG duration100ns = 0;
+
+    ~VideoPlayer() { Close(); }
+
+    bool Open(const std::string& path) {
+        Close();
+        HRESULT hr = MFStartup(MF_VERSION);
+        if (FAILED(hr)) return false;
+
+        std::wstring wpath(path.begin(), path.end());
+        IMFAttributes* attrs = nullptr;
+        MFCreateAttributes(&attrs, 1);
+        attrs->SetUINT32(MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, TRUE);
+
+        hr = MFCreateSourceReaderFromURL(wpath.c_str(), attrs, &reader);
+        if (attrs) attrs->Release();
+        if (FAILED(hr)) return false;
+
+        IMFMediaType* type = nullptr;
+        MFCreateMediaType(&type);
+        type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+        type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
+        reader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, type);
+        type->Release();
+
+        IMFMediaType* actual = nullptr;
+        reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, &actual);
+        MFGetAttributeSize(actual, MF_MT_FRAME_SIZE, &width, &height);
+        actual->Release();
+
+        PROPVARIANT var;
+        PropVariantInit(&var);
+        if (SUCCEEDED(reader->GetPresentationAttribute(MF_SOURCE_READER_MEDIASOURCE, MF_PD_DURATION, &var))) {
+            duration100ns = var.hVal.QuadPart;
+            PropVariantClear(&var);
+        }
+
+        glGenTextures(1, &texture);
+        glBindTexture(GL_TEXTURE_2D, texture);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_BGRA, GL_UNSIGNED_BYTE, nullptr);
+        return true;
+    }
+
+    void Seek(float seconds) {
+        if (!reader) return;
+        PROPVARIANT var;
+        PropVariantInit(&var);
+        var.vt = VT_I8;
+        var.hVal.QuadPart = (LONGLONG)(seconds * 10000000.0);
+        reader->SetCurrentPosition(GUID_NULL, var);
+        PropVariantClear(&var);
+    }
+
+    bool GrabFrame() {
+        if (!reader) return false;
+        DWORD flags = 0;
+        IMFSample* sample = nullptr;
+        HRESULT hr = reader->ReadSample(MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, nullptr, &flags, nullptr, &sample);
+        if (FAILED(hr) || !sample) return false;
+
+        IMFMediaBuffer* buffer = nullptr;
+        sample->ConvertToContiguousBuffer(&buffer);
+        BYTE* data = nullptr;
+        DWORD len = 0;
+        buffer->Lock(&data, nullptr, &len);
+
+        glBindTexture(GL_TEXTURE_2D, texture);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_BGRA, GL_UNSIGNED_BYTE, data);
+
+        buffer->Unlock();
+        buffer->Release();
+        sample->Release();
+        hasFrame = true;
+        return true;
+    }
+
+    void Close() {
+        if (texture) { glDeleteTextures(1, &texture); texture = 0; }
+        if (reader) { reader->Release(); reader = nullptr; }
+        MFShutdown();
+        hasFrame = false;
+    }
+
+    float GetDuration() const { return (float)(duration100ns / 10000000.0); }
+};
+
+VideoPlayer* player = nullptr;
+int playingMediaId = -1;
+#endif
 
 HWND GetSDLWindowHandle(SDL_Window* window) {
 #ifdef _WIN32
@@ -96,6 +203,22 @@ void DrawThumbnail(ImDrawList* dl, ImVec2 p0, ImVec2 p1, const MediaItem& m) {
     dl->AddText(ImVec2(p0.x+4, p1.y-16), IM_COL32(255,255,255,200), dur);
 }
 
+void EnsurePlayerForClip(int clipIdx) {
+#ifdef _WIN32
+    if (clipIdx < 0 || clipIdx >= (int)clips.size()) return;
+    int mid = clips[clipIdx].mediaId;
+    if (mid == playingMediaId && player && player->reader) return;
+    if (!player) player = new VideoPlayer();
+    if (player->Open(media[mid].path)) {
+        playingMediaId = mid;
+        float localTime = currentTime - clips[clipIdx].startTime;
+        if (localTime < 0) localTime = 0;
+        player->Seek(localTime);
+        player->GrabFrame();
+    }
+#endif
+}
+
 int main(int argc, char* argv[]) {
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_TIMER) < 0) return 1;
 
@@ -129,11 +252,14 @@ int main(int argc, char* argv[]) {
         while (SDL_PollEvent(&event)) {
             ImGui_ImplSDL2_ProcessEvent(&event);
             if (event.type == SDL_QUIT) running = false;
-            if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_ESCAPE) running = false;
-            if (event.type == SDL_KEYDOWN && (event.key.keysym.sym == SDLK_DELETE || event.key.keysym.sym == SDLK_BACKSPACE)) {
-                if (selectedClip >= 0 && selectedClip < (int)clips.size()) {
-                    clips.erase(clips.begin() + selectedClip);
-                    selectedClip = -1;
+            if (event.type == SDL_KEYDOWN) {
+                if (event.key.keysym.sym == SDLK_ESCAPE) running = false;
+                if (event.key.keysym.sym == SDLK_SPACE) isPlaying = !isPlaying;
+                if (event.key.keysym.sym == SDLK_DELETE || event.key.keysym.sym == SDLK_BACKSPACE) {
+                    if (selectedClip >= 0 && selectedClip < (int)clips.size()) {
+                        clips.erase(clips.begin() + selectedClip);
+                        selectedClip = -1;
+                    }
                 }
             }
         }
@@ -159,18 +285,17 @@ int main(int argc, char* argv[]) {
         ImGui::SameLine();
         if (ImGui::Button("Stop")) { isPlaying = false; currentTime = 0; }
         ImGui::SameLine();
-        ImGui::Text("| %.2fs | Media: %d | ESC=Exit", currentTime, (int)media.size());
+        ImGui::Text("| %.2fs | Media: %d | Space=Play/Pause | ESC=Exit", currentTime, (int)media.size());
 
         ImGui::Separator();
         float topH = io.DisplaySize.y * 0.38f;
 
         ImGui::BeginChild("Media", ImVec2(io.DisplaySize.x * 0.26f, topH), true);
-        ImGui::Text("Media Library (drag to timeline)");
+        ImGui::Text("Media Library");
         ImGui::Separator();
         for (int i = 0; i < (int)media.size(); i++) {
             const auto& m = media[i];
             ImGui::PushID(i);
-
             ImGui::BeginGroup();
             ImGui::Button("##dragitem", ImVec2(120, 70));
             ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -179,7 +304,6 @@ int main(int argc, char* argv[]) {
             DrawThumbnail(dl, p0, p1, m);
             ImGui::TextWrapped("%s", m.name.c_str());
             ImGui::EndGroup();
-
             if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
                 ImGui::SetDragDropPayload("MEDIA", &i, sizeof(int));
                 ImGui::Text("Dragging: %s", m.name.c_str());
@@ -195,21 +319,49 @@ int main(int argc, char* argv[]) {
         ImGui::BeginChild("Preview", ImVec2(0, topH), true);
         ImGui::Text("Preview");
         ImVec2 avail = ImGui::GetContentRegionAvail();
-        ImGui::InvisibleButton("prev", ImVec2(avail.x, avail.y - 8));
+        ImVec2 prevSize(avail.x, avail.y - 8);
+        ImGui::InvisibleButton("prev", prevSize);
         ImDrawList* dl = ImGui::GetWindowDrawList();
         ImVec2 p0 = ImGui::GetItemRectMin();
         ImVec2 p1 = ImGui::GetItemRectMax();
         dl->AddRectFilled(p0, p1, IM_COL32(0,0,0,255));
+
         int topClip = -1;
         for (int i = (int)clips.size()-1; i >= 0; --i) {
             if (clips[i].track >= 3) continue;
             if (currentTime >= clips[i].startTime && currentTime < clips[i].startTime + clips[i].duration)
                 topClip = i;
         }
-        if (topClip >= 0)
-            dl->AddText(ImVec2(p0.x+12, p0.y+12), IM_COL32(220,220,220,255), media[clips[topClip].mediaId].name.c_str());
-        else
+
+#ifdef _WIN32
+        if (topClip >= 0) {
+            EnsurePlayerForClip(topClip);
+            if (player && player->hasFrame && player->texture) {
+                ImVec2 texP0 = p0;
+                ImVec2 texP1 = p1;
+                float aspect = (player->height > 0) ? (float)player->width / player->height : 16.0f/9.0f;
+                float areaW = p1.x - p0.x;
+                float areaH = p1.y - p0.y;
+                float areaAspect = areaW / areaH;
+                if (aspect > areaAspect) {
+                    float h = areaW / aspect;
+                    float off = (areaH - h) * 0.5f;
+                    texP0.y += off; texP1.y -= off;
+                } else {
+                    float w = areaH * aspect;
+                    float off = (areaW - w) * 0.5f;
+                    texP0.x += off; texP1.x -= off;
+                }
+                dl->AddImage((ImTextureID)(intptr_t)player->texture, texP0, texP1);
+            } else {
+                dl->AddText(ImVec2(p0.x+12, p0.y+12), IM_COL32(200,200,200,255), "Loading frame...");
+            }
+        } else {
             dl->AddText(ImVec2(p0.x+12, p0.y+12), IM_COL32(140,140,140,255), "No video");
+        }
+#else
+        dl->AddText(ImVec2(p0.x+12, p0.y+12), IM_COL32(140,140,140,255), "Video preview (Windows only for now)");
+#endif
         ImGui::EndChild();
 
         ImGui::Separator();
@@ -230,10 +382,8 @@ int main(int argc, char* argv[]) {
             ImGui::BeginChild("track", ImVec2(0, trackH), true);
             ImGui::Text("%s", trackNames[t]);
             ImGui::SameLine();
-
             ImVec2 trackStart = ImGui::GetCursorScreenPos();
             float trackW = ImGui::GetContentRegionAvail().x;
-
             ImGui::InvisibleButton("dropzone", ImVec2(trackW, trackH - 4));
 
             if (ImGui::BeginDragDropTarget()) {
@@ -256,7 +406,6 @@ int main(int argc, char* argv[]) {
             }
 
             ImDrawList* tdl = ImGui::GetWindowDrawList();
-
             for (int i = 0; i < (int)clips.size(); i++) {
                 if (clips[i].track != t) continue;
                 float x = trackStart.x + clips[i].startTime * pixelsPerSecond;
@@ -269,7 +418,6 @@ int main(int argc, char* argv[]) {
                     tdl->AddRect(cp0, cp1, IM_COL32(255,220,60,255), 3.0f, 0, 2.0f);
                 std::string label = media[clips[i].mediaId].name.substr(0, 18);
                 tdl->AddText(ImVec2(cp0.x+4, cp0.y+4), IM_COL32(255,255,255,230), label.c_str());
-
                 if (ImGui::IsMouseClicked(0) && ImGui::IsMouseHoveringRect(cp0, cp1))
                     selectedClip = i;
             }
@@ -280,11 +428,22 @@ int main(int argc, char* argv[]) {
         ImVec2 tlMin = ImGui::GetWindowPos();
         float phX = tlMin.x + 50 + currentTime * pixelsPerSecond;
         ImGui::GetWindowDrawList()->AddLine(ImVec2(phX, tlMin.y+8), ImVec2(phX, tlMin.y+290), IM_COL32(255,50,50,255), 2.0f);
-
         ImGui::EndChild();
         ImGui::End();
 
-        if (isPlaying) currentTime += io.DeltaTime;
+        if (isPlaying) {
+            currentTime += io.DeltaTime;
+#ifdef _WIN32
+            if (topClip >= 0 && player) {
+                static float accum = 0;
+                accum += io.DeltaTime;
+                if (accum > 0.033f) {
+                    player->GrabFrame();
+                    accum = 0;
+                }
+            }
+#endif
+        }
 
         ImGui::Render();
         glViewport(0,0,(int)io.DisplaySize.x,(int)io.DisplaySize.y);
@@ -294,6 +453,9 @@ int main(int argc, char* argv[]) {
         SDL_GL_SwapWindow(window);
     }
 
+#ifdef _WIN32
+    if (player) { delete player; player = nullptr; }
+#endif
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplSDL2_Shutdown();
     ImGui::DestroyContext();
