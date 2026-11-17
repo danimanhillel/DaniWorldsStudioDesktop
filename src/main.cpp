@@ -51,7 +51,7 @@ int activeTool = 0;
 std::string previewStatus = "Ready";
 bool draggingPlayhead = false;
 int draggingClip = -1;
-float dragOffset = 0.0f;
+float dragOffsetX = 0.0f;
 ImVec2 previewMin, previewMax;
 
 #ifdef _WIN32
@@ -356,7 +356,6 @@ int main(int argc, char* argv[]) {
         if (topClip >= 0) {
             EnsurePlayerForClip(topClip);
             if (player && player->hasFrame && player->texture) {
-                // Try ImGui image again as fallback
                 dl->AddImage((ImTextureID)(intptr_t)player->texture, p0, p1);
             } else {
                 dl->AddText(ImVec2(p0.x+12, p0.y+12), IM_COL32(200,200,200,255), previewStatus.c_str());
@@ -375,13 +374,14 @@ int main(int argc, char* argv[]) {
         if (ImGui::RadioButton("Select", activeTool == 0)) activeTool = 0; ImGui::SameLine();
         if (ImGui::RadioButton("Trim", activeTool == 1)) activeTool = 1; ImGui::SameLine();
         if (ImGui::RadioButton("Split", activeTool == 2)) activeTool = 2; ImGui::SameLine();
-        ImGui::Text("| Del = Delete | Drag clips to move");
+        ImGui::Text("| Del = Delete | Drag clips to move / change track");
 
         ImGui::Separator();
 
         ImGui::BeginChild("Timeline", ImVec2(0,0), true);
         const char* trackNames[] = {"V1","V2","V3","A1","A2","A3"};
         float trackH = 42.0f;
+        ImVec2 trackPositions[6];
 
         for (int t = 0; t < 6; t++) {
             ImGui::PushID(t);
@@ -389,6 +389,7 @@ int main(int argc, char* argv[]) {
             ImGui::Text("%s", trackNames[t]);
             ImGui::SameLine();
             ImVec2 trackStart = ImGui::GetCursorScreenPos();
+            trackPositions[t] = trackStart;
             float trackW = ImGui::GetContentRegionAvail().x;
             ImGui::InvisibleButton("dropzone", ImVec2(trackW, trackH - 4));
 
@@ -425,28 +426,38 @@ int main(int argc, char* argv[]) {
                 std::string label = media[clips[i].mediaId].name.substr(0, 18);
                 tdl->AddText(ImVec2(cp0.x+4, cp0.y+4), IM_COL32(255,255,255,230), label.c_str());
 
-                // Select and start drag
                 if (ImGui::IsMouseClicked(0) && ImGui::IsMouseHoveringRect(cp0, cp1)) {
                     selectedClip = i;
                     draggingClip = i;
-                    dragOffset = ImGui::GetMousePos().x - cp0.x;
+                    dragOffsetX = ImGui::GetMousePos().x - cp0.x;
                 }
             }
             ImGui::EndChild();
             ImGui::PopID();
         }
 
-        // Update dragging clip
+        // Update dragging clip (horizontal + track)
         if (draggingClip >= 0 && draggingClip < (int)clips.size()) {
             if (ImGui::IsMouseDown(0)) {
-                float mouseX = ImGui::GetMousePos().x;
-                // Find which track the mouse is over
                 ImVec2 mouse = ImGui::GetMousePos();
-                // Approximate track from y (this is rough; improve later)
-                // For now just move horizontally
-                float newStart = (mouseX - dragOffset - 50) / pixelsPerSecond;
+                float newStart = (mouse.x - dragOffsetX - 50) / pixelsPerSecond;
                 if (newStart < 0) newStart = 0;
                 clips[draggingClip].startTime = newStart;
+
+                // Determine track from mouse Y
+                for (int t = 0; t < 6; t++) {
+                    float ty = trackPositions[t].y;
+                    if (mouse.y >= ty && mouse.y < ty + trackH) {
+                        // Check type compatibility
+                        int mid = clips[draggingClip].mediaId;
+                        bool isVideo = (media[mid].type == "video" || media[mid].type == "image");
+                        bool isAudio = (media[mid].type == "audio");
+                        if ((t < 3 && isVideo) || (t >= 3 && isAudio)) {
+                            clips[draggingClip].track = t;
+                        }
+                        break;
+                    }
+                }
             } else {
                 draggingClip = -1;
             }
