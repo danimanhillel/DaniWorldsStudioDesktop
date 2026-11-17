@@ -235,7 +235,6 @@ int main(int argc, char* argv[]) {
             float trackW = ImGui::GetContentRegionAvail().x;
 
             ImGui::InvisibleButton("dropzone", ImVec2(trackW, trackH - 4));
-            bool hovered = ImGui::IsItemHovered();
 
             if (ImGui::BeginDragDropTarget()) {
                 if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("MEDIA")) {
@@ -257,10 +256,6 @@ int main(int argc, char* argv[]) {
             }
 
             ImDrawList* tdl = ImGui::GetWindowDrawList();
-            if (ImGui::IsDragDropActive() && hovered) {
-                tdl->AddRectFilled(trackStart, ImVec2(trackStart.x + trackW, trackStart.y + trackH - 6),
-                                   IM_COL32(100, 180, 255, 40));
-            }
 
             for (int i = 0; i < (int)clips.size(); i++) {
                 if (clips[i].track != t) continue;
