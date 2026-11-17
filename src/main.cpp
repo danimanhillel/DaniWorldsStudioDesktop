@@ -9,18 +9,20 @@
 #include <algorithm>
 #include <iostream>
 
+#ifdef HAVE_FFMPEG
+extern "C" {
+#include <libavformat/avformat.h>
+#include <libavcodec/avcodec.h>
+#include <libswscale/swscale.h>
+#include <libavutil/imgutils.h>
+}
+#endif
+
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <commdlg.h>
 #include <objbase.h>
-#include <mfapi.h>
-#include <mfidl.h>
-#include <mfreadwrite.h>
-#include <mferror.h>
-#pragma comment(lib, "mfplat.lib")
-#pragma comment(lib, "mfreadwrite.lib")
-#pragma comment(lib, "mfuuid.lib")
 #pragma comment(lib, "comdlg32.lib")
 #pragma comment(lib, "ole32.lib")
 #endif
@@ -54,11 +56,17 @@ int draggingClip = -1;
 float dragOffsetX = 0.0f;
 ImVec2 previewMin, previewMax;
 
-#ifdef _WIN32
+#ifdef HAVE_FFMPEG
 class VideoPlayer {
 public:
-    IMFSourceReader* reader = nullptr;
-    UINT32 width = 0, height = 0;
+    AVFormatContext* fmtCtx = nullptr;
+    AVCodecContext* codecCtx = nullptr;
+    SwsContext* swsCtx = nullptr;
+    AVFrame* frame = nullptr;
+    AVFrame* rgbFrame = nullptr;
+    uint8_t* rgbBuffer = nullptr;
+    int videoStream = -1;
+    int width = 0, height = 0;
     GLuint texture = 0;
     bool hasFrame = false;
     std::string lastError;
@@ -67,32 +75,42 @@ public:
 
     bool Open(const std::string& path) {
         Close();
-        HRESULT hr = MFStartup(MF_VERSION);
-        if (FAILED(hr)) { lastError = "MFStartup failed"; return false; }
+        if (avformat_open_input(&fmtCtx, path.c_str(), nullptr, nullptr) < 0) {
+            lastError = "Cannot open file"; return false;
+        }
+        if (avformat_find_stream_info(fmtCtx, nullptr) < 0) {
+            lastError = "No stream info"; return false;
+        }
 
-        std::wstring wpath(path.begin(), path.end());
-        IMFAttributes* attrs = nullptr;
-        MFCreateAttributes(&attrs, 2);
-        attrs->SetUINT32(MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, TRUE);
+        videoStream = -1;
+        for (unsigned i = 0; i < fmtCtx->nb_streams; i++) {
+            if (fmtCtx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+                videoStream = (int)i; break;
+            }
+        }
+        if (videoStream < 0) { lastError = "No video stream"; return false; }
 
-        hr = MFCreateSourceReaderFromURL(wpath.c_str(), attrs, &reader);
-        if (attrs) attrs->Release();
-        if (FAILED(hr)) { lastError = "Cannot open file"; return false; }
+        const AVCodec* codec = avcodec_find_decoder(fmtCtx->streams[videoStream]->codecpar->codec_id);
+        if (!codec) { lastError = "No decoder"; return false; }
 
-        IMFMediaType* type = nullptr;
-        MFCreateMediaType(&type);
-        type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-        type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
-        hr = reader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, type);
-        type->Release();
-        if (FAILED(hr)) { lastError = "Set media type failed"; return false; }
+        codecCtx = avcodec_alloc_context3(codec);
+        avcodec_parameters_to_context(codecCtx, fmtCtx->streams[videoStream]->codecpar);
+        if (avcodec_open2(codecCtx, codec, nullptr) < 0) {
+            lastError = "Cannot open codec"; return false;
+        }
 
-        IMFMediaType* actual = nullptr;
-        reader->GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, &actual);
-        MFGetAttributeSize(actual, MF_MT_FRAME_SIZE, &width, &height);
-        actual->Release();
+        width = codecCtx->width;
+        height = codecCtx->height;
 
-        if (width == 0 || height == 0) { lastError = "Invalid size"; return false; }
+        frame = av_frame_alloc();
+        rgbFrame = av_frame_alloc();
+        int numBytes = av_image_get_buffer_size(AV_PIX_FMT_RGB24, width, height, 1);
+        rgbBuffer = (uint8_t*)av_malloc(numBytes);
+        av_image_fill_arrays(rgbFrame->data, rgbFrame->linesize, rgbBuffer, AV_PIX_FMT_RGB24, width, height, 1);
+
+        swsCtx = sws_getContext(width, height, codecCtx->pix_fmt,
+                                width, height, AV_PIX_FMT_RGB24,
+                                SWS_BILINEAR, nullptr, nullptr, nullptr);
 
         glGenTextures(1, &texture);
         glBindTexture(GL_TEXTURE_2D, texture);
@@ -100,51 +118,51 @@ public:
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_BGRA, GL_UNSIGNED_BYTE, nullptr);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, nullptr);
 
         lastError.clear();
         return true;
     }
 
     void Seek(float seconds) {
-        if (!reader) return;
-        PROPVARIANT var;
-        PropVariantInit(&var);
-        var.vt = VT_I8;
-        var.hVal.QuadPart = (LONGLONG)(seconds * 10000000.0);
-        reader->SetCurrentPosition(GUID_NULL, var);
-        PropVariantClear(&var);
+        if (!fmtCtx || videoStream < 0) return;
+        int64_t ts = (int64_t)(seconds / av_q2d(fmtCtx->streams[videoStream]->time_base));
+        av_seek_frame(fmtCtx, videoStream, ts, AVSEEK_FLAG_BACKWARD);
+        avcodec_flush_buffers(codecCtx);
     }
 
     bool GrabFrame() {
-        if (!reader || texture == 0) return false;
-        DWORD flags = 0;
-        IMFSample* sample = nullptr;
-        HRESULT hr = reader->ReadSample(MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, nullptr, &flags, nullptr, &sample);
-        if (flags & MF_SOURCE_READERF_ENDOFSTREAM) return false;
-        if (FAILED(hr) || !sample) return false;
+        if (!fmtCtx || !codecCtx) return false;
+        AVPacket* packet = av_packet_alloc();
+        while (av_read_frame(fmtCtx, packet) >= 0) {
+            if (packet->stream_index == videoStream) {
+                if (avcodec_send_packet(codecCtx, packet) == 0) {
+                    if (avcodec_receive_frame(codecCtx, frame) == 0) {
+                        sws_scale(swsCtx, frame->data, frame->linesize, 0, height,
+                                  rgbFrame->data, rgbFrame->linesize);
 
-        IMFMediaBuffer* buffer = nullptr;
-        if (FAILED(sample->ConvertToContiguousBuffer(&buffer))) { sample->Release(); return false; }
-        BYTE* data = nullptr;
-        DWORD len = 0;
-        buffer->Lock(&data, nullptr, &len);
-
-        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-        glBindTexture(GL_TEXTURE_2D, texture);
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_BGRA, GL_UNSIGNED_BYTE, data);
-
-        buffer->Unlock();
-        buffer->Release();
-        sample->Release();
-        hasFrame = true;
-        return true;
+                        glBindTexture(GL_TEXTURE_2D, texture);
+                        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE, rgbFrame->data[0]);
+                        hasFrame = true;
+                        av_packet_free(&packet);
+                        return true;
+                    }
+                }
+            }
+            av_packet_unref(packet);
+        }
+        av_packet_free(&packet);
+        return false;
     }
 
     void Close() {
         if (texture) { glDeleteTextures(1, &texture); texture = 0; }
-        if (reader) { reader->Release(); reader = nullptr; }
-        MFShutdown();
+        if (swsCtx) { sws_freeContext(swsCtx); swsCtx = nullptr; }
+        if (rgbBuffer) { av_free(rgbBuffer); rgbBuffer = nullptr; }
+        if (rgbFrame) { av_frame_free(&rgbFrame); }
+        if (frame) { av_frame_free(&frame); }
+        if (codecCtx) { avcodec_free_context(&codecCtx); }
+        if (fmtCtx) { avformat_close_input(&fmtCtx); }
         hasFrame = false;
     }
 };
@@ -210,10 +228,10 @@ void DrawThumbnail(ImDrawList* dl, ImVec2 p0, ImVec2 p1, const MediaItem& m) {
 }
 
 void EnsurePlayerForClip(int clipIdx) {
-#ifdef _WIN32
+#ifdef HAVE_FFMPEG
     if (clipIdx < 0 || clipIdx >= (int)clips.size()) return;
     int mid = clips[clipIdx].mediaId;
-    if (mid == playingMediaId && player && player->reader) return;
+    if (mid == playingMediaId && player && player->fmtCtx) return;
     if (!player) player = new VideoPlayer();
     previewStatus = "Opening...";
     if (player->Open(media[mid].path)) {
@@ -352,7 +370,7 @@ int main(int argc, char* argv[]) {
                 topClip = i;
         }
 
-#ifdef _WIN32
+#ifdef HAVE_FFMPEG
         if (topClip >= 0) {
             EnsurePlayerForClip(topClip);
             if (player && player->hasFrame && player->texture) {
@@ -365,7 +383,7 @@ int main(int argc, char* argv[]) {
             previewStatus = "No video";
         }
 #else
-        dl->AddText(ImVec2(p0.x+12, p0.y+12), IM_COL32(140,140,140,255), "Video preview (Windows only)");
+        dl->AddText(ImVec2(p0.x+12, p0.y+12), IM_COL32(140,140,140,255), "FFmpeg not enabled");
 #endif
         ImGui::EndChild();
 
@@ -436,7 +454,6 @@ int main(int argc, char* argv[]) {
             ImGui::PopID();
         }
 
-        // Update dragging clip (horizontal + track)
         if (draggingClip >= 0 && draggingClip < (int)clips.size()) {
             if (ImGui::IsMouseDown(0)) {
                 ImVec2 mouse = ImGui::GetMousePos();
@@ -444,11 +461,9 @@ int main(int argc, char* argv[]) {
                 if (newStart < 0) newStart = 0;
                 clips[draggingClip].startTime = newStart;
 
-                // Determine track from mouse Y
                 for (int t = 0; t < 6; t++) {
                     float ty = trackPositions[t].y;
                     if (mouse.y >= ty && mouse.y < ty + trackH) {
-                        // Check type compatibility
                         int mid = clips[draggingClip].mediaId;
                         bool isVideo = (media[mid].type == "video" || media[mid].type == "image");
                         bool isAudio = (media[mid].type == "audio");
@@ -486,7 +501,7 @@ int main(int argc, char* argv[]) {
 
         if (isPlaying && !draggingPlayhead) {
             currentTime += io.DeltaTime;
-#ifdef _WIN32
+#ifdef HAVE_FFMPEG
             if (topClip >= 0 && player) {
                 static float accum = 0;
                 accum += io.DeltaTime;
@@ -506,8 +521,10 @@ int main(int argc, char* argv[]) {
         SDL_GL_SwapWindow(window);
     }
 
-#ifdef _WIN32
+#ifdef HAVE_FFMPEG
     if (player) { delete player; player = nullptr; }
+#endif
+#ifdef _WIN32
     CoUninitialize();
 #endif
     ImGui_ImplOpenGL3_Shutdown();
