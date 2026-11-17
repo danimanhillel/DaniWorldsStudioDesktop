@@ -9,8 +9,10 @@
 #include <iostream>
 
 #ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <commdlg.h>
+#pragma comment(lib, "comdlg32.lib")
 #endif
 
 struct MediaItem {
@@ -18,16 +20,13 @@ struct MediaItem {
     std::string name;
     std::string type;
     float duration = 5.0f;
-    float aspect = 16.0f/9.0f;
+    float aspect = 16.0f / 9.0f;
 };
 
 struct Clip {
     int mediaId = -1;
     float startTime = 0.0f;
     float duration = 5.0f;
-    float trimStart = 0.0f;
-    float trimEnd = 0.0f;
-    float volume = 1.0f;
     int track = 0;
 };
 
@@ -37,32 +36,40 @@ float currentTime = 0.0f;
 float pixelsPerSecond = 40.0f;
 bool isPlaying = false;
 bool snapEnabled = true;
-int selectedClip = -1;
 
 std::string OpenFileDialog() {
 #ifdef _WIN32
-    char filename[MAX_PATH] = "";
-    OPENFILENAMEA ofn = {};
-    ofn.lStructSize = sizeof(ofn);
-    ofn.lpstrFilter = "Media Files\0*.mp4;*.mov;*.avi;*.mkv;*.mp3;*.wav;*.jpg;*.png\0All Files\0*.*\0";
+    char filename[MAX_PATH] = {0};
+    OPENFILENAMEA ofn = {0};
+    ofn.lStructSize = sizeof(OPENFILENAMEA);
+    ofn.hwndOwner = NULL;
+    ofn.lpstrFilter = "Video Files\0*.mp4;*.mov;*.avi;*.mkv\0Audio Files\0*.mp3;*.wav;*.aac\0Image Files\0*.jpg;*.jpeg;*.png;*.bmp\0All Files\0*.*\0";
     ofn.lpstrFile = filename;
     ofn.nMaxFile = MAX_PATH;
-    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
-    if (GetOpenFileNameA(&ofn)) return filename;
+    ofn.lpstrTitle = "Import Media";
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER;
+    if (GetOpenFileNameA(&ofn)) {
+        return std::string(filename);
+    }
 #endif
     return "";
 }
 
 void AddMedia(const std::string& path) {
+    if (path.empty()) return;
     MediaItem m;
     m.path = path;
     size_t pos = path.find_last_of("/\\");
     m.name = (pos == std::string::npos) ? path : path.substr(pos + 1);
-    std::string ext = m.name.substr(m.name.find_last_of('.') + 1);
-    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-    if (ext == "mp4" || ext == "mov" || ext == "avi" || ext == "mkv") m.type = "video";
-    else if (ext == "mp3" || ext == "wav" || ext == "aac") m.type = "audio";
-    else m.type = "image";
+    std::string lower = m.name;
+    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+    if (lower.find(".mp4") != std::string::npos || lower.find(".mov") != std::string::npos ||
+        lower.find(".avi") != std::string::npos || lower.find(".mkv") != std::string::npos)
+        m.type = "video";
+    else if (lower.find(".mp3") != std::string::npos || lower.find(".wav") != std::string::npos || lower.find(".aac") != std::string::npos)
+        m.type = "audio";
+    else
+        m.type = "image";
     m.duration = (m.type == "image") ? 5.0f : 8.0f;
     media.push_back(m);
 }
@@ -110,7 +117,9 @@ int main(int argc, char* argv[]) {
 
         if (ImGui::Button("Import")) {
             std::string path = OpenFileDialog();
-            if (!path.empty()) AddMedia(path);
+            if (!path.empty()) {
+                AddMedia(path);
+            }
         }
         ImGui::SameLine();
         if (ImGui::Button(snapEnabled ? "Snap: ON" : "Snap: OFF")) snapEnabled = !snapEnabled;
@@ -121,31 +130,32 @@ int main(int argc, char* argv[]) {
         ImGui::SameLine();
         if (ImGui::Button("Stop")) { isPlaying = false; currentTime = 0; }
         ImGui::SameLine();
-        ImGui::Text("| Time: %.2f | ESC=Exit", currentTime);
+        ImGui::Text("| Time: %.2f | Media: %d | ESC=Exit", currentTime, (int)media.size());
 
         ImGui::Separator();
 
         float topH = io.DisplaySize.y * 0.40f;
         ImGui::BeginChild("Media", ImVec2(io.DisplaySize.x * 0.28f, topH), true);
-        ImGui::Text("Media Library");
+        ImGui::Text("Media Library (%d)", (int)media.size());
         ImGui::Separator();
         for (int i = 0; i < (int)media.size(); i++) {
             const auto& m = media[i];
             ImGui::PushID(i);
-            float thumbW = 120.0f;
+            float thumbW = 110.0f;
             float thumbH = thumbW / m.aspect;
-            if (ImGui::Button("##thumb", ImVec2(thumbW, thumbH))) {}
+            ImGui::Button("##thumb", ImVec2(thumbW, thumbH));
             ImDrawList* dl = ImGui::GetWindowDrawList();
             ImVec2 p0 = ImGui::GetItemRectMin();
             ImVec2 p1 = ImGui::GetItemRectMax();
-            ImU32 col = (m.type == "video") ? IM_COL32(70,120,200,255) : (m.type == "audio") ? IM_COL32(80,160,90,255) : IM_COL32(160,100,180,255);
+            ImU32 col = (m.type == "video") ? IM_COL32(70,120,200,255) :
+                        (m.type == "audio") ? IM_COL32(80,160,90,255) : IM_COL32(160,100,180,255);
             dl->AddRectFilled(p0, p1, col);
-            dl->AddText(ImVec2(p0.x+4, p1.y-18), IM_COL32(255,255,255,255), m.type.c_str());
-            ImGui::Text("%s", m.name.c_str());
+            dl->AddText(ImVec2(p0.x + 4, p1.y - 16), IM_COL32(255,255,255,255), m.type.c_str());
+            ImGui::TextUnformatted(m.name.c_str());
             ImGui::Text("%.1fs", m.duration);
             if (ImGui::BeginDragDropSource()) {
                 ImGui::SetDragDropPayload("MEDIA", &i, sizeof(int));
-                ImGui::Text("%s", m.name.c_str());
+                ImGui::TextUnformatted(m.name.c_str());
                 ImGui::EndDragDropSource();
             }
             ImGui::PopID();
@@ -164,22 +174,22 @@ int main(int argc, char* argv[]) {
         ImVec2 p1 = ImGui::GetItemRectMax();
         dl->AddRectFilled(p0, p1, IM_COL32(0,0,0,255));
         int topClip = -1;
-        for (int i = (int)clips.size()-1; i >= 0; --i) {
+        for (int i = (int)clips.size() - 1; i >= 0; --i) {
             if (clips[i].track >= 3) continue;
             if (currentTime >= clips[i].startTime && currentTime < clips[i].startTime + clips[i].duration)
                 topClip = i;
         }
-        if (topClip >= 0) {
-            dl->AddText(ImVec2(p0.x+10, p0.y+10), IM_COL32(200,200,200,255), media[clips[topClip].mediaId].name.c_str());
+        if (topClip >= 0 && topClip < (int)clips.size()) {
+            dl->AddText(ImVec2(p0.x + 10, p0.y + 10), IM_COL32(220,220,220,255), media[clips[topClip].mediaId].name.c_str());
         } else {
-            dl->AddText(ImVec2(p0.x+10, p0.y+10), IM_COL32(150,150,150,255), "No video");
+            dl->AddText(ImVec2(p0.x + 10, p0.y + 10), IM_COL32(150,150,150,255), "No video");
         }
         ImGui::EndChild();
 
-        ImGui::BeginChild("Timeline", ImVec2(0,0), true);
+        ImGui::BeginChild("Timeline", ImVec2(0, 0), true);
         ImGui::Text("Timeline");
-        const char* trackNames[] = {"V1","V2","V3","A1","A2","A3"};
-        float trackH = 36.0f;
+        const char* trackNames[] = {"V1", "V2", "V3", "A1", "A2", "A3"};
+        float trackH = 34.0f;
         for (int t = 0; t < 6; t++) {
             ImGui::PushID(t);
             ImGui::BeginChild("track", ImVec2(0, trackH), true);
@@ -187,16 +197,18 @@ int main(int argc, char* argv[]) {
             ImGui::SameLine();
             ImVec2 trackStart = ImGui::GetCursorScreenPos();
             float trackW = ImGui::GetContentRegionAvail().x;
-            ImGui::InvisibleButton("trackbg", ImVec2(trackW, trackH-8));
+            ImGui::InvisibleButton("trackbg", ImVec2(trackW, trackH - 6));
             if (ImGui::BeginDragDropTarget()) {
                 if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("MEDIA")) {
                     int mid = *(const int*)payload->Data;
-                    Clip c;
-                    c.mediaId = mid;
-                    c.duration = media[mid].duration;
-                    c.startTime = 0;
-                    c.track = t;
-                    clips.push_back(c);
+                    if (mid >= 0 && mid < (int)media.size()) {
+                        Clip c;
+                        c.mediaId = mid;
+                        c.duration = media[mid].duration;
+                        c.startTime = 0.0f;
+                        c.track = t;
+                        clips.push_back(c);
+                    }
                 }
                 ImGui::EndDragDropTarget();
             }
@@ -204,21 +216,20 @@ int main(int argc, char* argv[]) {
             for (int i = 0; i < (int)clips.size(); i++) {
                 if (clips[i].track != t) continue;
                 float x = trackStart.x + clips[i].startTime * pixelsPerSecond;
-                float w = clips[i].duration * pixelsPerSecond;
+                float w = std::max(20.0f, clips[i].duration * pixelsPerSecond);
                 ImVec2 cp0(x, trackStart.y);
-                ImVec2 cp1(x + w, trackStart.y + trackH - 10);
+                ImVec2 cp1(x + w, trackStart.y + trackH - 8);
                 ImU32 ccol = (t < 3) ? IM_COL32(70,140,220,200) : IM_COL32(90,180,100,200);
                 tdl->AddRectFilled(cp0, cp1, ccol, 3.0f);
-                if (i == selectedClip) tdl->AddRect(cp0, cp1, IM_COL32(255,220,50,255), 3.0f, 0, 2.0f);
-                std::string label = media[clips[i].mediaId].name.substr(0, 12);
-                tdl->AddText(ImVec2(cp0.x+4, cp0.y+4), IM_COL32(255,255,255,255), label.c_str());
+                std::string label = media[clips[i].mediaId].name.substr(0, 14);
+                tdl->AddText(ImVec2(cp0.x + 4, cp0.y + 2), IM_COL32(255,255,255,255), label.c_str());
             }
             ImGui::EndChild();
             ImGui::PopID();
         }
         ImVec2 tlMin = ImGui::GetWindowPos();
-        float phX = tlMin.x + 40 + currentTime * pixelsPerSecond;
-        ImGui::GetWindowDrawList()->AddLine(ImVec2(phX, tlMin.y+20), ImVec2(phX, tlMin.y+250), IM_COL32(255,60,60,255), 2.0f);
+        float phX = tlMin.x + 50 + currentTime * pixelsPerSecond;
+        ImGui::GetWindowDrawList()->AddLine(ImVec2(phX, tlMin.y + 18), ImVec2(phX, tlMin.y + 240), IM_COL32(255,60,60,255), 2.0f);
         ImGui::EndChild();
 
         ImGui::End();
@@ -226,8 +237,8 @@ int main(int argc, char* argv[]) {
         if (isPlaying) currentTime += io.DeltaTime;
 
         ImGui::Render();
-        glViewport(0,0,(int)io.DisplaySize.x,(int)io.DisplaySize.y);
-        glClearColor(0.04f,0.04f,0.04f,1);
+        glViewport(0, 0, (int)io.DisplaySize.x, (int)io.DisplaySize.y);
+        glClearColor(0.04f, 0.04f, 0.04f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         SDL_GL_SwapWindow(window);
