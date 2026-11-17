@@ -48,6 +48,36 @@ struct VolPoint {
     float gain = 1.0f;
 };
 
+struct ClipFx {
+    float z1[2][8]{};
+    float z2[2][8]{};
+    std::vector<float> comb[2][4];
+    int combPos[2][4]{};
+    std::vector<float> ap[2][2];
+    int apPos[2][2]{};
+    std::vector<float> delay;
+    int delayPos = 0;
+    int delayLen = 0;
+    double lastEnd = -1.0;
+    void clear() {
+        memset(z1, 0, sizeof(z1));
+        memset(z2, 0, sizeof(z2));
+        for (int ch = 0; ch < 2; ch++) {
+            for (int k = 0; k < 4; k++) {
+                std::fill(comb[ch][k].begin(), comb[ch][k].end(), 0.0f);
+                combPos[ch][k] = 0;
+            }
+            for (int k = 0; k < 2; k++) {
+                std::fill(ap[ch][k].begin(), ap[ch][k].end(), 0.0f);
+                apPos[ch][k] = 0;
+            }
+        }
+        std::fill(delay.begin(), delay.end(), 0.0f);
+        delayPos = 0;
+        lastEnd = -1.0;
+    }
+};
+
 struct Clip {
     int mediaId = -1;
     float startTime = 0.0f;
@@ -58,6 +88,13 @@ struct Clip {
     bool fadeOut = false;
     int track = 0;
     std::vector<VolPoint> volume;
+    bool eqOn = false;
+    float eqGain[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    bool reverbOn = false;
+    float reverbTime = 1.4f;
+    bool delayOn = false;
+    float delayTempo = 120.0f;
+    ClipFx fx;
 };
 
 struct ThumbBlit {
@@ -90,6 +127,7 @@ int trimSide = 0;
 float trimAnchorX = 0;
 float trimOrigStart = 0, trimOrigDur = 0, trimOrigOffset = 0;
 int contextClip = -1;
+int fxEdit = -1;
 bool openClipMenu = false;
 int dragVolClip = -1;
 int dragVolPt = -1;
@@ -440,9 +478,149 @@ void PullSamples(AudioSrc& a, double mediaTime, int count, int16_t* dst) {
     if (n < count) memset(dst + n * 2, 0, (size_t)(count - n) * 2 * sizeof(int16_t));
 }
 
+void ResetAllClipFx() {
+    for (auto& c : clips) c.fx.clear();
+}
+
+static void BiquadCoeffs(float freq, float gainDb, float q, float& b0, float& b1, float& b2, float& a1, float& a2) {
+    const float sr = 48000.0f;
+    float A = powf(10.0f, gainDb / 40.0f);
+    float w = 6.2831853f * freq / sr;
+    float cw = cosf(w);
+    float alpha = sinf(w) / (2.0f * q);
+    float a0 = 1.0f + alpha / A;
+    b0 = (1.0f + alpha * A) / a0;
+    b1 = (-2.0f * cw) / a0;
+    b2 = (1.0f - alpha * A) / a0;
+    a1 = (-2.0f * cw) / a0;
+    a2 = (1.0f - alpha / A) / a0;
+}
+
+static float BiquadStep(float x, float b0, float b1, float b2, float a1, float a2, float& z1, float& z2) {
+    float y = b0 * x + z1;
+    z1 = b1 * x - a1 * y + z2;
+    z2 = b2 * x - a2 * y;
+    if (y > -1.0e-8f && y < 1.0e-8f) y = 0.0f;
+    return y;
+}
+
+void ApplyClipFx(Clip& c, float* s, int n, double timelineTime) {
+    if (!s || n <= 0) return;
+    if (c.fx.lastEnd >= 0.0 && fabs(timelineTime - c.fx.lastEnd) > 0.06)
+        c.fx.clear();
+    c.fx.lastEnd = timelineTime + (double)n / 48000.0;
+    if (c.eqOn) {
+        const float freqs[8] = {60, 150, 400, 1000, 2500, 6000, 12000, 16000};
+        for (int b = 0; b < 8; b++) {
+            float g = c.eqGain[b];
+            if (g > 12.0f) g = 12.0f;
+            if (g < -12.0f) g = -12.0f;
+            if (fabsf(g) < 0.05f) continue;
+            float b0, b1, b2, a1, a2;
+            BiquadCoeffs(freqs[b], g, 1.2f, b0, b1, b2, a1, a2);
+            for (int i = 0; i < n; i++) {
+                for (int ch = 0; ch < 2; ch++) {
+                    float& x = s[i * 2 + ch];
+                    x = BiquadStep(x, b0, b1, b2, a1, a2, c.fx.z1[ch][b], c.fx.z2[ch][b]);
+                }
+            }
+        }
+    }
+    if (c.delayOn) {
+        float tempo = c.delayTempo;
+        if (tempo < 40.0f) tempo = 40.0f;
+        if (tempo > 240.0f) tempo = 240.0f;
+        int len = (int)(48000.0f * 60.0f / tempo + 0.5f);
+        if (len < 32) len = 32;
+        if (len > 96000) len = 96000;
+        if (c.fx.delayLen != len) {
+            c.fx.delay.assign((size_t)len * 2, 0.0f);
+            c.fx.delayPos = 0;
+            c.fx.delayLen = len;
+        }
+        const float fb = 0.38f;
+        const float wet = 0.42f;
+        for (int i = 0; i < n; i++) {
+            int p = c.fx.delayPos;
+            if (p < 0 || p >= len) p = 0;
+            for (int ch = 0; ch < 2; ch++) {
+                float d = c.fx.delay[(size_t)p * 2 + ch];
+                float x = s[i * 2 + ch];
+                c.fx.delay[(size_t)p * 2 + ch] = x + d * fb;
+                s[i * 2 + ch] = x + d * wet;
+            }
+            p++;
+            if (p >= len) p = 0;
+            c.fx.delayPos = p;
+        }
+    }
+    if (c.reverbOn) {
+        static const int combLen[4] = {1216, 1296, 1408, 1472};
+        static const int apLen[2] = {225, 556};
+        for (int ch = 0; ch < 2; ch++) {
+            for (int k = 0; k < 4; k++) {
+                if ((int)c.fx.comb[ch][k].size() != combLen[k]) {
+                    c.fx.comb[ch][k].assign(combLen[k], 0.0f);
+                    c.fx.combPos[ch][k] = 0;
+                }
+            }
+            for (int k = 0; k < 2; k++) {
+                if ((int)c.fx.ap[ch][k].size() != apLen[k]) {
+                    c.fx.ap[ch][k].assign(apLen[k], 0.0f);
+                    c.fx.apPos[ch][k] = 0;
+                }
+            }
+        }
+        float rt = c.reverbTime;
+        if (rt < 0.15f) rt = 0.15f;
+        if (rt > 6.0f) rt = 6.0f;
+        float fb[4];
+        for (int k = 0; k < 4; k++) {
+            fb[k] = expf(-3.0f * ((float)combLen[k] / 48000.0f) / rt);
+            if (fb[k] > 0.92f) fb[k] = 0.92f;
+            if (fb[k] < 0.05f) fb[k] = 0.05f;
+        }
+        for (int i = 0; i < n; i++) {
+            for (int ch = 0; ch < 2; ch++) {
+                float x = s[i * 2 + ch];
+                float acc = 0.0f;
+                for (int k = 0; k < 4; k++) {
+                    int len = combLen[k];
+                    int p = c.fx.combPos[ch][k];
+                    if (p < 0 || p >= len) p = 0;
+                    float y = c.fx.comb[ch][k][p];
+                    c.fx.comb[ch][k][p] = x + y * fb[k];
+                    p++;
+                    if (p >= len) p = 0;
+                    c.fx.combPos[ch][k] = p;
+                    acc += y;
+                }
+                acc *= 0.25f;
+                for (int k = 0; k < 2; k++) {
+                    int len = apLen[k];
+                    int p = c.fx.apPos[ch][k];
+                    if (p < 0 || p >= len) p = 0;
+                    float buf = c.fx.ap[ch][k][p];
+                    float y = buf - 0.5f * acc;
+                    c.fx.ap[ch][k][p] = acc + 0.5f * buf;
+                    p++;
+                    if (p >= len) p = 0;
+                    c.fx.apPos[ch][k] = p;
+                    acc = y;
+                }
+                float y = x * 0.72f + acc * 0.45f;
+                if (y > 30000.0f) y = 30000.0f;
+                if (y < -30000.0f) y = -30000.0f;
+                s[i * 2 + ch] = y;
+            }
+        }
+    }
+}
+
 void ResetAudioSync() {
     for (auto& a : audioSrcs) a.nextTime = -1;
     if (audioDev) SDL_ClearQueuedAudio(audioDev);
+    ResetAllClipFx();
 }
 
 void SetPlaying(bool play) {
@@ -484,32 +662,45 @@ float GainAt(const Clip& c, float localTime) {
 void MixTimeline(double timelineTime, int sampleCount, int16_t* dst) {
     if (!dst || sampleCount <= 0) return;
     std::vector<int32_t> mix((size_t)sampleCount * 2, 0);
+    std::vector<float> shaped((size_t)sampleCount * 2);
     for (int ci = 0; ci < (int)clips.size(); ci++) {
-        const Clip& c = clips[ci];
+        Clip& c = clips[ci];
         if (c.mediaId < 0 || c.mediaId >= (int)media.size()) continue;
         if (media[c.mediaId].type == "image") continue;
-        if (timelineTime < c.startTime || timelineTime >= c.startTime + c.duration) continue;
-        int idx = EnsureAudio(c.mediaId);
-        if (audioSrcs[idx].noAudio || audioSrcs[idx].failed) continue;
-        float speed = c.speed < 0.05f ? 1.0f : c.speed;
-        double mediaT = c.sourceOffset + (timelineTime - c.startTime) * speed;
-        int srcN = std::max(1, (int)std::lround(sampleCount * speed));
-        std::vector<int16_t> src((size_t)srcN * 2, 0);
-        PullSamples(audioSrcs[idx], mediaT, srcN, src.data());
+        float tail = 0.0f;
+        if (c.reverbOn) tail = std::max(tail, std::min(5.0f, c.reverbTime));
+        if (c.delayOn) tail = std::max(tail, 180.0f / std::max(40.0f, c.delayTempo));
+        if (timelineTime < c.startTime || timelineTime >= c.startTime + c.duration + tail) continue;
+        bool live = timelineTime < c.startTime + c.duration;
         float local = (float)(timelineTime - c.startTime);
         float blockDur = sampleCount / 48000.0f;
-        float g0 = GainAt(c, local);
-        float g1 = GainAt(c, local + blockDur);
-        for (int i = 0; i < sampleCount; i++) {
-            float pos = (sampleCount <= 1) ? 0.0f : (float)i * (float)(srcN - 1) / (float)(sampleCount - 1);
-            int i0 = (int)pos;
-            int i1 = std::min(srcN - 1, i0 + 1);
-            float fr = pos - (float)i0;
-            float g = g0 + (g1 - g0) * ((float)i / (float)sampleCount);
-            for (int ch = 0; ch < 2; ch++) {
-                float s = src[(size_t)i0 * 2 + ch] * (1.0f - fr) + src[(size_t)i1 * 2 + ch] * fr;
-                mix[i * 2 + ch] += (int32_t)(s * g);
+        float g0 = GainAt(c, std::min(local, c.duration));
+        float g1 = GainAt(c, std::min(local + blockDur, c.duration));
+        std::fill(shaped.begin(), shaped.end(), 0.0f);
+        if (live) {
+            int idx = EnsureAudio(c.mediaId);
+            if (audioSrcs[idx].noAudio || audioSrcs[idx].failed) continue;
+            float speed = c.speed < 0.05f ? 1.0f : c.speed;
+            double mediaT = c.sourceOffset + (timelineTime - c.startTime) * speed;
+            int srcN = std::max(1, (int)std::lround(sampleCount * speed));
+            std::vector<int16_t> src((size_t)srcN * 2, 0);
+            PullSamples(audioSrcs[idx], mediaT, srcN, src.data());
+            for (int i = 0; i < sampleCount; i++) {
+                float pos = (sampleCount <= 1) ? 0.0f : (float)i * (float)(srcN - 1) / (float)(sampleCount - 1);
+                int i0 = (int)pos;
+                int i1 = std::min(srcN - 1, i0 + 1);
+                float fr = pos - (float)i0;
+                for (int ch = 0; ch < 2; ch++) {
+                    shaped[i * 2 + ch] = src[(size_t)i0 * 2 + ch] * (1.0f - fr) + src[(size_t)i1 * 2 + ch] * fr;
+                }
             }
+        }
+        if (c.eqOn || c.delayOn || c.reverbOn)
+            ApplyClipFx(c, shaped.data(), sampleCount, timelineTime);
+        for (int i = 0; i < sampleCount; i++) {
+            float g = g0 + (g1 - g0) * ((float)i / (float)sampleCount);
+            mix[i * 2] += (int32_t)(shaped[i * 2] * g);
+            mix[i * 2 + 1] += (int32_t)(shaped[i * 2 + 1] * g);
         }
     }
     for (int i = 0; i < sampleCount * 2; i++) {
@@ -817,8 +1008,12 @@ bool ExportSession::Begin(const std::string& outPath, int width, int height, int
     fps = framesPerSec;
     if (w < 2 || h < 2 || fps < 1) { status = "Bad export settings"; previewStatus = status; return false; }
     timelineEnd = 0;
-    for (const auto& c : clips)
-        timelineEnd = std::max(timelineEnd, (double)c.startTime + (double)c.duration);
+    for (const auto& c : clips) {
+        double end = (double)c.startTime + (double)c.duration;
+        if (c.reverbOn) end += std::min(5.0, (double)c.reverbTime);
+        if (c.delayOn) end += 180.0 / std::max(40.0f, c.delayTempo);
+        timelineEnd = std::max(timelineEnd, end);
+    }
     if (timelineEnd < 0.05 || clips.empty()) { status = "Nothing to export"; previewStatus = status; return false; }
     total = (int)std::ceil(timelineEnd * (double)fps);
     if (total < 1) total = 1;
@@ -1228,6 +1423,8 @@ void SplitSelected() {
     rightPts.push_back({1.0f, c.volume.back().gain});
     c.volume = leftPts;
     right.volume = rightPts;
+    c.fx.clear();
+    right.fx.clear();
     clips.insert(clips.begin() + selectedClip + 1, right);
     shownLocal = -1000.0f;
 #ifdef HAVE_FFMPEG
@@ -1462,6 +1659,7 @@ void ClearProject() {
     trimmingClip = -1;
     dragVolClip = -1;
     contextClip = -1;
+    fxEdit = -1;
     mediaMenuIndex = -1;
     currentTime = 0;
     shownLocal = -1000.0f;
@@ -1492,6 +1690,7 @@ void RemoveMedia(int id) {
     trimmingClip = -1;
     dragVolClip = -1;
     contextClip = -1;
+    fxEdit = -1;
     mediaMenuIndex = -1;
     shownLocal = -1000.0f;
 #ifdef HAVE_FFMPEG
@@ -1505,8 +1704,12 @@ void RemoveMedia(int id) {
 
 float TimelineEnd() {
     float end = 0.0f;
-    for (const auto& c : clips)
-        end = std::max(end, c.startTime + c.duration);
+    for (const auto& c : clips) {
+        float e = c.startTime + c.duration;
+        if (c.reverbOn) e += std::min(5.0f, c.reverbTime);
+        if (c.delayOn) e += 180.0f / std::max(40.0f, c.delayTempo);
+        end = std::max(end, e);
+    }
     return end;
 }
 
@@ -1541,6 +1744,10 @@ bool SaveProject(const std::string& path) {
                 c.fadeIn ? 1 : 0, c.fadeOut ? 1 : 0, c.track, (int)c.volume.size());
         for (const auto& v : c.volume)
             fprintf(f, "V %.6f %.6f\n", v.norm, v.gain);
+        fprintf(f, "F %d %d %d %.4f %.4f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f\n",
+                c.eqOn ? 1 : 0, c.reverbOn ? 1 : 0, c.delayOn ? 1 : 0, c.reverbTime, c.delayTempo,
+                c.eqGain[0], c.eqGain[1], c.eqGain[2], c.eqGain[3],
+                c.eqGain[4], c.eqGain[5], c.eqGain[6], c.eqGain[7]);
     }
     fclose(f);
     return true;
@@ -1600,6 +1807,25 @@ bool LoadProject(const std::string& path) {
                 }
                 clips.push_back(c);
             }
+        } else if (line[0] == 'F' && line[1] == ' ' && !clips.empty()) {
+            Clip& c = clips.back();
+            int eq = 0, rv = 0, dl = 0;
+            float rt = 1.4f, tp = 120.0f;
+            float e[8] = {};
+            if (sscanf(line, "F %d %d %d %f %f %f %f %f %f %f %f %f %f",
+                       &eq, &rv, &dl, &rt, &tp,
+                       &e[0], &e[1], &e[2], &e[3], &e[4], &e[5], &e[6], &e[7]) == 13) {
+                c.eqOn = eq != 0;
+                c.reverbOn = rv != 0;
+                c.delayOn = dl != 0;
+                c.reverbTime = rt;
+                c.delayTempo = tp;
+                for (int i = 0; i < 8; i++) {
+                    if (e[i] > 12.0f) e[i] = 12.0f;
+                    if (e[i] < -12.0f) e[i] = -12.0f;
+                    c.eqGain[i] = e[i];
+                }
+            }
         }
     }
     fclose(f);
@@ -1644,7 +1870,7 @@ int main(int argc, char* argv[]) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
-    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 8",
+    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 9",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900,
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!window) { SDL_Quit(); return 1; }
@@ -1683,6 +1909,8 @@ int main(int argc, char* argv[]) {
                     SplitSelected();
                 if (event.key.keysym.sym == SDLK_DELETE || event.key.keysym.sym == SDLK_BACKSPACE) {
                     if (selectedClip >= 0 && selectedClip < (int)clips.size()) {
+                        if (fxEdit == selectedClip) fxEdit = -1;
+                        else if (fxEdit > selectedClip) fxEdit--;
                         clips.erase(clips.begin() + selectedClip);
                         selectedClip = -1;
                         draggingClip = -1;
@@ -2200,8 +2428,52 @@ int main(int argc, char* argv[]) {
                     }
                     ImGui::EndMenu();
                 }
+                ImGui::Separator();
+                if (ImGui::MenuItem("EQ", nullptr, &c.eqOn)) {
+                    c.fx.clear();
+                    fxEdit = contextClip;
+                }
+                if (ImGui::MenuItem("Reverb", nullptr, &c.reverbOn)) {
+                    c.fx.clear();
+                    fxEdit = contextClip;
+                }
+                if (ImGui::MenuItem("Delay", nullptr, &c.delayOn)) {
+                    c.fx.clear();
+                    fxEdit = contextClip;
+                }
             }
             ImGui::EndPopup();
+        }
+
+        if (fxEdit >= 0) {
+            if (fxEdit >= (int)clips.size()) fxEdit = -1;
+            else {
+                ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.42f), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+                bool fxOpen = true;
+                if (ImGui::Begin("EQ", &fxOpen, ImGuiWindowFlags_AlwaysAutoResize)) {
+                    Clip& c = clips[fxEdit];
+                    if (ImGui::Checkbox("EQ", &c.eqOn)) c.fx.clear();
+                    const char* names[8] = {"60", "150", "400", "1k", "2.5k", "6k", "12k", "16k"};
+                    for (int b = 0; b < 8; b++) {
+                        ImGui::PushID(b);
+                        ImGui::BeginGroup();
+                        ImGui::VSliderFloat("##g", ImVec2(36, 150), &c.eqGain[b], -12.0f, 12.0f, "%.1f");
+                        ImGui::TextUnformatted(names[b]);
+                        ImGui::EndGroup();
+                        if (b != 7) ImGui::SameLine();
+                        ImGui::PopID();
+                    }
+                    ImGui::TextUnformatted("dB, low to high");
+                    ImGui::Separator();
+                    if (ImGui::Checkbox("Reverb", &c.reverbOn)) c.fx.clear();
+                    ImGui::SliderFloat("Time", &c.reverbTime, 0.2f, 5.0f, "%.2f s");
+                    if (ImGui::Checkbox("Delay", &c.delayOn)) c.fx.clear();
+                    ImGui::SliderFloat("Tempo", &c.delayTempo, 40.0f, 240.0f, "%.0f BPM");
+                    ImGui::Text("Delay %.0f ms", 60000.0f / std::max(40.0f, c.delayTempo));
+                }
+                ImGui::End();
+                if (!fxOpen) fxEdit = -1;
+            }
         }
         ImGui::End();
 
