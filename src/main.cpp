@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cmath>
 #include <cstring>
+#include <cstdlib>
 
 #ifdef HAVE_FFMPEG
 extern "C" {
@@ -93,6 +94,11 @@ bool openClipMenu = false;
 int dragVolClip = -1;
 int dragVolPt = -1;
 float frameDebt = 0.0f;
+float timeOriginX = 0.0f;
+int exAspect = 0;
+int exRes = 1;
+int exFpsIdx = 1;
+bool requestExport = false;
 
 typedef void (APIENTRY *PFN_glUseProgramProc)(GLuint);
 PFN_glUseProgramProc pglUseProgram = nullptr;
@@ -127,6 +133,7 @@ public:
     int width = 0, height = 0;
     GLuint texture = 0;
     bool hasFrame = false;
+    double lastPts = -1;
     std::string lastError;
 
     ~VideoPlayer() { Close(); }
@@ -187,6 +194,7 @@ public:
         int64_t ts = (int64_t)(seconds / av_q2d(fmtCtx->streams[videoStream]->time_base));
         av_seek_frame(fmtCtx, videoStream, ts, AVSEEK_FLAG_BACKWARD);
         avcodec_flush_buffers(codecCtx);
+        lastPts = -1;
     }
 
     bool GrabFrame() {
@@ -197,6 +205,14 @@ public:
                 int send = avcodec_send_packet(codecCtx, packet);
                 if (send == 0 || send == AVERROR(EAGAIN)) {
                     if (avcodec_receive_frame(codecCtx, frame) == 0) {
+                        if (frame->best_effort_timestamp != AV_NOPTS_VALUE && fmtCtx && videoStream >= 0)
+                            lastPts = frame->best_effort_timestamp * av_q2d(fmtCtx->streams[videoStream]->time_base);
+                        else {
+                            double step = 1.0 / 30.0;
+                            if (codecCtx->framerate.num > 0 && codecCtx->framerate.den > 0)
+                                step = (double)codecCtx->framerate.den / (double)codecCtx->framerate.num;
+                            lastPts = (lastPts < 0.0 ? 0.0 : lastPts) + step;
+                        }
                         if (!EnsureTexture()) { av_packet_free(&packet); return false; }
                         sws_scale(swsCtx, frame->data, frame->linesize, 0, height, rgbFrame->data, rgbFrame->linesize);
                         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
@@ -225,6 +241,7 @@ public:
         hasFrame = false;
         width = 0;
         height = 0;
+        lastPts = -1;
     }
 };
 
@@ -462,8 +479,8 @@ float GainAt(const Clip& c, float localTime) {
     return g;
 }
 
-void QueueAudioBlock(double timelineTime, int sampleCount) {
-    if (!audioDev || sampleCount <= 0) return;
+void MixTimeline(double timelineTime, int sampleCount, int16_t* dst) {
+    if (!dst || sampleCount <= 0) return;
     std::vector<int32_t> mix((size_t)sampleCount * 2, 0);
     for (int ci = 0; ci < (int)clips.size(); ci++) {
         const Clip& c = clips[ci];
@@ -493,13 +510,18 @@ void QueueAudioBlock(double timelineTime, int sampleCount) {
             }
         }
     }
-    std::vector<int16_t> out((size_t)sampleCount * 2);
     for (int i = 0; i < sampleCount * 2; i++) {
         int v = mix[i];
         if (v > 32767) v = 32767;
         if (v < -32768) v = -32768;
-        out[i] = (int16_t)v;
+        dst[i] = (int16_t)v;
     }
+}
+
+void QueueAudioBlock(double timelineTime, int sampleCount) {
+    if (!audioDev || sampleCount <= 0) return;
+    std::vector<int16_t> out((size_t)sampleCount * 2);
+    MixTimeline(timelineTime, sampleCount, out.data());
     SDL_QueueAudio(audioDev, out.data(), (Uint32)(out.size() * sizeof(int16_t)));
 }
 
@@ -516,6 +538,537 @@ void PumpAudio() {
         guard++;
     }
 }
+struct ExpDec {
+    int mediaId = -1;
+    AVFormatContext* fmt = nullptr;
+    AVCodecContext* ctx = nullptr;
+    AVFrame* frame = nullptr;
+    AVPacket* pkt = nullptr;
+    SwsContext* sws = nullptr;
+    SwsContext* fit = nullptr;
+    int stream = -1;
+    int rw = 0, rh = 0;
+    int fitW = 0, fitH = 0;
+    double lastPts = -1;
+    bool failed = false;
+    bool imageDone = false;
+    std::vector<uint8_t> rgba;
+    std::vector<uint8_t> fitted;
+};
+
+struct ExportSession {
+    bool active = false;
+    bool headerWritten = false;
+    bool videoOnly = false;
+    std::string path;
+    std::string status;
+    int w = 0, h = 0, fps = 30;
+    int frameIndex = 0;
+    int total = 0;
+    int aFrameSize = 1024;
+    double timelineEnd = 0;
+    int64_t audioWritten = 0;
+    int64_t aPts = 0;
+    AVFormatContext* fmt = nullptr;
+    AVCodecContext* vctx = nullptr;
+    AVCodecContext* actx = nullptr;
+    AVStream* vst = nullptr;
+    AVStream* ast = nullptr;
+    AVFrame* vframe = nullptr;
+    AVFrame* aframe = nullptr;
+    SwsContext* toYuv = nullptr;
+    SwrContext* swr = nullptr;
+    AVPacket* pkt = nullptr;
+    std::vector<ExpDec> decs;
+    std::vector<uint8_t> canvas;
+    std::vector<int16_t> afifo;
+
+    void CloseAll();
+    bool Begin(const std::string& outPath, int width, int height, int framesPerSec);
+    void Step();
+    void Cancel();
+    void Fail(const char* msg);
+    void Finish(bool ok);
+    bool WriteEncoded(AVCodecContext* ctx, AVStream* st);
+    bool DrainAudio(bool padFinal);
+    int OpenDec(int mediaId);
+    bool ReadOne(ExpDec& d);
+    bool EnsureFrame(int mediaId, double mediaTime);
+    void BlitToCanvas(int idx);
+};
+
+void FitInside(int sw, int sh, int dw, int dh, int& ox, int& oy, int& fw, int& fh) {
+    if (sw < 1 || sh < 1) { fw = dw; fh = dh; ox = oy = 0; return; }
+    double sa = (double)sw / (double)sh;
+    double da = (double)dw / (double)dh;
+    if (sa > da) { fw = dw; fh = (int)(dw / sa); }
+    else { fh = dh; fw = (int)(dh * sa); }
+    if (fw < 2) fw = 2;
+    if (fh < 2) fh = 2;
+    fw &= ~1;
+    fh &= ~1;
+    ox = ((dw - fw) / 2) & ~1;
+    oy = ((dh - fh) / 2) & ~1;
+    if (ox < 0) ox = 0;
+    if (oy < 0) oy = 0;
+}
+
+void ExportSession::CloseAll() {
+    active = false;
+    for (auto& d : decs) {
+        if (d.fit) sws_freeContext(d.fit);
+        if (d.sws) sws_freeContext(d.sws);
+        if (d.frame) av_frame_free(&d.frame);
+        if (d.pkt) av_packet_free(&d.pkt);
+        if (d.ctx) avcodec_free_context(&d.ctx);
+        if (d.fmt) avformat_close_input(&d.fmt);
+        d.fit = nullptr;
+        d.sws = nullptr;
+    }
+    decs.clear();
+    if (swr) swr_free(&swr);
+    if (toYuv) { sws_freeContext(toYuv); toYuv = nullptr; }
+    if (vframe) av_frame_free(&vframe);
+    if (aframe) av_frame_free(&aframe);
+    if (pkt) av_packet_free(&pkt);
+    if (vctx) avcodec_free_context(&vctx);
+    if (actx) avcodec_free_context(&actx);
+    if (fmt) {
+        if (fmt->pb) avio_closep(&fmt->pb);
+        avformat_free_context(fmt);
+        fmt = nullptr;
+    }
+    vst = nullptr;
+    ast = nullptr;
+    canvas.clear();
+    afifo.clear();
+    headerWritten = false;
+}
+
+void ExportSession::Fail(const char* msg) {
+    status = msg ? msg : "Export failed";
+    previewStatus = status;
+    CloseAll();
+}
+
+bool ExportSession::WriteEncoded(AVCodecContext* ctx, AVStream* st) {
+    if (!ctx || !st || !fmt) return false;
+    if (!pkt) pkt = av_packet_alloc();
+    while (pkt) {
+        av_packet_unref(pkt);
+        int r = avcodec_receive_packet(ctx, pkt);
+        if (r == AVERROR(EAGAIN) || r == AVERROR_EOF) return true;
+        if (r < 0) return false;
+        av_packet_rescale_ts(pkt, ctx->time_base, st->time_base);
+        pkt->stream_index = st->index;
+        r = av_interleaved_write_frame(fmt, pkt);
+        if (r < 0) return false;
+    }
+    return false;
+}
+
+bool ExportSession::DrainAudio(bool padFinal) {
+    if (!actx || !aframe || !swr) return true;
+    if (padFinal && !afifo.empty() && (int)afifo.size() / 2 < aFrameSize)
+        afifo.resize((size_t)aFrameSize * 2, 0);
+    while ((int)afifo.size() / 2 >= aFrameSize) {
+        if (av_frame_make_writable(aframe) < 0) return false;
+        const uint8_t* inData[1] = { (const uint8_t*)afifo.data() };
+        int got = swr_convert(swr, aframe->data, aFrameSize, inData, aFrameSize);
+        if (got <= 0) return false;
+        aframe->nb_samples = got;
+        aframe->pts = aPts;
+        aPts += got;
+        afifo.erase(afifo.begin(), afifo.begin() + (size_t)aFrameSize * 2);
+        if (avcodec_send_frame(actx, aframe) < 0) return false;
+        if (!WriteEncoded(actx, ast)) return false;
+    }
+    return true;
+}
+
+int ExportSession::OpenDec(int mediaId) {
+    for (int i = 0; i < (int)decs.size(); i++)
+        if (decs[i].mediaId == mediaId) return i;
+    ExpDec d;
+    d.mediaId = mediaId;
+    if (mediaId < 0 || mediaId >= (int)media.size() ||
+        avformat_open_input(&d.fmt, media[mediaId].path.c_str(), nullptr, nullptr) < 0 ||
+        avformat_find_stream_info(d.fmt, nullptr) < 0) {
+        d.failed = true;
+        decs.push_back(std::move(d));
+        return (int)decs.size() - 1;
+    }
+    for (unsigned i = 0; i < d.fmt->nb_streams; i++) {
+        if (d.fmt->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) { d.stream = (int)i; break; }
+    }
+    const AVCodec* codec = (d.stream >= 0) ? avcodec_find_decoder(d.fmt->streams[d.stream]->codecpar->codec_id) : nullptr;
+    d.ctx = codec ? avcodec_alloc_context3(codec) : nullptr;
+    if (d.stream < 0 || !d.ctx ||
+        avcodec_parameters_to_context(d.ctx, d.fmt->streams[d.stream]->codecpar) < 0 ||
+        avcodec_open2(d.ctx, codec, nullptr) < 0) {
+        d.failed = true;
+        decs.push_back(std::move(d));
+        return (int)decs.size() - 1;
+    }
+    d.frame = av_frame_alloc();
+    d.pkt = av_packet_alloc();
+    decs.push_back(std::move(d));
+    return (int)decs.size() - 1;
+}
+
+bool ExportSession::ReadOne(ExpDec& d) {
+    if (!d.fmt || !d.ctx || !d.pkt || !d.frame) return false;
+    while (av_read_frame(d.fmt, d.pkt) >= 0) {
+        if (d.pkt->stream_index != d.stream) { av_packet_unref(d.pkt); continue; }
+        int send = avcodec_send_packet(d.ctx, d.pkt);
+        av_packet_unref(d.pkt);
+        if (send < 0 && send != AVERROR(EAGAIN)) continue;
+        if (avcodec_receive_frame(d.ctx, d.frame) != 0) continue;
+        if (d.frame->width <= 0 || d.frame->height <= 0) continue;
+        AVPixelFormat srcFmt = (AVPixelFormat)d.frame->format;
+        if (srcFmt == AV_PIX_FMT_NONE) continue;
+        if (!d.sws || d.rw != d.frame->width || d.rh != d.frame->height) {
+            if (d.sws) sws_freeContext(d.sws);
+            d.rw = d.frame->width;
+            d.rh = d.frame->height;
+            d.sws = sws_getContext(d.rw, d.rh, srcFmt, d.rw, d.rh, AV_PIX_FMT_RGBA,
+                                   SWS_BILINEAR, nullptr, nullptr, nullptr);
+            d.rgba.assign((size_t)d.rw * (size_t)d.rh * 4, 0);
+            if (d.fit) { sws_freeContext(d.fit); d.fit = nullptr; d.fitW = d.fitH = 0; }
+        }
+        if (!d.sws || d.rgba.empty()) return false;
+        uint8_t* dstData[1] = { d.rgba.data() };
+        int dstLines[1] = { d.rw * 4 };
+        sws_scale(d.sws, d.frame->data, d.frame->linesize, 0, d.rh, dstData, dstLines);
+        if (d.frame->best_effort_timestamp != AV_NOPTS_VALUE)
+            d.lastPts = d.frame->best_effort_timestamp * av_q2d(d.fmt->streams[d.stream]->time_base);
+        else {
+            double step = 1.0 / 30.0;
+            if (d.ctx->framerate.num > 0 && d.ctx->framerate.den > 0)
+                step = (double)d.ctx->framerate.den / (double)d.ctx->framerate.num;
+            d.lastPts = (d.lastPts < 0 ? 0 : d.lastPts) + step;
+        }
+        return true;
+    }
+    return false;
+}
+
+bool ExportSession::EnsureFrame(int mediaId, double mediaTime) {
+    int idx = OpenDec(mediaId);
+    ExpDec& d = decs[idx];
+    if (d.failed || !d.fmt) return false;
+    bool isImage = media[mediaId].type == "image";
+    if (isImage && d.imageDone) return d.rw > 0;
+    if (mediaTime < 0) mediaTime = 0;
+    bool needSeek = !isImage && (d.lastPts < 0 || mediaTime + 0.08 < d.lastPts || mediaTime - d.lastPts > 0.50);
+    if (needSeek) {
+        int64_t ts = (int64_t)(mediaTime / av_q2d(d.fmt->streams[d.stream]->time_base));
+        av_seek_frame(d.fmt, d.stream, ts, AVSEEK_FLAG_BACKWARD);
+        avcodec_flush_buffers(d.ctx);
+        d.lastPts = -1;
+    }
+    int guard = 0;
+    while (guard++ < 80) {
+        if (d.rw > 0 && d.lastPts >= 0 && d.lastPts + 0.0001 >= mediaTime) {
+            if (isImage) d.imageDone = true;
+            return true;
+        }
+        if (!ReadOne(d)) break;
+        if (isImage) { d.imageDone = true; return d.rw > 0; }
+    }
+    return d.rw > 0;
+}
+
+void ExportSession::BlitToCanvas(int idx) {
+    if (idx < 0 || idx >= (int)decs.size()) return;
+    ExpDec& d = decs[idx];
+    if (d.rw < 1 || d.rh < 1 || d.rgba.empty()) return;
+    int ox, oy, fw, fh;
+    FitInside(d.rw, d.rh, w, h, ox, oy, fw, fh);
+    if (fw < 2 || fh < 2) return;
+    if (!d.fit || d.fitW != fw || d.fitH != fh) {
+        if (d.fit) sws_freeContext(d.fit);
+        d.fit = sws_getContext(d.rw, d.rh, AV_PIX_FMT_RGBA, fw, fh, AV_PIX_FMT_RGBA,
+                               SWS_BILINEAR, nullptr, nullptr, nullptr);
+        d.fitW = fw;
+        d.fitH = fh;
+        d.fitted.assign((size_t)fw * (size_t)fh * 4, 0);
+    }
+    if (!d.fit || d.fitted.empty()) return;
+    uint8_t* sData[1] = { d.rgba.data() };
+    int sLines[1] = { d.rw * 4 };
+    uint8_t* dData[1] = { d.fitted.data() };
+    int dLines[1] = { fw * 4 };
+    sws_scale(d.fit, sData, sLines, 0, d.rh, dData, dLines);
+    for (int y = 0; y < fh; y++) {
+        size_t dst = ((size_t)(oy + y) * (size_t)w + (size_t)ox) * 4;
+        if (dst + (size_t)fw * 4 > canvas.size()) break;
+        memcpy(canvas.data() + dst, d.fitted.data() + (size_t)y * (size_t)fw * 4, (size_t)fw * 4);
+    }
+}
+
+bool ExportSession::Begin(const std::string& outPath, int width, int height, int framesPerSec) {
+    CloseAll();
+    path = outPath;
+    w = width & ~1;
+    h = height & ~1;
+    fps = framesPerSec;
+    if (w < 2 || h < 2 || fps < 1) { status = "Bad export settings"; previewStatus = status; return false; }
+    timelineEnd = 0;
+    for (const auto& c : clips)
+        timelineEnd = std::max(timelineEnd, (double)c.startTime + (double)c.duration);
+    if (timelineEnd < 0.05 || clips.empty()) { status = "Nothing to export"; previewStatus = status; return false; }
+    total = (int)std::ceil(timelineEnd * (double)fps);
+    if (total < 1) total = 1;
+    frameIndex = 0;
+    audioWritten = 0;
+    aPts = 0;
+    videoOnly = false;
+    SetPlaying(false);
+    ResetAudioSync();
+
+    if (avformat_alloc_output_context2(&fmt, nullptr, "mp4", path.c_str()) < 0 || !fmt) {
+        status = "Cannot create mp4"; previewStatus = status; CloseAll(); return false;
+    }
+    const AVCodec* vcodec = avcodec_find_encoder_by_name("libx264");
+    if (!vcodec) vcodec = avcodec_find_encoder_by_name("h264_mf");
+    if (!vcodec) vcodec = avcodec_find_encoder(AV_CODEC_ID_H264);
+    if (!vcodec) { status = "H.264 encoder not found"; previewStatus = status; CloseAll(); return false; }
+    vctx = avcodec_alloc_context3(vcodec);
+    vctx->width = w;
+    vctx->height = h;
+    vctx->time_base = AVRational{1, fps};
+    vctx->framerate = AVRational{fps, 1};
+    vctx->gop_size = fps;
+    vctx->max_b_frames = 0;
+    vctx->pix_fmt = AV_PIX_FMT_YUV420P;
+    if (vcodec->pix_fmts) {
+        bool have = false;
+        for (const AVPixelFormat* p = vcodec->pix_fmts; *p != AV_PIX_FMT_NONE; ++p)
+            if (*p == AV_PIX_FMT_YUV420P) have = true;
+        if (!have) vctx->pix_fmt = vcodec->pix_fmts[0];
+    }
+    int64_t br = (int64_t)w * (int64_t)h;
+    if (br < 4000000) br = 4000000;
+    if (br > 80000000) br = 80000000;
+    vctx->bit_rate = br;
+    if (fmt->oformat->flags & AVFMT_GLOBALHEADER)
+        vctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+    if (vcodec->name && strcmp(vcodec->name, "libx264") == 0) {
+        av_opt_set(vctx->priv_data, "preset", (w >= 3840 ? "ultrafast" : "veryfast"), 0);
+        av_opt_set(vctx->priv_data, "crf", "20", 0);
+    }
+    if (avcodec_open2(vctx, vcodec, nullptr) < 0) {
+        status = "Cannot open video encoder"; previewStatus = status; CloseAll(); return false;
+    }
+    vst = avformat_new_stream(fmt, nullptr);
+    if (!vst) { status = "Cannot add video stream"; previewStatus = status; CloseAll(); return false; }
+    avcodec_parameters_from_context(vst->codecpar, vctx);
+    vst->time_base = vctx->time_base;
+
+    const AVCodec* acodec = avcodec_find_encoder(AV_CODEC_ID_AAC);
+    if (acodec) {
+        AVCodecContext* tryA = avcodec_alloc_context3(acodec);
+        tryA->sample_rate = 48000;
+        tryA->bit_rate = 192000;
+        tryA->time_base = AVRational{1, 48000};
+        tryA->sample_fmt = AV_SAMPLE_FMT_FLTP;
+        if (acodec->sample_fmts) {
+            tryA->sample_fmt = acodec->sample_fmts[0];
+            for (const AVSampleFormat* p = acodec->sample_fmts; *p != AV_SAMPLE_FMT_NONE; ++p)
+                if (*p == AV_SAMPLE_FMT_FLTP) tryA->sample_fmt = *p;
+        }
+        av_channel_layout_default(&tryA->ch_layout, 2);
+        if (fmt->oformat->flags & AVFMT_GLOBALHEADER)
+            tryA->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+        AVChannelLayout inLay;
+        av_channel_layout_default(&inLay, 2);
+        SwrContext* trySwr = nullptr;
+        bool audioOk = avcodec_open2(tryA, acodec, nullptr) >= 0;
+        if (audioOk) {
+            audioOk = swr_alloc_set_opts2(&trySwr, &tryA->ch_layout, tryA->sample_fmt, 48000,
+                                          &inLay, AV_SAMPLE_FMT_S16, 48000, 0, nullptr) >= 0
+                      && trySwr && swr_init(trySwr) >= 0;
+        }
+        av_channel_layout_uninit(&inLay);
+        if (!audioOk) {
+            if (trySwr) swr_free(&trySwr);
+            avcodec_free_context(&tryA);
+            videoOnly = true;
+        } else {
+            actx = tryA;
+            swr = trySwr;
+            aFrameSize = actx->frame_size > 0 ? actx->frame_size : 1024;
+            ast = avformat_new_stream(fmt, nullptr);
+            if (!ast) { status = "Cannot add audio stream"; previewStatus = status; CloseAll(); return false; }
+            avcodec_parameters_from_context(ast->codecpar, actx);
+            ast->time_base = actx->time_base;
+            aframe = av_frame_alloc();
+            aframe->format = actx->sample_fmt;
+            aframe->nb_samples = aFrameSize;
+            aframe->sample_rate = 48000;
+            av_channel_layout_copy(&aframe->ch_layout, &actx->ch_layout);
+            if (av_frame_get_buffer(aframe, 0) < 0) {
+                status = "Audio buffer failed"; previewStatus = status; CloseAll(); return false;
+            }
+        }
+    } else {
+        videoOnly = true;
+    }
+
+    if (avio_open(&fmt->pb, path.c_str(), AVIO_FLAG_WRITE) < 0) {
+        status = "Cannot open output file"; previewStatus = status; CloseAll(); return false;
+    }
+    AVDictionary* opt = nullptr;
+    av_dict_set(&opt, "movflags", "+faststart", 0);
+    if (avformat_write_header(fmt, &opt) < 0) {
+        av_dict_free(&opt);
+        status = "Cannot write mp4 header"; previewStatus = status; CloseAll(); return false;
+    }
+    av_dict_free(&opt);
+    headerWritten = true;
+
+    vframe = av_frame_alloc();
+    vframe->format = vctx->pix_fmt;
+    vframe->width = w;
+    vframe->height = h;
+    if (av_frame_get_buffer(vframe, 32) < 0) {
+        status = "Out of memory"; previewStatus = status; CloseAll(); return false;
+    }
+    toYuv = sws_getContext(w, h, AV_PIX_FMT_RGBA, w, h, vctx->pix_fmt, SWS_BILINEAR, nullptr, nullptr, nullptr);
+    if (!toYuv) { status = "Scaler failed"; previewStatus = status; CloseAll(); return false; }
+    canvas.assign((size_t)w * (size_t)h * 4, 0);
+    pkt = av_packet_alloc();
+    active = true;
+    char buf[160];
+    snprintf(buf, sizeof(buf), "Exporting %dx%d %d fps%s", w, h, fps, videoOnly ? " (no audio encoder)" : "");
+    status = buf;
+    previewStatus = status;
+    return true;
+}
+
+void ExportSession::Step() {
+    if (!active) return;
+    if (frameIndex >= total) { Finish(true); return; }
+    double t = (double)frameIndex / (double)fps;
+    std::fill(canvas.begin(), canvas.end(), 0);
+    int top = -1, bestTrack = -1;
+    for (int i = 0; i < (int)clips.size(); i++) {
+        if (clips[i].track >= 3) continue;
+        if (t < clips[i].startTime || t >= clips[i].startTime + clips[i].duration) continue;
+        if (clips[i].track >= bestTrack) { bestTrack = clips[i].track; top = i; }
+    }
+    if (top >= 0) {
+        const Clip& c = clips[top];
+        float speed = std::max(0.05f, c.speed);
+        double mediaT = c.sourceOffset + (t - c.startTime) * (double)speed;
+        int idx = OpenDec(c.mediaId);
+        if (EnsureFrame(c.mediaId, mediaT)) BlitToCanvas(idx);
+    }
+    if (!vframe || av_frame_make_writable(vframe) < 0) { Fail("Video frame failed"); return; }
+    uint8_t* srcData[1] = { canvas.data() };
+    int srcLines[1] = { w * 4 };
+    sws_scale(toYuv, srcData, srcLines, 0, h, vframe->data, vframe->linesize);
+    vframe->pts = frameIndex;
+    if (avcodec_send_frame(vctx, vframe) < 0) { Fail("Video encode failed"); return; }
+    if (!WriteEncoded(vctx, vst)) { Fail("Video write failed"); return; }
+    if (actx && swr) {
+        int64_t want = av_rescale((int64_t)frameIndex + 1, 48000, fps);
+        int n = (int)(want - audioWritten);
+        if (n > 0) {
+            std::vector<int16_t> tmp((size_t)n * 2);
+            MixTimeline(t, n, tmp.data());
+            afifo.insert(afifo.end(), tmp.begin(), tmp.end());
+            audioWritten += n;
+        }
+        if (!DrainAudio(false)) { Fail("Audio encode failed"); return; }
+    }
+    frameIndex++;
+    int pct = total ? (frameIndex * 100) / total : 0;
+    char buf[160];
+    snprintf(buf, sizeof(buf), "Export %d%%  (%d/%d)  %dx%d", pct, frameIndex, total, w, h);
+    status = buf;
+    previewStatus = status;
+}
+
+void ExportSession::Finish(bool ok) {
+    if (actx && swr) DrainAudio(true);
+    if (vctx) {
+        avcodec_send_frame(vctx, nullptr);
+        WriteEncoded(vctx, vst);
+    }
+    if (actx) {
+        avcodec_send_frame(actx, nullptr);
+        WriteEncoded(actx, ast);
+    }
+    if (fmt && headerWritten) av_write_trailer(fmt);
+    headerWritten = false;
+    std::string saved = path;
+    CloseAll();
+    if (ok) {
+        status = "Exported " + saved;
+        previewStatus = status;
+    }
+}
+
+void ExportSession::Cancel() {
+    if (fmt && headerWritten) av_write_trailer(fmt);
+    headerWritten = false;
+    CloseAll();
+    status = "Export cancelled";
+    previewStatus = status;
+}
+
+ExportSession gExport;
+
+void SyncPreview(int topClip, float dt) {
+    bool playing = isPlaying && !draggingPlayhead;
+    if (topClip < 0 || !player || !player->fmtCtx) {
+        if (playing) currentTime += dt;
+        PumpAudio();
+        return;
+    }
+    int mid = clips[topClip].mediaId;
+    if (mid >= 0 && mid < (int)media.size() && media[mid].type == "image") {
+        if (playing) currentTime += dt;
+        if (!player->hasFrame) {
+            player->Seek(0);
+            player->GrabFrame();
+        }
+        previewStatus = "Image";
+        PumpAudio();
+        return;
+    }
+    if (playing) currentTime += dt;
+    float local = currentTime - clips[topClip].startTime;
+    if (local < 0) local = 0;
+    float speed = std::max(0.05f, clips[topClip].speed);
+    float mediaT = clips[topClip].sourceOffset + local * speed;
+    if (!playing && player->hasFrame && std::fabs(mediaT - shownLocal) <= 0.04f) {
+        PumpAudio();
+        return;
+    }
+    bool far = player->lastPts < 0.0 || (mediaT + 0.12f < (float)player->lastPts) || ((float)player->lastPts + 0.45f < mediaT);
+    if (far || !playing) {
+        player->Seek(std::max(0.0f, mediaT));
+        player->GrabFrame();
+    }
+    int guard = 0;
+    int limit = playing ? 32 : 48;
+    while (player->lastPts >= 0.0 && (float)player->lastPts + 0.0005f < mediaT && guard < limit) {
+        if (!player->GrabFrame()) break;
+        guard++;
+    }
+    shownLocal = mediaT;
+    if (player->hasFrame) {
+        char buf[80];
+        snprintf(buf, sizeof(buf), "FFmpeg %dx%d  x%.2g", player->width, player->height, speed);
+        previewStatus = buf;
+    }
+    PumpAudio();
+}
+
+
 #endif
 
 void BlitVideo(ImVec2 p0, ImVec2 p1, GLuint tex, int vw, int vh, ImVec2 clip0, ImVec2 clip1) {
@@ -646,6 +1199,7 @@ void SetClipSpeed(Clip& c, float sp) {
     c.duration = std::max(0.1f, span / sp);
     shownLocal = -1000.0f;
 #ifdef HAVE_FFMPEG
+    if (player) player->lastPts = -1;
     ResetAudioSync();
 #endif
 }
@@ -850,6 +1404,181 @@ void ApplyTrim(int idx, float mouseX) {
     }
 }
 
+void ExportDims(int aspect, int res, int& w, int& h) {
+    const int heights[] = {720, 1080, 1440, 2160, 4320};
+    const int widths169[] = {1280, 1920, 2560, 3840, 7680};
+    if (res < 0) res = 0;
+    if (res > 4) res = 4;
+    if (aspect < 0) aspect = 0;
+    if (aspect > 3) aspect = 3;
+    int H = heights[res];
+    int W = widths169[res];
+    if (aspect == 0) { w = W; h = H; }
+    else if (aspect == 1) { w = H; h = W; }
+    else if (aspect == 2) { w = H; h = H; }
+    else { h = H; w = (H * 4 / 3) & ~1; }
+    w &= ~1;
+    h &= ~1;
+    if (w < 2) w = 2;
+    if (h < 2) h = 2;
+}
+
+std::string SaveDialog(HWND owner, const char* filter, const char* defExt, const char* title) {
+#ifdef _WIN32
+    char buf[4096] = {0};
+    OPENFILENAMEA ofn = {0};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = owner;
+    ofn.lpstrFilter = filter;
+    ofn.lpstrFile = buf;
+    ofn.nMaxFile = sizeof(buf);
+    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_EXPLORER | OFN_NOCHANGEDIR | OFN_PATHMUSTEXIST;
+    ofn.lpstrDefExt = defExt;
+    ofn.lpstrTitle = title;
+    if (GetSaveFileNameA(&ofn)) return buf;
+#else
+    (void)owner; (void)filter; (void)defExt; (void)title;
+#endif
+    return {};
+}
+
+std::string OpenDialog(HWND owner, const char* filter, const char* title) {
+#ifdef _WIN32
+    char buf[4096] = {0};
+    OPENFILENAMEA ofn = {0};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = owner;
+    ofn.lpstrFilter = filter;
+    ofn.lpstrFile = buf;
+    ofn.nMaxFile = sizeof(buf);
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER | OFN_NOCHANGEDIR;
+    ofn.lpstrTitle = title;
+    if (GetOpenFileNameA(&ofn)) return buf;
+#else
+    (void)owner; (void)filter; (void)title;
+#endif
+    return {};
+}
+
+void ClearProject() {
+    for (auto& m : media) {
+        if (m.thumb) { glDeleteTextures(1, &m.thumb); m.thumb = 0; }
+    }
+    media.clear();
+    clips.clear();
+    selectedClip = -1;
+    draggingClip = -1;
+    trimmingClip = -1;
+    dragVolClip = -1;
+    contextClip = -1;
+    currentTime = 0;
+    shownLocal = -1000.0f;
+#ifdef HAVE_FFMPEG
+    SetPlaying(false);
+    for (auto& a : audioSrcs) CloseAudioSrc(a);
+    audioSrcs.clear();
+    if (player) player->Close();
+    playingMediaId = -1;
+#endif
+}
+
+bool SaveProject(const std::string& path) {
+    FILE* f = fopen(path.c_str(), "wb");
+    if (!f) return false;
+    fprintf(f, "DWP1\n");
+    fprintf(f, "time %.6f\n", currentTime);
+    fprintf(f, "snap %d\n", snapEnabled ? 1 : 0);
+    fprintf(f, "pps %.3f\n", pixelsPerSecond);
+    for (const auto& m : media) {
+        std::string p = m.path;
+        for (char& ch : p) if (ch == '\n' || ch == '\r') ch = ' ';
+        fprintf(f, "M %s %.6f %.6f\n%s\n", m.type.c_str(), m.duration, m.aspect, p.c_str());
+    }
+    for (const auto& c : clips) {
+        fprintf(f, "C %d %.6f %.6f %.6f %.6f %d %d %d %d\n",
+                c.mediaId, c.startTime, c.duration, c.sourceOffset, c.speed,
+                c.fadeIn ? 1 : 0, c.fadeOut ? 1 : 0, c.track, (int)c.volume.size());
+        for (const auto& v : c.volume)
+            fprintf(f, "V %.6f %.6f\n", v.norm, v.gain);
+    }
+    fclose(f);
+    return true;
+}
+
+static void TrimLine(std::string& s) {
+    while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
+}
+
+bool LoadProject(const std::string& path) {
+    FILE* f = fopen(path.c_str(), "rb");
+    if (!f) return false;
+    char line[8192];
+    if (!fgets(line, sizeof(line), f) || strncmp(line, "DWP1", 4) != 0) {
+        fclose(f);
+        return false;
+    }
+    ClearProject();
+    while (fgets(line, sizeof(line), f)) {
+        if (strncmp(line, "time ", 5) == 0) {
+            currentTime = (float)atof(line + 5);
+        } else if (strncmp(line, "snap ", 5) == 0) {
+            snapEnabled = atoi(line + 5) != 0;
+        } else if (strncmp(line, "pps ", 4) == 0) {
+            float p = (float)atof(line + 4);
+            if (p > 5.0f && p < 400.0f) pixelsPerSecond = p;
+        } else if (line[0] == 'M') {
+            char type[32] = {0};
+            float dur = 5.0f, aspect = 16.0f / 9.0f;
+            if (sscanf(line, "M %31s %f %f", type, &dur, &aspect) == 3 && fgets(line, sizeof(line), f)) {
+                std::string p = line;
+                TrimLine(p);
+                MediaItem m;
+                m.path = p;
+                m.type = type;
+                m.duration = dur > 0.05f ? dur : 5.0f;
+                m.aspect = aspect > 0.01f ? aspect : (16.0f / 9.0f);
+                size_t slash = p.find_last_of("/\\");
+                m.name = (slash == std::string::npos) ? p : p.substr(slash + 1);
+                media.push_back(m);
+            }
+        } else if (line[0] == 'C') {
+            Clip c;
+            int fi = 0, fo = 0, nvol = 0;
+            if (sscanf(line, "C %d %f %f %f %f %d %d %d %d",
+                       &c.mediaId, &c.startTime, &c.duration, &c.sourceOffset, &c.speed,
+                       &fi, &fo, &c.track, &nvol) == 9) {
+                c.fadeIn = fi != 0;
+                c.fadeOut = fo != 0;
+                if (c.speed < 0.05f) c.speed = 1.0f;
+                if (nvol < 0) nvol = 0;
+                if (nvol > 64) nvol = 64;
+                for (int i = 0; i < nvol; i++) {
+                    if (!fgets(line, sizeof(line), f)) break;
+                    VolPoint vp;
+                    if (sscanf(line, "V %f %f", &vp.norm, &vp.gain) == 2) c.volume.push_back(vp);
+                }
+                clips.push_back(c);
+            }
+        }
+    }
+    fclose(f);
+    for (auto& m : media) {
+#ifdef HAVE_FFMPEG
+        float saved = m.duration;
+        if (m.type != "image") {
+            float probed = ProbeDuration(m.path);
+            if (probed > 0.05f) m.duration = std::max(saved, probed);
+        }
+        MakeThumbnail(m);
+#else
+        (void)m;
+#endif
+    }
+    shownLocal = -1000.0f;
+    return true;
+}
+
+
 int main(int argc, char* argv[]) {
 #ifdef _WIN32
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
@@ -874,7 +1603,7 @@ int main(int argc, char* argv[]) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
-    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 3",
+    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 4",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900,
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!window) { SDL_Quit(); return 1; }
@@ -904,7 +1633,7 @@ int main(int argc, char* argv[]) {
                 if (event.key.keysym.sym == SDLK_ESCAPE) running = false;
                 if (event.key.keysym.sym == SDLK_SPACE) {
 #ifdef HAVE_FFMPEG
-                    SetPlaying(!isPlaying);
+                    if (!gExport.active) SetPlaying(!isPlaying);
 #else
                     isPlaying = !isPlaying;
 #endif
@@ -934,6 +1663,18 @@ int main(int argc, char* argv[]) {
         ImGui::Begin("Editor", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
 
         if (ImGui::Button("Import")) ImportFiles(hwnd);
+        ImGui::SameLine();
+        if (ImGui::Button("Export")) requestExport = true;
+        ImGui::SameLine();
+        if (ImGui::Button("Save")) {
+            std::string p = SaveDialog(hwnd, "DaniWorlds Project (*.dwp)\0*.dwp\0", "dwp", "Save Project");
+            if (!p.empty()) previewStatus = SaveProject(p) ? "Project saved" : "Save failed";
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Load")) {
+            std::string p = OpenDialog(hwnd, "DaniWorlds Project (*.dwp)\0*.dwp\0", "Load Project");
+            if (!p.empty()) previewStatus = LoadProject(p) ? "Project loaded" : "Load failed";
+        }
         ImGui::SameLine();
         if (ImGui::Button(snapEnabled ? "Snap ON" : "Snap OFF")) snapEnabled = !snapEnabled;
         ImGui::SameLine();
@@ -997,10 +1738,14 @@ int main(int argc, char* argv[]) {
         previewMax = p1;
 
         topClip = -1;
-        for (int i = (int)clips.size() - 1; i >= 0; --i) {
+        int bestTrack = -1;
+        for (int i = 0; i < (int)clips.size(); i++) {
             if (clips[i].track >= 3) continue;
-            if (currentTime >= clips[i].startTime && currentTime < clips[i].startTime + clips[i].duration)
+            if (currentTime < clips[i].startTime || currentTime >= clips[i].startTime + clips[i].duration) continue;
+            if (clips[i].track >= bestTrack) {
+                bestTrack = clips[i].track;
                 topClip = i;
+            }
         }
         if (topClip >= 0) EnsurePlayerForClip(topClip);
         else {
@@ -1043,19 +1788,56 @@ int main(int argc, char* argv[]) {
         if (ImGui::RadioButton("Select", activeTool == 0)) activeTool = 0; ImGui::SameLine();
         if (ImGui::RadioButton("Trim", activeTool == 1)) activeTool = 1; ImGui::SameLine();
         if (ImGui::RadioButton("Split", activeTool == 2)) activeTool = 2; ImGui::SameLine();
-        ImGui::Text("| C = split at playhead | Right click clip for fade / speed");
+        ImGui::Text("| C = split | Right click: fade / speed | Scroll the bar under the timeline to go later");
         ImGui::Separator();
 
-        ImGui::BeginChild("Timeline", ImVec2(0, 0), true);
+        float tlSeconds = 600.0f;
+        for (const auto& c : clips)
+            tlSeconds = std::max(tlSeconds, c.startTime + c.duration + 90.0f);
+        float timeW = tlSeconds * pixelsPerSecond;
+        ImGui::BeginChild("Timeline", ImVec2(0, 0), true, ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_AlwaysHorizontalScrollbar);
         const char* trackNames[] = {"V1", "V2", "V3", "A1", "A2", "A3"};
         float trackH = 42.0f;
         ImVec2 trackPositions[6];
 
+        ImGui::BeginChild("ruler", ImVec2(timeW + 90.0f, 26.0f), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        ImGui::Dummy(ImVec2(4, 14));
+        ImGui::SameLine(46.0f);
+        float rulerOrigin = ImGui::GetCursorScreenPos().x;
+        ImGui::InvisibleButton("rulerhit", ImVec2(std::max(10.0f, timeW), 14.0f));
+        {
+            ImDrawList* rdl = ImGui::GetWindowDrawList();
+            ImVec2 rr0 = ImGui::GetItemRectMin();
+            ImVec2 rr1 = ImGui::GetItemRectMax();
+            for (int s = 0; s <= (int)tlSeconds; s++) {
+                float x = rulerOrigin + s * pixelsPerSecond;
+                bool major = (s % 5) == 0;
+                rdl->AddLine(ImVec2(x, rr0.y + (major ? 0.0f : 8.0f)), ImVec2(x, rr1.y), IM_COL32(180, 180, 180, major ? 230 : 110));
+                if (major) {
+                    char lab[16];
+                    snprintf(lab, sizeof(lab), "%d:%02d", s / 60, s % 60);
+                    rdl->AddText(ImVec2(x + 2.0f, rr0.y - 2.0f), IM_COL32(210, 210, 210, 255), lab);
+                }
+            }
+            if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(0)) {
+                float nt = (ImGui::GetMousePos().x - rulerOrigin) / pixelsPerSecond;
+                if (nt < 0) nt = 0;
+                currentTime = nt;
+                shownLocal = -1000.0f;
+                draggingPlayhead = true;
+#ifdef HAVE_FFMPEG
+                ResetAudioSync();
+                if (player) player->lastPts = -1;
+#endif
+            }
+        }
+        ImGui::EndChild();
+
         for (int t = 0; t < 6; t++) {
             ImGui::PushID(t);
-            ImGui::BeginChild("track", ImVec2(0, trackH), true);
+            ImGui::BeginChild("track", ImVec2(timeW + 90.0f, trackH), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
             ImGui::Text("%s", trackNames[t]);
-            ImGui::SameLine();
+            ImGui::SameLine(46.0f);
             ImVec2 trackStart = ImGui::GetCursorScreenPos();
             trackPositions[t] = trackStart;
             float trackW = ImGui::GetContentRegionAvail().x;
@@ -1143,6 +1925,15 @@ int main(int argc, char* argv[]) {
                     ImVec2 cp1(x + w, trackStart.y + trackH - 8);
                     if (!ImGui::IsMouseHoveringRect(cp0, cp1)) continue;
                     ImVec2 mouse = ImGui::GetMousePos();
+                    if (ImGui::IsMouseClicked(0) && std::fabs(mouse.x - (trackStart.x + currentTime * pixelsPerSecond)) <= 6.0f) {
+                        draggingPlayhead = true;
+                        shownLocal = -1000.0f;
+#ifdef HAVE_FFMPEG
+                        ResetAudioSync();
+                        if (player) player->lastPts = -1;
+#endif
+                        break;
+                    }
                     if (ImGui::IsMouseClicked(1)) {
                         selectedClip = i;
                         contextClip = i;
@@ -1269,26 +2060,43 @@ int main(int argc, char* argv[]) {
             } else draggingClip = -1;
         }
 
+        float phX = trackPositions[0].x + currentTime * pixelsPerSecond;
         ImVec2 tlMin = ImGui::GetWindowPos();
-        float phX = tlMin.x + 50 + currentTime * pixelsPerSecond;
-        ImGui::GetWindowDrawList()->AddLine(ImVec2(phX, tlMin.y + 8), ImVec2(phX, tlMin.y + 290), IM_COL32(255, 50, 50, 255), 2.0f);
+        float tlBottom = tlMin.y + ImGui::GetWindowSize().y;
+        ImGui::GetWindowDrawList()->AddLine(ImVec2(phX, tlMin.y), ImVec2(phX, tlBottom), IM_COL32(255, 50, 50, 255), 2.0f);
 
-        if (ImGui::IsMouseClicked(0) && ImGui::IsMouseHoveringRect(ImVec2(phX - 6, tlMin.y), ImVec2(phX + 6, tlMin.y + 290)))
-            draggingPlayhead = true;
         if (draggingPlayhead) {
             if (ImGui::IsMouseDown(0)) {
-                float newTime = (ImGui::GetMousePos().x - (tlMin.x + 50)) / pixelsPerSecond;
+                float newTime = (ImGui::GetMousePos().x - trackPositions[0].x) / pixelsPerSecond;
                 if (newTime < 0) newTime = 0;
                 if (std::fabs(newTime - currentTime) > 0.0001f) {
                     currentTime = newTime;
                     shownLocal = -1000.0f;
 #ifdef HAVE_FFMPEG
                     ResetAudioSync();
+                    if (player) player->lastPts = -1;
 #endif
                 }
             } else draggingPlayhead = false;
         }
 
+        if (isPlaying || draggingClip >= 0 || draggingPlayhead || trimmingClip >= 0) {
+            float mx = ImGui::GetMousePos().x;
+            float viewL = tlMin.x;
+            float viewR = tlMin.x + ImGui::GetWindowSize().x;
+            if (draggingClip >= 0 || draggingPlayhead || trimmingClip >= 0) {
+                if (mx > viewR - 28.0f) ImGui::SetScrollX(ImGui::GetScrollX() + 30.0f);
+                else if (mx < viewL + 16.0f) ImGui::SetScrollX(std::max(0.0f, ImGui::GetScrollX() - 30.0f));
+            }
+            if (isPlaying && !draggingPlayhead) {
+                float phContent = ImGui::GetScrollX() + (phX - tlMin.x);
+                float viewRight = ImGui::GetScrollX() + ImGui::GetWindowSize().x - 80.0f;
+                if (phContent > viewRight)
+                    ImGui::SetScrollX(std::max(0.0f, phContent - ImGui::GetWindowSize().x * 0.35f));
+            }
+        }
+
+        ImGui::Dummy(ImVec2(timeW + 90.0f, 1.0f));
         ImGui::EndChild();
 
         if (openClipMenu) {
@@ -1327,41 +2135,82 @@ int main(int argc, char* argv[]) {
         }
         ImGui::End();
 
+        if (requestExport) {
+            ImGui::OpenPopup("Export Video");
+            requestExport = false;
+        }
+        ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+        if (ImGui::BeginPopupModal("Export Video", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::TextUnformatted("Export video");
+            ImGui::Separator();
+            ImGui::TextUnformatted("Aspect");
+            if (ImGui::RadioButton("16:9", exAspect == 0)) exAspect = 0;
+            ImGui::SameLine();
+            if (ImGui::RadioButton("9:16", exAspect == 1)) exAspect = 1;
+            ImGui::SameLine();
+            if (ImGui::RadioButton("1:1", exAspect == 2)) exAspect = 2;
+            ImGui::SameLine();
+            if (ImGui::RadioButton("4:3", exAspect == 3)) exAspect = 3;
+            ImGui::Spacing();
+            ImGui::TextUnformatted("Resolution");
+            if (ImGui::RadioButton("720p", exRes == 0)) exRes = 0;
+            ImGui::SameLine();
+            if (ImGui::RadioButton("1080p", exRes == 1)) exRes = 1;
+            ImGui::SameLine();
+            if (ImGui::RadioButton("2K", exRes == 2)) exRes = 2;
+            ImGui::SameLine();
+            if (ImGui::RadioButton("4K", exRes == 3)) exRes = 3;
+            ImGui::SameLine();
+            if (ImGui::RadioButton("8K", exRes == 4)) exRes = 4;
+            ImGui::Spacing();
+            ImGui::TextUnformatted("FPS");
+            if (ImGui::RadioButton("24", exFpsIdx == 0)) exFpsIdx = 0;
+            ImGui::SameLine();
+            if (ImGui::RadioButton("30", exFpsIdx == 1)) exFpsIdx = 1;
+            ImGui::SameLine();
+            if (ImGui::RadioButton("50", exFpsIdx == 2)) exFpsIdx = 2;
+            ImGui::SameLine();
+            if (ImGui::RadioButton("60", exFpsIdx == 3)) exFpsIdx = 3;
+            int ew = 0, eh = 0;
+            const int fpsVals[] = {24, 30, 50, 60};
+            int fps = fpsVals[exFpsIdx < 0 || exFpsIdx > 3 ? 1 : exFpsIdx];
+            ExportDims(exAspect, exRes, ew, eh);
+            ImGui::Separator();
+            ImGui::Text("Output: %d x %d   @ %d fps", ew, eh, fps);
+            if (exRes >= 3) ImGui::TextDisabled("4K and 8K take a long time.");
+            if (ImGui::Button("Choose file and export")) {
+                ImGui::CloseCurrentPopup();
+                std::string out = SaveDialog(hwnd, "MP4 video (*.mp4)\0*.mp4\0", "mp4", "Export Video");
+                if (!out.empty()) {
 #ifdef HAVE_FFMPEG
-        if (topClip >= 0 && player && player->fmtCtx) {
-            float local = currentTime - clips[topClip].startTime;
-            if (local < 0) local = 0;
-            float mediaT = clips[topClip].sourceOffset + local * std::max(0.05f, clips[topClip].speed);
-            if (isPlaying && !draggingPlayhead) {
-                currentTime += io.DeltaTime;
-                static float accum = 0;
-                accum += io.DeltaTime;
-                if (accum > 0.033f) {
-                    frameDebt += std::max(0.05f, clips[topClip].speed);
-                    int grabs = (int)frameDebt;
-                    if (grabs < 1) grabs = 1;
-                    frameDebt -= grabs;
-                    if (frameDebt < 0) frameDebt = 0;
-                    for (int g = 0; g < grabs; g++) player->GrabFrame();
-                    char buf[64];
-                    snprintf(buf, sizeof(buf), "FFmpeg %dx%d x%.2g", player->width, player->height, clips[topClip].speed);
-                    previewStatus = buf;
-                    shownLocal = mediaT;
-                    accum = 0;
-                }
-            } else if (!isPlaying && std::fabs(mediaT - shownLocal) > 0.08f) {
-                player->Seek(mediaT);
-                if (player->GrabFrame()) {
-                    char buf[64];
-                    snprintf(buf, sizeof(buf), "FFmpeg %dx%d", player->width, player->height);
-                    previewStatus = buf;
-                    shownLocal = mediaT;
+                    gExport.Begin(out, ew, eh, fps);
+#else
+                    previewStatus = "FFmpeg not linked";
+#endif
                 }
             }
-        } else if (isPlaying && !draggingPlayhead) {
-            currentTime += io.DeltaTime;
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
         }
-        PumpAudio();
+
+#ifdef HAVE_FFMPEG
+        if (gExport.active) {
+            ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+            ImGui::Begin("Exporting", nullptr, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize);
+            float p = gExport.total > 0 ? (float)gExport.frameIndex / (float)gExport.total : 0.0f;
+            ImGui::ProgressBar(p, ImVec2(380, 0));
+            ImGui::TextUnformatted(gExport.status.c_str());
+            if (ImGui::Button("Cancel export")) gExport.Cancel();
+            ImGui::End();
+            int budget = 2;
+            long pix = (long)gExport.w * (long)gExport.h;
+            if (pix >= 3840L * 2160L) budget = 1;
+            else if (pix <= 1280L * 720L) budget = 4;
+            for (int s = 0; s < budget && gExport.active; s++) gExport.Step();
+        } else {
+            SyncPreview(topClip, io.DeltaTime);
+        }
 #else
         if (isPlaying && !draggingPlayhead) currentTime += io.DeltaTime;
 #endif
@@ -1382,6 +2231,7 @@ int main(int argc, char* argv[]) {
     }
 
 #ifdef HAVE_FFMPEG
+    if (gExport.active) gExport.Cancel();
     if (player) { delete player; player = nullptr; }
     for (auto& a : audioSrcs) CloseAudioSrc(a);
     audioSrcs.clear();
