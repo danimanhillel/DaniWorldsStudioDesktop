@@ -842,12 +842,6 @@ bool ExportSession::Begin(const std::string& outPath, int width, int height, int
     vctx->gop_size = fps;
     vctx->max_b_frames = 0;
     vctx->pix_fmt = AV_PIX_FMT_YUV420P;
-    if (vcodec->pix_fmts) {
-        bool have = false;
-        for (const AVPixelFormat* p = vcodec->pix_fmts; *p != AV_PIX_FMT_NONE; ++p)
-            if (*p == AV_PIX_FMT_YUV420P) have = true;
-        if (!have) vctx->pix_fmt = vcodec->pix_fmts[0];
-    }
     int64_t br = (int64_t)w * (int64_t)h;
     if (br < 4000000) br = 4000000;
     if (br > 80000000) br = 80000000;
@@ -873,11 +867,6 @@ bool ExportSession::Begin(const std::string& outPath, int width, int height, int
         tryA->bit_rate = 192000;
         tryA->time_base = AVRational{1, 48000};
         tryA->sample_fmt = AV_SAMPLE_FMT_FLTP;
-        if (acodec->sample_fmts) {
-            tryA->sample_fmt = acodec->sample_fmts[0];
-            for (const AVSampleFormat* p = acodec->sample_fmts; *p != AV_SAMPLE_FMT_NONE; ++p)
-                if (*p == AV_SAMPLE_FMT_FLTP) tryA->sample_fmt = *p;
-        }
         av_channel_layout_default(&tryA->ch_layout, 2);
         if (fmt->oformat->flags & AVFMT_GLOBALHEADER)
             tryA->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
@@ -1048,8 +1037,8 @@ void SyncPreview(int topClip, float dt) {
         PumpAudio();
         return;
     }
-    bool far = player->lastPts < 0.0 || (mediaT + 0.12f < (float)player->lastPts) || ((float)player->lastPts + 0.45f < mediaT);
-    if (far || !playing) {
+    bool needSeek = player->lastPts < 0.0 || (mediaT + 0.12f < (float)player->lastPts) || ((float)player->lastPts + 0.45f < mediaT);
+    if (needSeek || !playing) {
         player->Seek(std::max(0.0f, mediaT));
         player->GrabFrame();
     }
@@ -1603,7 +1592,7 @@ int main(int argc, char* argv[]) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
-    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 4",
+    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 5",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900,
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!window) { SDL_Quit(); return 1; }
