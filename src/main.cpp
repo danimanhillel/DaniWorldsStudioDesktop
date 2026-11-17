@@ -21,6 +21,7 @@ extern "C" {
 #include <libavutil/imgutils.h>
 #include <libavutil/channel_layout.h>
 #include <libavutil/opt.h>
+#include <libavutil/hwcontext.h>
 }
 #endif
 
@@ -161,6 +162,102 @@ struct AudioSrc {
 std::vector<AudioSrc> audioSrcs;
 SDL_AudioDeviceID audioDev = 0;
 
+struct HwDec {
+    AVBufferRef* device = nullptr;
+    AVFrame* sw = nullptr;
+    AVPixelFormat pix = AV_PIX_FMT_NONE;
+    const char* name = "CPU";
+    bool on = false;
+    void Free() {
+        if (sw) av_frame_free(&sw);
+        if (device) av_buffer_unref(&device);
+        pix = AV_PIX_FMT_NONE;
+        name = "CPU";
+        on = false;
+    }
+};
+
+static AVPixelFormat HwGetFormat(AVCodecContext* ctx, const AVPixelFormat* fmts) {
+    AVPixelFormat want = (ctx && ctx->opaque) ? ((HwDec*)ctx->opaque)->pix : AV_PIX_FMT_NONE;
+    if (want != AV_PIX_FMT_NONE) {
+        for (const AVPixelFormat* p = fmts; *p != AV_PIX_FMT_NONE; ++p)
+            if (*p == want) return *p;
+    }
+    return fmts[0];
+}
+
+static bool AttachHw(AVCodecContext* ctx, const AVCodec* codec, HwDec& hw) {
+    const AVHWDeviceType types[2] = { AV_HWDEVICE_TYPE_CUDA, AV_HWDEVICE_TYPE_D3D11VA };
+    const char* names[2] = { "NVDEC", "D3D11" };
+    for (int t = 0; t < 2; t++) {
+        AVPixelFormat pix = AV_PIX_FMT_NONE;
+        bool found = false;
+        for (int i = 0;; i++) {
+            const AVCodecHWConfig* cfg = avcodec_get_hw_config(codec, i);
+            if (!cfg) break;
+            if ((cfg->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) && cfg->device_type == types[t]) {
+                found = true;
+                pix = cfg->pix_fmt;
+                break;
+            }
+        }
+        if (!found) continue;
+        AVBufferRef* dev = nullptr;
+        if (av_hwdevice_ctx_create(&dev, types[t], nullptr, nullptr, 0) < 0) continue;
+        hw.Free();
+        hw.device = dev;
+        hw.pix = pix;
+        hw.name = names[t];
+        hw.on = true;
+        ctx->hw_device_ctx = av_buffer_ref(dev);
+        ctx->opaque = &hw;
+        ctx->get_format = HwGetFormat;
+        ctx->thread_count = 1;
+        return true;
+    }
+    return false;
+}
+
+static bool OpenDecoder(AVCodecContext*& ctx, const AVCodec* codec, const AVCodecParameters* par, HwDec*& hw, const char*& how) {
+    how = "CPU";
+    if (!codec || !par) return false;
+    for (int attempt = 0; attempt < 2; attempt++) {
+        if (ctx) avcodec_free_context(&ctx);
+        ctx = avcodec_alloc_context3(codec);
+        if (!ctx) return false;
+        if (avcodec_parameters_to_context(ctx, par) < 0) {
+            avcodec_free_context(&ctx);
+            return false;
+        }
+        if (attempt == 0) {
+            if (!hw) hw = new HwDec();
+            else hw->Free();
+            if (!AttachHw(ctx, codec, *hw)) continue;
+        } else if (hw) {
+            hw->Free();
+        }
+        if (avcodec_open2(ctx, codec, nullptr) >= 0) {
+            if (attempt == 0 && hw && hw->on && ctx->pix_fmt == hw->pix) how = hw->name;
+            else how = "CPU";
+            return true;
+        }
+    }
+    if (ctx) avcodec_free_context(&ctx);
+    if (hw) hw->Free();
+    return false;
+}
+
+static AVFrame* DownloadFrame(HwDec* hw, AVFrame* frame) {
+    if (!frame) return nullptr;
+    if (!hw || !hw->on || frame->format != hw->pix) return frame;
+    if (!hw->sw) hw->sw = av_frame_alloc();
+    if (!hw->sw) return nullptr;
+    av_frame_unref(hw->sw);
+    if (av_hwframe_transfer_data(hw->sw, frame, 0) < 0) return nullptr;
+    hw->sw->best_effort_timestamp = frame->best_effort_timestamp;
+    return hw->sw;
+}
+
 class VideoPlayer {
 public:
     AVFormatContext* fmtCtx = nullptr;
@@ -169,11 +266,14 @@ public:
     AVFrame* frame = nullptr;
     AVFrame* rgbFrame = nullptr;
     uint8_t* rgbBuffer = nullptr;
+    HwDec* hw = nullptr;
     int videoStream = -1;
     int width = 0, height = 0;
     GLuint texture = 0;
     bool hasFrame = false;
     double lastPts = -1;
+    AVPixelFormat swsFmt = AV_PIX_FMT_NONE;
+    const char* decName = "CPU";
     std::string lastError;
 
     ~VideoPlayer() { Close(); }
@@ -195,31 +295,34 @@ public:
         if (videoStream < 0) { lastError = "No video stream"; return false; }
         const AVCodec* codec = avcodec_find_decoder(fmtCtx->streams[videoStream]->codecpar->codec_id);
         if (!codec) { lastError = "No decoder"; return false; }
-        codecCtx = avcodec_alloc_context3(codec);
-        avcodec_parameters_to_context(codecCtx, fmtCtx->streams[videoStream]->codecpar);
-        if (avcodec_open2(codecCtx, codec, nullptr) < 0) {
+        const char* openedAs = "CPU";
+        if (!OpenDecoder(codecCtx, codec, fmtCtx->streams[videoStream]->codecpar, hw, openedAs)) {
             lastError = "Cannot open codec"; return false;
         }
+        decName = openedAs;
         frame = av_frame_alloc();
         rgbFrame = av_frame_alloc();
         lastError.clear();
         return true;
     }
 
-    bool EnsureTexture() {
-        if (texture && swsCtx) return true;
-        if (!frame || frame->width <= 0 || frame->height <= 0) return false;
-        width = frame->width;
-        height = frame->height;
-        AVPixelFormat srcFmt = (AVPixelFormat)frame->format;
-        if (srcFmt == AV_PIX_FMT_NONE) { lastError = "Bad pixel format"; return false; }
+    bool EnsureTextureFrom(AVFrame* src) {
+        if (!src || src->width <= 0 || src->height <= 0) return false;
+        AVPixelFormat srcFmt = (AVPixelFormat)src->format;
+        if (texture && swsCtx && width == src->width && height == src->height && swsFmt == srcFmt) return true;
+        if (swsCtx) { sws_freeContext(swsCtx); swsCtx = nullptr; }
+        if (rgbBuffer) { av_free(rgbBuffer); rgbBuffer = nullptr; }
+        if (!rgbFrame) rgbFrame = av_frame_alloc();
+        width = src->width;
+        height = src->height;
+        swsFmt = srcFmt;
         int numBytes = av_image_get_buffer_size(AV_PIX_FMT_RGBA, width, height, 1);
         rgbBuffer = (uint8_t*)av_malloc(numBytes);
         av_image_fill_arrays(rgbFrame->data, rgbFrame->linesize, rgbBuffer, AV_PIX_FMT_RGBA, width, height, 1);
         swsCtx = sws_getContext(width, height, srcFmt, width, height, AV_PIX_FMT_RGBA,
                                 SWS_BILINEAR, nullptr, nullptr, nullptr);
         if (!swsCtx) { lastError = "sws failed"; return false; }
-        glGenTextures(1, &texture);
+        if (!texture) glGenTextures(1, &texture);
         glBindTexture(GL_TEXTURE_2D, texture);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -253,8 +356,10 @@ public:
                                 step = (double)codecCtx->framerate.den / (double)codecCtx->framerate.num;
                             lastPts = (lastPts < 0.0 ? 0.0 : lastPts) + step;
                         }
-                        if (!EnsureTexture()) { av_packet_free(&packet); return false; }
-                        sws_scale(swsCtx, frame->data, frame->linesize, 0, height, rgbFrame->data, rgbFrame->linesize);
+                        AVFrame* src = DownloadFrame(hw, frame);
+                        if (!src) { av_packet_free(&packet); return false; }
+                        if (!EnsureTextureFrom(src)) { av_packet_free(&packet); return false; }
+                        sws_scale(swsCtx, src->data, src->linesize, 0, height, rgbFrame->data, rgbFrame->linesize);
                         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
                         glBindTexture(GL_TEXTURE_2D, texture);
                         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, rgbFrame->data[0]);
@@ -277,11 +382,14 @@ public:
         if (rgbFrame) { av_frame_free(&rgbFrame); }
         if (frame) { av_frame_free(&frame); }
         if (codecCtx) { avcodec_free_context(&codecCtx); }
+        if (hw) { hw->Free(); delete hw; hw = nullptr; }
         if (fmtCtx) { avformat_close_input(&fmtCtx); }
         hasFrame = false;
         width = 0;
         height = 0;
         lastPts = -1;
+        swsFmt = AV_PIX_FMT_NONE;
+        decName = "CPU";
     }
 };
 
@@ -747,6 +855,7 @@ struct ExpDec {
     bool imageDone = false;
     std::vector<uint8_t> rgba;
     std::vector<uint8_t> fitted;
+    HwDec* hw = nullptr;
 };
 
 struct ExportSession {
@@ -814,6 +923,7 @@ void ExportSession::CloseAll() {
         if (d.frame) av_frame_free(&d.frame);
         if (d.pkt) av_packet_free(&d.pkt);
         if (d.ctx) avcodec_free_context(&d.ctx);
+        if (d.hw) { d.hw->Free(); delete d.hw; d.hw = nullptr; }
         if (d.fmt) avformat_close_input(&d.fmt);
         d.fit = nullptr;
         d.sws = nullptr;
@@ -895,10 +1005,9 @@ int ExportSession::OpenDec(int mediaId) {
         if (d.fmt->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) { d.stream = (int)i; break; }
     }
     const AVCodec* codec = (d.stream >= 0) ? avcodec_find_decoder(d.fmt->streams[d.stream]->codecpar->codec_id) : nullptr;
-    d.ctx = codec ? avcodec_alloc_context3(codec) : nullptr;
-    if (d.stream < 0 || !d.ctx ||
-        avcodec_parameters_to_context(d.ctx, d.fmt->streams[d.stream]->codecpar) < 0 ||
-        avcodec_open2(d.ctx, codec, nullptr) < 0) {
+    const char* how = "CPU";
+    if (d.stream < 0 || !codec ||
+        !OpenDecoder(d.ctx, codec, d.fmt->streams[d.stream]->codecpar, d.hw, how)) {
         d.failed = true;
         decs.push_back(std::move(d));
         return (int)decs.size() - 1;
@@ -917,13 +1026,14 @@ bool ExportSession::ReadOne(ExpDec& d) {
         av_packet_unref(d.pkt);
         if (send < 0 && send != AVERROR(EAGAIN)) continue;
         if (avcodec_receive_frame(d.ctx, d.frame) != 0) continue;
-        if (d.frame->width <= 0 || d.frame->height <= 0) continue;
-        AVPixelFormat srcFmt = (AVPixelFormat)d.frame->format;
+        AVFrame* src = DownloadFrame(d.hw, d.frame);
+        if (!src || src->width <= 0 || src->height <= 0) continue;
+        AVPixelFormat srcFmt = (AVPixelFormat)src->format;
         if (srcFmt == AV_PIX_FMT_NONE) continue;
-        if (!d.sws || d.rw != d.frame->width || d.rh != d.frame->height) {
+        if (!d.sws || d.rw != src->width || d.rh != src->height) {
             if (d.sws) sws_freeContext(d.sws);
-            d.rw = d.frame->width;
-            d.rh = d.frame->height;
+            d.rw = src->width;
+            d.rh = src->height;
             d.sws = sws_getContext(d.rw, d.rh, srcFmt, d.rw, d.rh, AV_PIX_FMT_RGBA,
                                    SWS_BILINEAR, nullptr, nullptr, nullptr);
             d.rgba.assign((size_t)d.rw * (size_t)d.rh * 4, 0);
@@ -932,7 +1042,7 @@ bool ExportSession::ReadOne(ExpDec& d) {
         if (!d.sws || d.rgba.empty()) return false;
         uint8_t* dstData[1] = { d.rgba.data() };
         int dstLines[1] = { d.rw * 4 };
-        sws_scale(d.sws, d.frame->data, d.frame->linesize, 0, d.rh, dstData, dstLines);
+        sws_scale(d.sws, src->data, src->linesize, 0, d.rh, dstData, dstLines);
         if (d.frame->best_effort_timestamp != AV_NOPTS_VALUE)
             d.lastPts = d.frame->best_effort_timestamp * av_q2d(d.fmt->streams[d.stream]->time_base);
         else {
@@ -1027,31 +1137,72 @@ bool ExportSession::Begin(const std::string& outPath, int width, int height, int
     if (avformat_alloc_output_context2(&fmt, nullptr, "mp4", path.c_str()) < 0 || !fmt) {
         status = "Cannot create mp4"; previewStatus = status; CloseAll(); return false;
     }
-    const AVCodec* vcodec = avcodec_find_encoder_by_name("libx264");
+    const bool large = (w > 4096 || h > 4096);
+    const char* encLabel = "x264";
+    const AVCodec* vcodec = nullptr;
+    bool useNv = false;
+    if (large) {
+        vcodec = avcodec_find_encoder_by_name("hevc_nvenc");
+        if (vcodec) useNv = true;
+        if (!vcodec) vcodec = avcodec_find_encoder_by_name("libx265");
+    }
+    if (!vcodec) {
+        vcodec = avcodec_find_encoder_by_name("h264_nvenc");
+        if (vcodec) useNv = true;
+    }
+    if (!vcodec) {
+        useNv = false;
+        vcodec = avcodec_find_encoder_by_name("libx264");
+    }
     if (!vcodec) vcodec = avcodec_find_encoder_by_name("h264_mf");
     if (!vcodec) vcodec = avcodec_find_encoder(AV_CODEC_ID_H264);
     if (!vcodec) { status = "H.264 encoder not found"; previewStatus = status; CloseAll(); return false; }
-    vctx = avcodec_alloc_context3(vcodec);
-    vctx->width = w;
-    vctx->height = h;
-    vctx->time_base = AVRational{1, fps};
-    vctx->framerate = AVRational{fps, 1};
-    vctx->gop_size = fps;
-    vctx->max_b_frames = 0;
-    vctx->pix_fmt = AV_PIX_FMT_YUV420P;
     int64_t br = (int64_t)w * (int64_t)h;
     if (br < 4000000) br = 4000000;
     if (br > 80000000) br = 80000000;
-    vctx->bit_rate = br;
-    if (fmt->oformat->flags & AVFMT_GLOBALHEADER)
-        vctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
-    if (vcodec->name && strcmp(vcodec->name, "libx264") == 0) {
-        av_opt_set(vctx->priv_data, "preset", (w >= 3840 ? "ultrafast" : "veryfast"), 0);
-        av_opt_set(vctx->priv_data, "crf", "20", 0);
+    auto openEnc = [&](const AVCodec* c, bool nv) -> bool {
+        if (!c) return false;
+        if (vctx) avcodec_free_context(&vctx);
+        vctx = avcodec_alloc_context3(c);
+        if (!vctx) return false;
+        vctx->width = w;
+        vctx->height = h;
+        vctx->time_base = AVRational{1, fps};
+        vctx->framerate = AVRational{fps, 1};
+        vctx->gop_size = fps;
+        vctx->max_b_frames = 0;
+        vctx->pix_fmt = AV_PIX_FMT_YUV420P;
+        vctx->bit_rate = br;
+        if (fmt->oformat->flags & AVFMT_GLOBALHEADER)
+            vctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+        if (nv && vctx->priv_data) {
+            av_opt_set(vctx->priv_data, "preset", "p4", 0);
+            av_opt_set(vctx->priv_data, "rc", "vbr", 0);
+            av_opt_set(vctx->priv_data, "cq", "19", 0);
+        } else if (c->name && strcmp(c->name, "libx264") == 0 && vctx->priv_data) {
+            av_opt_set(vctx->priv_data, "preset", (w >= 3840 ? "ultrafast" : "veryfast"), 0);
+            av_opt_set(vctx->priv_data, "crf", "20", 0);
+        } else if (c->name && strcmp(c->name, "libx265") == 0 && vctx->priv_data) {
+            av_opt_set(vctx->priv_data, "preset", "ultrafast", 0);
+            av_opt_set(vctx->priv_data, "crf", "22", 0);
+        }
+        return avcodec_open2(vctx, c, nullptr) >= 0;
+    };
+    if (!openEnc(vcodec, useNv)) {
+        useNv = false;
+        const AVCodec* fb = avcodec_find_encoder_by_name(large ? "libx265" : "libx264");
+        if (!fb) fb = avcodec_find_encoder_by_name("libx264");
+        if (!fb) fb = avcodec_find_encoder_by_name("h264_mf");
+        if (!fb) fb = avcodec_find_encoder(AV_CODEC_ID_H264);
+        vcodec = fb;
+        if (!openEnc(vcodec, false)) {
+            status = "Cannot open video encoder"; previewStatus = status; CloseAll(); return false;
+        }
     }
-    if (avcodec_open2(vctx, vcodec, nullptr) < 0) {
-        status = "Cannot open video encoder"; previewStatus = status; CloseAll(); return false;
-    }
+    if (useNv) encLabel = large ? "HEVC NVENC" : "NVENC";
+    else if (vcodec && vcodec->name && strstr(vcodec->name, "265")) encLabel = "x265";
+    else if (vcodec && vcodec->name && strstr(vcodec->name, "mf")) encLabel = "MediaFoundation";
+    else encLabel = "x264";
     vst = avformat_new_stream(fmt, nullptr);
     if (!vst) { status = "Cannot add video stream"; previewStatus = status; CloseAll(); return false; }
     avcodec_parameters_from_context(vst->codecpar, vctx);
@@ -1127,7 +1278,7 @@ bool ExportSession::Begin(const std::string& outPath, int width, int height, int
     pkt = av_packet_alloc();
     active = true;
     char buf[160];
-    snprintf(buf, sizeof(buf), "Exporting %dx%d %d fps%s", w, h, fps, videoOnly ? " (no audio encoder)" : "");
+    snprintf(buf, sizeof(buf), "Exporting %dx%d %d fps %s%s", w, h, fps, encLabel, videoOnly ? " (no audio)" : "");
     status = buf;
     previewStatus = status;
     return true;
@@ -1248,7 +1399,7 @@ void SyncPreview(int topClip, float dt) {
     shownLocal = mediaT;
     if (player->hasFrame) {
         char buf[80];
-        snprintf(buf, sizeof(buf), "FFmpeg %dx%d  x%.2g", player->width, player->height, speed);
+        snprintf(buf, sizeof(buf), "%s %dx%d  x%.2g", player->decName, player->width, player->height, speed);
         previewStatus = buf;
     }
     PumpAudio();
@@ -1525,7 +1676,7 @@ void EnsurePlayerForClip(int clipIdx) {
         player->Seek(mediaT);
         if (player->GrabFrame()) {
             char buf[64];
-            snprintf(buf, sizeof(buf), "FFmpeg %dx%d", player->width, player->height);
+            snprintf(buf, sizeof(buf), "%s %dx%d", player->decName, player->width, player->height);
             previewStatus = buf;
             shownLocal = mediaT;
         } else {
@@ -1870,7 +2021,7 @@ int main(int argc, char* argv[]) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
-    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 9",
+    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 10",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900,
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!window) { SDL_Quit(); return 1; }
