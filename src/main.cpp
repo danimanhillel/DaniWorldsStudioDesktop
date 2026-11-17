@@ -1,5 +1,6 @@
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_opengl.h>
+#include <SDL2/SDL_syswm.h>
 #include "imgui.h"
 #include "imgui_impl_sdl2.h"
 #include "imgui_impl_opengl3.h"
@@ -37,17 +38,28 @@ float pixelsPerSecond = 40.0f;
 bool isPlaying = false;
 bool snapEnabled = true;
 
-std::string OpenFileDialog() {
+HWND GetSDLWindowHandle(SDL_Window* window) {
+#ifdef _WIN32
+    SDL_SysWMinfo wmInfo;
+    SDL_VERSION(&wmInfo.version);
+    if (SDL_GetWindowWMInfo(window, &wmInfo)) {
+        return wmInfo.info.win.window;
+    }
+#endif
+    return NULL;
+}
+
+std::string OpenFileDialog(HWND owner) {
 #ifdef _WIN32
     char filename[MAX_PATH] = {0};
     OPENFILENAMEA ofn = {0};
     ofn.lStructSize = sizeof(OPENFILENAMEA);
-    ofn.hwndOwner = NULL;
+    ofn.hwndOwner = owner;
     ofn.lpstrFilter = "Video Files\0*.mp4;*.mov;*.avi;*.mkv\0Audio Files\0*.mp3;*.wav;*.aac\0Image Files\0*.jpg;*.jpeg;*.png;*.bmp\0All Files\0*.*\0";
     ofn.lpstrFile = filename;
     ofn.nMaxFile = MAX_PATH;
-    ofn.lpstrTitle = "Import Media";
-    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER;
+    ofn.lpstrTitle = "Import Media - DaniWorldsStudio";
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER | OFN_NOCHANGEDIR;
     if (GetOpenFileNameA(&ofn)) {
         return std::string(filename);
     }
@@ -82,13 +94,16 @@ int main(int argc, char* argv[]) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
 
     SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio Desktop",
-        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1920, 1080,
-        SDL_WINDOW_OPENGL | SDL_WINDOW_FULLSCREEN_DESKTOP | SDL_WINDOW_ALLOW_HIGHDPI);
+        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+        1600, 900,
+        SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
 
     if (!window) { SDL_Quit(); return 1; }
     SDL_GLContext gl_context = SDL_GL_CreateContext(window);
     SDL_GL_MakeCurrent(window, gl_context);
     SDL_GL_SetSwapInterval(1);
+
+    HWND hwnd = GetSDLWindowHandle(window);
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -116,7 +131,7 @@ int main(int argc, char* argv[]) {
         ImGui::Begin("Editor", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
 
         if (ImGui::Button("Import")) {
-            std::string path = OpenFileDialog();
+            std::string path = OpenFileDialog(hwnd);
             if (!path.empty()) {
                 AddMedia(path);
             }
