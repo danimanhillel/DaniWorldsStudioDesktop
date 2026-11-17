@@ -98,7 +98,8 @@ float timeOriginX = 0.0f;
 int exAspect = 0;
 int exRes = 1;
 int exFpsIdx = 1;
-bool requestExport = false;
+int mediaMenuIndex = -1;
+bool openMediaMenu = false;
 
 typedef void (APIENTRY *PFN_glUseProgramProc)(GLuint);
 PFN_glUseProgramProc pglUseProgram = nullptr;
@@ -1460,6 +1461,7 @@ void ClearProject() {
     trimmingClip = -1;
     dragVolClip = -1;
     contextClip = -1;
+    mediaMenuIndex = -1;
     currentTime = 0;
     shownLocal = -1000.0f;
 #ifdef HAVE_FFMPEG
@@ -1468,7 +1470,56 @@ void ClearProject() {
     audioSrcs.clear();
     if (player) player->Close();
     playingMediaId = -1;
+#else
+    isPlaying = false;
 #endif
+}
+
+void RemoveMedia(int id) {
+    if (id < 0 || id >= (int)media.size()) return;
+    if (media[id].thumb) {
+        glDeleteTextures(1, &media[id].thumb);
+        media[id].thumb = 0;
+    }
+    for (int i = (int)clips.size() - 1; i >= 0; --i) {
+        if (clips[i].mediaId == id) clips.erase(clips.begin() + i);
+        else if (clips[i].mediaId > id) clips[i].mediaId--;
+    }
+    media.erase(media.begin() + id);
+    selectedClip = -1;
+    draggingClip = -1;
+    trimmingClip = -1;
+    dragVolClip = -1;
+    contextClip = -1;
+    mediaMenuIndex = -1;
+    shownLocal = -1000.0f;
+#ifdef HAVE_FFMPEG
+    for (auto& a : audioSrcs) CloseAudioSrc(a);
+    audioSrcs.clear();
+    if (player) player->Close();
+    playingMediaId = -1;
+    ResetAudioSync();
+#endif
+}
+
+float TimelineEnd() {
+    float end = 0.0f;
+    for (const auto& c : clips)
+        end = std::max(end, c.startTime + c.duration);
+    return end;
+}
+
+void StopIfFinished() {
+    if (!isPlaying || draggingPlayhead) return;
+    float end = TimelineEnd();
+    if (!clips.empty() && currentTime < end - 0.02f) return;
+#ifdef HAVE_FFMPEG
+    SetPlaying(false);
+#else
+    isPlaying = false;
+#endif
+    if (!clips.empty() && currentTime > end) currentTime = end;
+    shownLocal = -1000.0f;
 }
 
 bool SaveProject(const std::string& path) {
@@ -1592,7 +1643,7 @@ int main(int argc, char* argv[]) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
-    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 6",
+    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 7",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900,
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!window) { SDL_Quit(); return 1; }
@@ -1651,6 +1702,11 @@ int main(int argc, char* argv[]) {
         ImGui::SetNextWindowSize(io.DisplaySize);
         ImGui::Begin("Editor", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
 
+        if (ImGui::Button("New")) {
+            ClearProject();
+            previewStatus = "New project";
+        }
+        ImGui::SameLine();
         if (ImGui::Button("Import")) ImportFiles(hwnd);
         ImGui::SameLine();
         if (ImGui::Button("Export")) requestExport = true;
@@ -1704,14 +1760,38 @@ int main(int argc, char* argv[]) {
             ImGui::Text("%.1fs %s", m.duration, m.type.c_str());
             ImGui::PopTextWrapPos();
             ImGui::EndGroup();
+            ImVec2 g0 = ImGui::GetItemRectMin();
+            ImVec2 g1 = ImGui::GetItemRectMax();
             if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
                 ImGui::SetDragDropPayload("MEDIA", &i, sizeof(int));
                 ImGui::Text("Dragging: %s", m.name.c_str());
                 ImGui::EndDragDropSource();
             }
+            if (ImGui::IsMouseHoveringRect(g0, g1) && ImGui::IsMouseClicked(1)) {
+                mediaMenuIndex = i;
+                openMediaMenu = true;
+            }
             ImGui::PopID();
         }
+        if (ImGui::IsWindowHovered() && ImGui::IsMouseClicked(1) && !openMediaMenu) {
+            mediaMenuIndex = -1;
+            openMediaMenu = true;
+        }
         ImGui::EndChild();
+
+        if (openMediaMenu) {
+            ImGui::OpenPopup("mediamenu");
+            openMediaMenu = false;
+        }
+        if (ImGui::BeginPopup("mediamenu")) {
+            if (mediaMenuIndex >= 0 && mediaMenuIndex < (int)media.size()) {
+                ImGui::TextUnformatted(media[mediaMenuIndex].name.c_str());
+                ImGui::Separator();
+                if (ImGui::MenuItem("Delete")) RemoveMedia(mediaMenuIndex);
+            }
+            if (ImGui::MenuItem("Import")) ImportFiles(hwnd);
+            ImGui::EndPopup();
+        }
 
         ImGui::SameLine();
         ImGui::BeginGroup();
@@ -2199,9 +2279,11 @@ int main(int argc, char* argv[]) {
             for (int s = 0; s < budget && gExport.active; s++) gExport.Step();
         } else {
             SyncPreview(topClip, io.DeltaTime);
+            StopIfFinished();
         }
 #else
         if (isPlaying && !draggingPlayhead) currentTime += io.DeltaTime;
+        StopIfFinished();
 #endif
 
         ImGui::Render();
