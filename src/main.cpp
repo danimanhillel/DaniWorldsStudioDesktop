@@ -50,6 +50,7 @@ int selectedClip = -1;
 int activeTool = 0;
 std::string previewStatus = "Ready";
 bool draggingPlayhead = false;
+ImVec2 previewMin, previewMax; // for raw GL drawing
 
 #ifdef _WIN32
 class VideoPlayer {
@@ -97,7 +98,6 @@ public:
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        // Allocate empty texture first
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_BGRA, GL_UNSIGNED_BYTE, nullptr);
 
         lastError.clear();
@@ -131,7 +131,6 @@ public:
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
         glBindTexture(GL_TEXTURE_2D, texture);
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_BGRA, GL_UNSIGNED_BYTE, data);
-        glGenerateMipmap(GL_TEXTURE_2D);
 
         buffer->Unlock();
         buffer->Release();
@@ -231,6 +230,48 @@ void EnsurePlayerForClip(int clipIdx) {
 #endif
 }
 
+void DrawVideoInPreview(ImVec2 p0, ImVec2 p1) {
+#ifdef _WIN32
+    if (!player || !player->hasFrame || !player->texture) return;
+
+    float areaW = p1.x - p0.x;
+    float areaH = p1.y - p0.y;
+    if (areaW < 10 || areaH < 10) return;
+
+    float aspect = (player->height > 0) ? (float)player->width / (float)player->height : 16.0f/9.0f;
+    float areaAspect = areaW / areaH;
+
+    ImVec2 texP0 = p0, texP1 = p1;
+    if (aspect > areaAspect) {
+        float h = areaW / aspect;
+        float off = (areaH - h) * 0.5f;
+        texP0.y += off; texP1.y -= off;
+    } else {
+        float w = areaH * aspect;
+        float off = (areaW - w) * 0.5f;
+        texP0.x += off; texP1.x -= off;
+    }
+
+    // Convert ImGui coords (top-left origin) to OpenGL (bottom-left)
+    int winW, winH;
+    SDL_GetWindowSize(SDL_GetWindowFromID(1), &winW, &winH); // rough
+    // Better: use io.DisplaySize
+    ImGuiIO& io = ImGui::GetIO();
+    float glY0 = io.DisplaySize.y - texP1.y;
+    float glY1 = io.DisplaySize.y - texP0.y;
+
+    glEnable(GL_TEXTURE_2D);
+    glBindTexture(GL_TEXTURE_2D, player->texture);
+    glBegin(GL_QUADS);
+    glTexCoord2f(0, 1); glVertex2f(texP0.x, glY0);
+    glTexCoord2f(1, 1); glVertex2f(texP1.x, glY0);
+    glTexCoord2f(1, 0); glVertex2f(texP1.x, glY1);
+    glTexCoord2f(0, 0); glVertex2f(texP0.x, glY1);
+    glEnd();
+    glDisable(GL_TEXTURE_2D);
+#endif
+}
+
 int main(int argc, char* argv[]) {
 #ifdef _WIN32
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
@@ -238,9 +279,9 @@ int main(int argc, char* argv[]) {
 
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_TIMER) < 0) return 1;
 
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
 
     SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio Desktop",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900,
@@ -341,6 +382,8 @@ int main(int argc, char* argv[]) {
         ImVec2 p0 = ImGui::GetItemRectMin();
         ImVec2 p1 = ImGui::GetItemRectMax();
         dl->AddRectFilled(p0, p1, IM_COL32(0,0,0,255));
+        previewMin = p0;
+        previewMax = p1;
 
         int topClip = -1;
         for (int i = (int)clips.size()-1; i >= 0; --i) {
@@ -352,24 +395,7 @@ int main(int argc, char* argv[]) {
 #ifdef _WIN32
         if (topClip >= 0) {
             EnsurePlayerForClip(topClip);
-            if (player && player->hasFrame && player->texture) {
-                ImVec2 texP0 = p0;
-                ImVec2 texP1 = p1;
-                float aspect = (player->height > 0) ? (float)player->width / (float)player->height : 16.0f/9.0f;
-                float areaW = p1.x - p0.x;
-                float areaH = p1.y - p0.y;
-                float areaAspect = areaW / std::max(1.0f, areaH);
-                if (aspect > areaAspect) {
-                    float h = areaW / aspect;
-                    float off = (areaH - h) * 0.5f;
-                    texP0.y += off; texP1.y -= off;
-                } else {
-                    float w = areaH * aspect;
-                    float off = (areaW - w) * 0.5f;
-                    texP0.x += off; texP1.x -= off;
-                }
-                dl->AddImage((ImTextureID)(intptr_t)player->texture, texP0, texP1);
-            } else {
+            if (!(player && player->hasFrame)) {
                 dl->AddText(ImVec2(p0.x+12, p0.y+12), IM_COL32(200,200,200,255), previewStatus.c_str());
             }
         } else {
@@ -442,12 +468,10 @@ int main(int argc, char* argv[]) {
             ImGui::PopID();
         }
 
-        // Playhead (draggable)
         ImVec2 tlMin = ImGui::GetWindowPos();
         float phX = tlMin.x + 50 + currentTime * pixelsPerSecond;
         ImGui::GetWindowDrawList()->AddLine(ImVec2(phX, tlMin.y+8), ImVec2(phX, tlMin.y+290), IM_COL32(255,50,50,255), 2.0f);
 
-        // Drag playhead
         if (ImGui::IsMouseClicked(0) && ImGui::IsMouseHoveringRect(ImVec2(phX-6, tlMin.y), ImVec2(phX+6, tlMin.y+290))) {
             draggingPlayhead = true;
         }
@@ -483,6 +507,25 @@ int main(int argc, char* argv[]) {
         glViewport(0,0,(int)io.DisplaySize.x,(int)io.DisplaySize.y);
         glClearColor(0.05f,0.05f,0.05f,1);
         glClear(GL_COLOR_BUFFER_BIT);
+
+        // Draw video with raw OpenGL before ImGui (so UI is on top)
+#ifdef _WIN32
+        if (player && player->hasFrame && player->texture) {
+            glMatrixMode(GL_PROJECTION);
+            glPushMatrix();
+            glLoadIdentity();
+            glOrtho(0, io.DisplaySize.x, 0, io.DisplaySize.y, -1, 1);
+            glMatrixMode(GL_MODELVIEW);
+            glPushMatrix();
+            glLoadIdentity();
+            DrawVideoInPreview(previewMin, previewMax);
+            glPopMatrix();
+            glMatrixMode(GL_PROJECTION);
+            glPopMatrix();
+            glMatrixMode(GL_MODELVIEW);
+        }
+#endif
+
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         SDL_GL_SwapWindow(window);
     }
