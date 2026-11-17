@@ -1294,6 +1294,8 @@ bool ExportSession::Begin(const std::string& outPath, int width, int height, int
     return true;
 }
 
+bool TransitionForClip(int clip, float t, int& a, int& b, float& progress, std::string& id);
+
 void ExportSession::Step() {
     if (!active) return;
     if (frameIndex >= total) { Finish(true); return; }
@@ -2263,7 +2265,7 @@ int main(int argc, char* argv[]) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
-    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 11",
+    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 12",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900,
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!window) { SDL_Quit(); return 1; }
