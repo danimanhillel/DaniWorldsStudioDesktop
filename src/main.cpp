@@ -104,6 +104,7 @@ struct Clip {
     float gsX = 0.0f;
     float gsY = 0.0f;
     float gsScale = 1.0f;
+    float gsOpacity = 1.0f;
     bool muted = false;
     ClipFx fx;
 };
@@ -192,6 +193,7 @@ int mediaArm = -1;
 float mediaArmTravel = 0.0f;
 bool openMediaMenu = false;
 bool mediaPanelOpen = false;
+ImVec2 mediaMenuPos(18.0f, 18.0f);
 bool audioPanelOpen = false;
 ImVec4 mediaPanelRect(0, 0, 0, 0);
 ImVec4 audioPanelRect(0, 0, 0, 0);
@@ -1512,7 +1514,7 @@ static void ChromaKey(float r, float g, float b, float sim, float soft, float sp
 }
 
 static void BlendChromaPlaced(uint8_t* dst, int dw, int dh, const uint8_t* src, int sw, int sh,
-                              float sim, float soft, float spill, float ox, float oy, float scale) {
+                              float sim, float soft, float spill, float ox, float oy, float scale, float opacity) {
     if (!dst || !src || sw < 1 || sh < 1 || scale < 0.05f) return;
     float cx = dw * 0.5f + ox * dw * 0.5f;
     float cy = dh * 0.5f + oy * dh * 0.5f;
@@ -1534,6 +1536,7 @@ static void BlendChromaPlaced(uint8_t* dst, int dw, int dh, const uint8_t* src, 
             const uint8_t* s = src + ((size_t)sy * sw + sx) * 4;
             float r, g, b, a;
             ChromaKey(s[0] / 255.0f, s[1] / 255.0f, s[2] / 255.0f, sim, soft, spill, r, g, b, a);
+            a *= opacity;
             if (a < 0.004f) continue;
             uint8_t* d = dst + ((size_t)y * dw + x) * 4;
             float ia = 1.0f - a;
@@ -1661,6 +1664,27 @@ static void PlacePanel(float xShift) {
     ImGui::SetNextWindowPos(ImVec2(18.0f + xShift, pio.DisplaySize.y - 18.0f), ImGuiCond_Appearing, ImVec2(0.0f, 1.0f));
     ImGui::SetNextWindowFocus();
     ImGui::SetNextWindowBgAlpha(0.98f);
+}
+
+static bool TransportButton(const char* id, int kind) {
+    ImGui::PushID(id);
+    bool pressed = ImGui::Button("##t", ImVec2(40.0f, 36.0f));
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 a = ImGui::GetItemRectMin();
+    ImVec2 b = ImGui::GetItemRectMax();
+    float cx = (a.x + b.x) * 0.5f;
+    float cy = (a.y + b.y) * 0.5f;
+    ImU32 col = IM_COL32(245, 245, 245, 255);
+    if (kind == 0) {
+        dl->AddTriangleFilled(ImVec2(cx - 6.0f, cy - 8.0f), ImVec2(cx - 6.0f, cy + 8.0f), ImVec2(cx + 9.0f, cy), col);
+    } else if (kind == 1) {
+        dl->AddRectFilled(ImVec2(cx - 7.0f, cy - 8.0f), ImVec2(cx - 2.5f, cy + 8.0f), col);
+        dl->AddRectFilled(ImVec2(cx + 2.5f, cy - 8.0f), ImVec2(cx + 7.0f, cy + 8.0f), col);
+    } else {
+        dl->AddRectFilled(ImVec2(cx - 7.0f, cy - 7.0f), ImVec2(cx + 7.0f, cy + 7.0f), col);
+    }
+    ImGui::PopID();
+    return pressed;
 }
 
 static float GlyphWidth(ImFont* font, float size, unsigned cp) {
@@ -1889,7 +1913,7 @@ void ExportSession::Step() {
         if (idx >= 0 && EnsureFrame(c.mediaId, mediaT) && idx < (int)decs.size() && !decs[idx].rgba.empty()) {
             ExpDec& d = decs[idx];
             BlendChromaPlaced(base.data(), w, h, d.rgba.data(), d.rw, d.rh,
-                              c.keySim, c.keySoft, c.keySpill, c.gsX, c.gsY, c.gsScale);
+                              c.keySim, c.keySoft, c.keySpill, c.gsX, c.gsY, c.gsScale, c.gsOpacity);
             canvas.swap(base);
         }
     }
@@ -2205,9 +2229,9 @@ static bool BindGrade(const BusSegment& s, int tw, int th, float alpha) {
 
 static GLuint keyProgram = 0;
 static int keyReady = 0;
-static int kTex = -1, kSim = -1, kSoft = -1, kSpill = -1;
+static int kTex = -1, kSim = -1, kSoft = -1, kSpill = -1, kOpacity = -1;
 
-static bool BindKey(float sim, float soft, float spill) {
+static bool BindKey(float sim, float soft, float spill, float opacity) {
     if (keyReady == -1) return false;
     if (!pglUseProgram) return false;
     if (keyReady == 0) {
@@ -2221,7 +2245,7 @@ static bool BindKey(float sim, float soft, float spill) {
             "#version 130\n"
             "varying vec2 vUV;\n"
             "uniform sampler2D tex;\n"
-            "uniform float sim, soft, spill;\n"
+            "uniform float sim, soft, spill, opacity;\n"
             "void main(){\n"
             "  vec4 c = texture2D(tex, vUV);\n"
             "  float rb = max(c.r, c.b);\n"
@@ -2231,7 +2255,7 @@ static bool BindKey(float sim, float soft, float spill) {
             "  float k = smoothstep(t0, max(t0 + 0.001, t1), dom);\n"
             "  vec3 rgb = c.rgb;\n"
             "  rgb.g -= max(0.0, rgb.g - rb) * spill;\n"
-            "  gl_FragColor = vec4(clamp(rgb, 0.0, 1.0), (1.0 - k) * c.a);\n"
+            "  gl_FragColor = vec4(clamp(rgb, 0.0, 1.0), (1.0 - k) * c.a * opacity);\n"
             "}\n";
         unsigned int vert = 0, frag = 0;
         if (!CompileStage(0x8B31, vs, vert) || !CompileStage(0x8B30, fs, frag)) { keyReady = -1; return false; }
@@ -2247,6 +2271,7 @@ static bool BindKey(float sim, float soft, float spill) {
         kSim = pGetUniform(keyProgram, "sim");
         kSoft = pGetUniform(keyProgram, "soft");
         kSpill = pGetUniform(keyProgram, "spill");
+        kOpacity = pGetUniform(keyProgram, "opacity");
         keyReady = 1;
     }
     if (!keyProgram) return false;
@@ -2255,6 +2280,7 @@ static bool BindKey(float sim, float soft, float spill) {
     if (kSim >= 0) pUniform1f(kSim, sim);
     if (kSoft >= 0) pUniform1f(kSoft, soft);
     if (kSpill >= 0) pUniform1f(kSpill, spill);
+    if (kOpacity >= 0) pUniform1f(kOpacity, opacity);
     return true;
 }
 
@@ -2383,7 +2409,7 @@ void BlitFxPair(ImVec2 p0, ImVec2 p1, GLuint texA, int aw, int ah, GLuint texB, 
     glDisable(GL_SCISSOR_TEST);
 }
 
-void BlitKeyed(ImVec2 a, ImVec2 b, GLuint tex, float sim, float soft, float spill, float ox, float oy, float scale) {
+void BlitKeyed(ImVec2 a, ImVec2 b, GLuint tex, float sim, float soft, float spill, float ox, float oy, float scale, float opacity) {
     if (!tex || b.x - a.x < 2 || b.y - a.y < 2 || scale < 0.05f) return;
     ImGuiIO& io = ImGui::GetIO();
     float pw = b.x - a.x;
@@ -2394,14 +2420,14 @@ void BlitKeyed(ImVec2 a, ImVec2 b, GLuint tex, float sim, float soft, float spil
     float hh = ph * 0.5f * scale;
     a = ImVec2(cx - hw, cy - hh);
     b = ImVec2(cx + hw, cy + hh);
-    bool keyed = BindKey(sim, soft, spill);
+    bool keyed = BindKey(sim, soft, spill, opacity);
     if (!keyed && pglUseProgram) pglUseProgram(0);
     glDisable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glEnable(GL_TEXTURE_2D);
     glBindTexture(GL_TEXTURE_2D, tex);
-    glColor4f(1, 1, 1, 1);
+    glColor4f(1, 1, 1, opacity);
     glMatrixMode(GL_PROJECTION);
     glPushMatrix();
     glLoadIdentity();
@@ -3310,8 +3336,8 @@ bool SaveProject(const std::string& path) {
                 c.eqGain[0], c.eqGain[1], c.eqGain[2], c.eqGain[3],
                 c.eqGain[4], c.eqGain[5], c.eqGain[6], c.eqGain[7]);
         fprintf(f, "E %s %.4f\n", c.fxOut.empty() ? "-" : c.fxOut.c_str(), c.fxDur);
-        fprintf(f, "K %.3f %.3f %.3f %.3f %.3f %.3f %d\n",
-                c.keySim, c.keySoft, c.keySpill, c.gsX, c.gsY, c.gsScale, c.muted ? 1 : 0);
+        fprintf(f, "K %.3f %.3f %.3f %.3f %.3f %.3f %d %.3f\n",
+                c.keySim, c.keySoft, c.keySpill, c.gsX, c.gsY, c.gsScale, c.muted ? 1 : 0, c.gsOpacity);
     }
     for (const auto& b : bus) {
         fprintf(f, "B %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f\n",
@@ -3432,9 +3458,9 @@ bool LoadProject(const std::string& path) {
                 bus.push_back(b);
             }
         } else if (line[0] == 'K' && line[1] == ' ' && !clips.empty()) {
-            float a = 0.35f, b = 0.22f, ck = 0.8f, x = 0, y = 0, sc = 1;
+            float a = 0.35f, b = 0.22f, ck = 0.8f, x = 0, y = 0, sc = 1, op = 1;
             int mute = 0;
-            int n = sscanf(line, "K %f %f %f %f %f %f %d", &a, &b, &ck, &x, &y, &sc, &mute);
+            int n = sscanf(line, "K %f %f %f %f %f %f %d %f", &a, &b, &ck, &x, &y, &sc, &mute, &op);
             if (n >= 3) {
                 clips.back().keySim = Clamp01(a);
                 clips.back().keySoft = Clamp01(b);
@@ -3446,6 +3472,7 @@ bool LoadProject(const std::string& path) {
                 clips.back().gsScale = sc < 0.15f ? 0.15f : (sc > 3.0f ? 3.0f : sc);
             }
             if (n >= 7) clips.back().muted = mute != 0;
+            if (n >= 8) clips.back().gsOpacity = Clamp01(op);
         } else if (line[0] == 'Y' && line[1] == ' ') {
             float tr, tg, tb, bp, br, bg, bb, gr, gg, gb;
             int border = 1, back = 0;
@@ -3525,7 +3552,7 @@ int main(int argc, char* argv[]) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
-    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 24",
+    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 25",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900,
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!window) { SDL_Quit(); return 1; }
@@ -3690,6 +3717,7 @@ int main(int argc, char* argv[]) {
             }
             if (ImGui::IsMouseHoveringRect(g0, g1) && ImGui::IsMouseClicked(1)) {
                 mediaMenuIndex = i;
+                mediaMenuPos = ImGui::GetMousePos();
                 mediaPanelOpen = true;
                 openedPanelThisFrame = true;
             }
@@ -3706,6 +3734,7 @@ int main(int argc, char* argv[]) {
         if (mediaArm >= 0 && ImGui::IsMouseReleased(0)) {
             if (mediaArmTravel < 36.0f) {
                 mediaMenuIndex = mediaArm;
+                mediaMenuPos = ImGui::GetMousePos();
                 mediaPanelOpen = true;
                 openedPanelThisFrame = true;
             }
@@ -3714,6 +3743,7 @@ int main(int argc, char* argv[]) {
         }
         if (ImGui::IsWindowHovered() && ImGui::IsMouseClicked(1) && !mediaPanelOpen) {
             mediaMenuIndex = -1;
+            mediaMenuPos = ImGui::GetMousePos();
             mediaPanelOpen = true;
             openedPanelThisFrame = true;
         }
@@ -3749,23 +3779,25 @@ int main(int argc, char* argv[]) {
         }
         ImGui::EndChild();
 
-        if (ImGui::Button("Play")) {
+        if (TransportButton("play", 0)) {
 #ifdef HAVE_FFMPEG
             SetPlaying(true);
 #else
             isPlaying = true;
 #endif
         }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Play");
         ImGui::SameLine();
-        if (ImGui::Button("Pause")) {
+        if (TransportButton("pause", 1)) {
 #ifdef HAVE_FFMPEG
             SetPlaying(false);
 #else
             isPlaying = false;
 #endif
         }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Pause");
         ImGui::SameLine();
-        if (ImGui::Button("Stop")) {
+        if (TransportButton("stop", 2)) {
 #ifdef HAVE_FFMPEG
             SetPlaying(false);
 #else
@@ -3774,6 +3806,7 @@ int main(int argc, char* argv[]) {
             currentTime = 0;
             shownLocal = -1000.0f;
         }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Stop");
         ImGui::SameLine();
         ImGui::Text("Drag clip edges to trim. Snap joins clips with no gap.");
         ImGui::EndGroup();
@@ -3844,9 +3877,6 @@ int main(int argc, char* argv[]) {
             AddBusSegment(0.0f, end);
         }
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Segment for the whole project");
-        ImGui::SameLine();
-        if (ImGui::SmallButton("CP")) CopyBusGrade();
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Copy the selected segment grade to the other segments");
         ImGui::PopStyleVar();
         ImVec2 busStart = ImGui::GetCursorScreenPos();
         busOriginX = busStart.x;
@@ -4446,6 +4476,9 @@ int main(int argc, char* argv[]) {
                     s.lightness = s.contrast = s.warmth = s.tint = s.saturation = s.shadow = s.grain = s.sharpen = 0;
                 }
                 ImGui::SameLine();
+                if (ImGui::Button("CP")) CopyBusGrade();
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Copy this grade to the other SUB segments");
+                ImGui::SameLine();
                 if (ImGui::Button("Delete segment")) {
                     bus.erase(bus.begin() + contextBus);
                     selectedBus = -1;
@@ -4579,6 +4612,7 @@ int main(int argc, char* argv[]) {
                 ImGui::SliderFloat("Similarity", &c.keySim, 0.0f, 1.0f, "%.2f");
                 ImGui::SliderFloat("Softness", &c.keySoft, 0.0f, 1.0f, "%.2f");
                 ImGui::SliderFloat("Spill", &c.keySpill, 0.0f, 1.0f, "%.2f");
+                ImGui::SliderFloat("Opacity", &c.gsOpacity, 0.0f, 1.0f, "%.2f");
                 ImGui::Separator();
                 if (ImGui::Checkbox("Mute", &c.muted)) {
 #ifdef HAVE_FFMPEG
@@ -4673,7 +4707,15 @@ int main(int argc, char* argv[]) {
             }
         }
         if (mediaPanelOpen) {
-            PlacePanel(420.0f);
+            ImVec2 pos = mediaMenuPos;
+            ImGuiIO& mio = ImGui::GetIO();
+            if (pos.x > mio.DisplaySize.x - 220.0f) pos.x = mio.DisplaySize.x - 220.0f;
+            if (pos.y > mio.DisplaySize.y - 120.0f) pos.y = mio.DisplaySize.y - 120.0f;
+            if (pos.x < 8.0f) pos.x = 8.0f;
+            if (pos.y < 8.0f) pos.y = 8.0f;
+            ImGui::SetNextWindowPos(pos, openedPanelThisFrame ? ImGuiCond_Always : ImGuiCond_Appearing);
+            ImGui::SetNextWindowFocus();
+            ImGui::SetNextWindowBgAlpha(0.98f);
             bool open = true;
             if (ClickOutsidePanels()) open = false;
             if (ImGui::Begin("Import", &open, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse)) {
@@ -4739,7 +4781,7 @@ int main(int argc, char* argv[]) {
             ImVec2 a = fitValid ? fitA : previewMin;
             ImVec2 b = fitValid ? fitB : previewMax;
             const Clip& gc = clips[gsDrawClip];
-            BlitKeyed(a, b, playerGS->texture, gc.keySim, gc.keySoft, gc.keySpill, gc.gsX, gc.gsY, gc.gsScale);
+            BlitKeyed(a, b, playerGS->texture, gc.keySim, gc.keySoft, gc.keySpill, gc.gsX, gc.gsY, gc.gsScale, gc.gsOpacity);
             if (!fitValid) { fitA = a; fitB = b; fitValid = true; }
         }
         for (const auto& tb : thumbBlits)
