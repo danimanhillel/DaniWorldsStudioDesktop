@@ -87,3 +87,7 @@ if(WIN32)
     target_link_libraries(DaniWorldsStudioDesktop PRIVATE SDL2::SDL2main)
     set_target_properties(DaniWorldsStudioDesktop PROPERTIES WIN32_EXECUTABLE TRUE)
 endif()
+
+if(MSVC)
+    target_compile_options(DaniWorldsStudioDesktop PRIVATE /bigobj /Zm300)
+endif()
