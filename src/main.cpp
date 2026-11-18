@@ -145,6 +145,7 @@ struct SubStyle {
     bool background = false;
     float bg[3] = {0.0f, 0.0f, 0.0f};
     float bgAlpha = 0.55f;
+    float fontScale = 1.0f;
 };
 
 const int kGsTrack = 6;
@@ -187,7 +188,13 @@ int exRes = 1;
 int exFpsIdx = 1;
 bool requestExport = false;
 int mediaMenuIndex = -1;
+int mediaArm = -1;
+float mediaArmTravel = 0.0f;
 bool openMediaMenu = false;
+bool mediaPanelOpen = false;
+bool audioPanelOpen = false;
+ImVec4 mediaPanelRect(0, 0, 0, 0);
+ImVec4 audioPanelRect(0, 0, 0, 0);
 int selectedBus = -1;
 int contextBus = -1;
 bool openBusMenu = false;
@@ -1644,6 +1651,8 @@ static bool ClickOutsidePanels() {
     if (gsPanelOpen && RectHit(gsPanelRect, m)) return false;
     if (subEditorOpen && RectHit(subPanelRect, m)) return false;
     if (subStyleOpen && RectHit(subStyleRect, m)) return false;
+    if (mediaPanelOpen && RectHit(mediaPanelRect, m)) return false;
+    if (audioPanelOpen && RectHit(audioPanelRect, m)) return false;
     return true;
 }
 
@@ -1777,7 +1786,7 @@ static void BurnSubtitles(uint8_t* canvas, int cw, int ch, float t) {
     if (si < 0 || subs[si].text.empty() || fontAtlas.empty()) return;
     ImFont* font = ImGui::GetFont();
     if (!font) return;
-    float size = std::max(18.0f, ch * 0.048f);
+    float size = std::max(18.0f, ch * 0.048f) * std::max(0.3f, subStyle.fontScale);
     float maxW = cw * 0.82f;
     std::vector<std::string> lines;
     WrapBalanced(font, size, subs[si].text, maxW, lines);
@@ -2439,7 +2448,7 @@ void DrawPreviewSubs(ImVec2 pic0, ImVec2 pic1) {
     if (si < 0 || subs[si].text.empty()) return;
     ImFont* font = ImGui::GetFont();
     if (!font || pic1.x - pic0.x < 20) return;
-    float size = std::max(16.0f, (pic1.y - pic0.y) * 0.055f);
+    float size = std::max(16.0f, (pic1.y - pic0.y) * 0.055f) * std::max(0.3f, subStyle.fontScale);
     float maxW = (pic1.x - pic0.x) * 0.82f;
     std::vector<std::string> lines;
     WrapBalanced(font, size, subs[si].text, maxW, lines);
@@ -2618,6 +2627,8 @@ bool TimelinePointerBusy() {
     if (busPanelHoldsMouse || (busGradeOpen && inside(busPanelRect))) return true;
     if (gsPanelHolds || (gsPanelOpen && inside(gsPanelRect))) return true;
     if (subPanelHolds || (subEditorOpen && inside(subPanelRect)) || (subStyleOpen && inside(subStyleRect))) return true;
+    if (mediaPanelOpen && inside(mediaPanelRect)) return true;
+    if (audioPanelOpen && inside(audioPanelRect)) return true;
     return false;
 }
 
@@ -2791,6 +2802,35 @@ void SplitSelected() {
 #ifdef HAVE_FFMPEG
     ResetAudioSync();
 #endif
+}
+
+void SplitBusAt(float cut) {
+    int idx = -1;
+    if (selectedBus >= 0 && selectedBus < (int)bus.size()) {
+        const BusSegment& s = bus[selectedBus];
+        if (cut > s.start + 0.05f && cut < s.start + s.duration - 0.05f) idx = selectedBus;
+    }
+    if (idx < 0) {
+        for (int i = 0; i < (int)bus.size(); i++) {
+            if (cut > bus[i].start + 0.05f && cut < bus[i].start + bus[i].duration - 0.05f) {
+                idx = i;
+                break;
+            }
+        }
+    }
+    if (idx < 0) return;
+    float end = bus[idx].start + bus[idx].duration;
+    float left = cut - bus[idx].start;
+    float rightDur = end - cut;
+    if (left < 0.05f || rightDur < 0.05f) return;
+    BusSegment right = bus[idx];
+    bus[idx].duration = left;
+    right.start = cut;
+    right.duration = rightDur;
+    bus.insert(bus.begin() + idx + 1, right);
+    selectedBus = idx + 1;
+    selectedClip = -1;
+    previewStatus = "Sub segment split";
 }
 
 HWND GetSDLWindowHandle(SDL_Window* window) {
@@ -3282,7 +3322,7 @@ bool SaveProject(const std::string& path) {
             subStyle.text[0], subStyle.text[1], subStyle.text[2], subStyle.border ? 1 : 0, subStyle.borderPx,
             subStyle.edge[0], subStyle.edge[1], subStyle.edge[2],
             subStyle.bg[0], subStyle.bg[1], subStyle.bg[2], subStyle.background ? 1 : 0);
-    fprintf(f, "Z %.3f\n", subStyle.bgAlpha);
+    fprintf(f, "Z %.3f %.3f\n", subStyle.bgAlpha, subStyle.fontScale);
     for (const auto& s : subs) {
         std::string t = s.text;
         for (char& ch : t) if (ch == '\n' || ch == '\r') ch = ' ';
@@ -3419,7 +3459,10 @@ bool LoadProject(const std::string& path) {
                 subStyle.background = back != 0;
             }
         } else if (line[0] == 'Z' && line[1] == ' ') {
-            subStyle.bgAlpha = Clamp01((float)atof(line + 2));
+            float z = 0.55f, sc = 1.0f;
+            int n = sscanf(line + 2, "%f %f", &z, &sc);
+            if (n >= 1) subStyle.bgAlpha = Clamp01(z);
+            if (n >= 2) subStyle.fontScale = sc < 0.3f ? 0.3f : (sc > 3.0f ? 3.0f : sc);
         } else if (line[0] == 'U' && line[1] == ' ') {
             float st = 0, dur = 3;
             char* rest = line + 2;
@@ -3482,7 +3525,7 @@ int main(int argc, char* argv[]) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
-    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 23",
+    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 24",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900,
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!window) { SDL_Quit(); return 1; }
@@ -3522,8 +3565,10 @@ int main(int argc, char* argv[]) {
                     isPlaying = !isPlaying;
 #endif
                 }
-                if (event.key.keysym.sym == SDLK_c && !event.key.repeat && !io.WantTextInput)
-                    SplitSelected();
+                if (event.key.keysym.sym == SDLK_c && !event.key.repeat && !io.WantTextInput) {
+                    if (selectedBus >= 0) SplitBusAt(currentTime);
+                    else SplitSelected();
+                }
                 if (event.key.keysym.sym == SDLK_s && !event.key.repeat && !io.WantTextInput && busHover) {
                     float st = SnapTime(-1, busHoverTime);
                     AddBusSegment(st, 5.0f);
@@ -3639,36 +3684,40 @@ int main(int argc, char* argv[]) {
             ImGui::EndGroup();
             ImVec2 g0 = ImGui::GetItemRectMin();
             ImVec2 g1 = ImGui::GetItemRectMax();
-            if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
+            if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID | ImGuiDragDropFlags_SourceNoPreviewTooltip)) {
                 ImGui::SetDragDropPayload("MEDIA", &i, sizeof(int));
-                ImGui::Text("Dragging: %s", m.name.c_str());
                 ImGui::EndDragDropSource();
             }
             if (ImGui::IsMouseHoveringRect(g0, g1) && ImGui::IsMouseClicked(1)) {
                 mediaMenuIndex = i;
-                openMediaMenu = true;
+                mediaPanelOpen = true;
+                openedPanelThisFrame = true;
+            }
+            if (ImGui::IsMouseHoveringRect(g0, g1) && ImGui::IsMouseClicked(0)) {
+                mediaArm = i;
+                mediaArmTravel = 0.0f;
             }
             ImGui::PopID();
         }
-        if (ImGui::IsWindowHovered() && ImGui::IsMouseClicked(1) && !openMediaMenu) {
+        if (mediaArm >= 0 && ImGui::IsMouseDown(0)) {
+            ImVec2 d = ImGui::GetMouseDragDelta(0);
+            mediaArmTravel = std::max(mediaArmTravel, d.x * d.x + d.y * d.y);
+        }
+        if (mediaArm >= 0 && ImGui::IsMouseReleased(0)) {
+            if (mediaArmTravel < 36.0f) {
+                mediaMenuIndex = mediaArm;
+                mediaPanelOpen = true;
+                openedPanelThisFrame = true;
+            }
+            mediaArm = -1;
+            mediaArmTravel = 0.0f;
+        }
+        if (ImGui::IsWindowHovered() && ImGui::IsMouseClicked(1) && !mediaPanelOpen) {
             mediaMenuIndex = -1;
-            openMediaMenu = true;
+            mediaPanelOpen = true;
+            openedPanelThisFrame = true;
         }
         ImGui::EndChild();
-
-        if (openMediaMenu) {
-            ImGui::OpenPopup("mediamenu");
-            openMediaMenu = false;
-        }
-        if (ImGui::BeginPopup("mediamenu")) {
-            if (mediaMenuIndex >= 0 && mediaMenuIndex < (int)media.size()) {
-                ImGui::TextUnformatted(media[mediaMenuIndex].name.c_str());
-                ImGui::Separator();
-                if (ImGui::MenuItem("Delete")) RemoveMedia(mediaMenuIndex);
-            }
-            if (ImGui::MenuItem("Import")) ImportFiles(hwnd);
-            ImGui::EndPopup();
-        }
 
         ImGui::SameLine();
         ImGui::BeginGroup();
@@ -3784,10 +3833,10 @@ int main(int argc, char* argv[]) {
         ImGui::EndChild();
 
         busHover = false;
-        ImGui::BeginChild("buslane", ImVec2(timeW + 90.0f, 68.0f), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        ImGui::BeginChild("buslane", ImVec2(timeW + 90.0f, 78.0f), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(2, 1));
-        ImGui::BeginGroup();
         ImGui::TextUnformatted("SUB");
+        ImGui::SameLine();
         if (ImGui::SmallButton("+")) {
             float end = 0.0f;
             for (const auto& c : clips) end = std::max(end, c.startTime + c.duration);
@@ -3795,15 +3844,14 @@ int main(int argc, char* argv[]) {
             AddBusSegment(0.0f, end);
         }
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Segment for the whole project");
-        if (ImGui::SmallButton("COPY")) CopyBusGrade();
+        ImGui::SameLine();
+        if (ImGui::SmallButton("CP")) CopyBusGrade();
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Copy the selected segment grade to the other segments");
-        ImGui::EndGroup();
         ImGui::PopStyleVar();
-        ImGui::SameLine(48.0f);
         ImVec2 busStart = ImGui::GetCursorScreenPos();
         busOriginX = busStart.x;
         float busW = ImGui::GetContentRegionAvail().x;
-        ImGui::InvisibleButton("buszone", ImVec2(busW, 56.0f));
+        ImGui::InvisibleButton("buszone", ImVec2(std::max(8.0f, busW), 34.0f));
         if (ImGui::IsItemHovered()) {
             busHover = true;
             busHoverTime = (ImGui::GetMousePos().x - busStart.x) / pixelsPerSecond;
@@ -3814,7 +3862,7 @@ int main(int argc, char* argv[]) {
             float x = busStart.x + bus[i].start * pixelsPerSecond;
             float w = std::max(18.0f, bus[i].duration * pixelsPerSecond);
             ImVec2 cp0(x, busStart.y);
-            ImVec2 cp1(x + w, busStart.y + 50.0f);
+            ImVec2 cp1(x + w, busStart.y + 32.0f);
             bdl->AddRectFilled(cp0, cp1, IM_COL32(168, 112, 42, 235), 3.0f);
             if (i == selectedBus) bdl->AddRect(cp0, cp1, IM_COL32(255, 220, 120, 255), 3.0f, 0, 2.0f);
             char lab[64];
@@ -4367,17 +4415,10 @@ int main(int argc, char* argv[]) {
                     ImGui::EndMenu();
                 }
                 ImGui::Separator();
-                if (ImGui::MenuItem("EQ", nullptr, &c.eqOn)) {
-                    c.fx.clear();
+                if (ImGui::MenuItem("Audio Effects")) {
                     fxEdit = contextClip;
-                }
-                if (ImGui::MenuItem("Reverb", nullptr, &c.reverbOn)) {
-                    c.fx.clear();
-                    fxEdit = contextClip;
-                }
-                if (ImGui::MenuItem("Delay", nullptr, &c.delayOn)) {
-                    c.fx.clear();
-                    fxEdit = contextClip;
+                    audioPanelOpen = true;
+                    openedPanelThisFrame = true;
                 }
             }
             ImGui::EndPopup();
@@ -4424,36 +4465,6 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        if (fxEdit >= 0) {
-            if (fxEdit >= (int)clips.size()) fxEdit = -1;
-            else {
-                ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.42f), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-                bool fxOpen = true;
-                if (ImGui::Begin("EQ", &fxOpen, ImGuiWindowFlags_AlwaysAutoResize)) {
-                    Clip& c = clips[fxEdit];
-                    if (ImGui::Checkbox("EQ", &c.eqOn)) c.fx.clear();
-                    const char* names[8] = {"60", "150", "400", "1k", "2.5k", "6k", "12k", "16k"};
-                    for (int b = 0; b < 8; b++) {
-                        ImGui::PushID(b);
-                        ImGui::BeginGroup();
-                        ImGui::VSliderFloat("##g", ImVec2(36, 150), &c.eqGain[b], -12.0f, 12.0f, "%.1f");
-                        ImGui::TextUnformatted(names[b]);
-                        ImGui::EndGroup();
-                        if (b != 7) ImGui::SameLine();
-                        ImGui::PopID();
-                    }
-                    ImGui::TextUnformatted("dB, low to high");
-                    ImGui::Separator();
-                    if (ImGui::Checkbox("Reverb", &c.reverbOn)) c.fx.clear();
-                    ImGui::SliderFloat("Time", &c.reverbTime, 0.2f, 5.0f, "%.2f s");
-                    if (ImGui::Checkbox("Delay", &c.delayOn)) c.fx.clear();
-                    ImGui::SliderFloat("Tempo", &c.delayTempo, 40.0f, 240.0f, "%.0f BPM");
-                    ImGui::Text("Delay %.0f ms", 60000.0f / std::max(40.0f, c.delayTempo));
-                }
-                ImGui::End();
-                if (!fxOpen) fxEdit = -1;
-            }
-        }
         ImGui::End();
 
         if (requestExport) {
@@ -4611,6 +4622,7 @@ int main(int argc, char* argv[]) {
                 ImGui::TextUnformatted("All subtitles");
                 ImGui::Separator();
                 ImGui::ColorEdit3("Color", subStyle.text);
+                ImGui::SliderFloat("Size", &subStyle.fontScale, 0.4f, 2.5f, "%.2f");
                 ImGui::Checkbox("Border", &subStyle.border);
                 ImGui::SliderFloat("Border size", &subStyle.borderPx, 0.0f, 6.0f, "%.1f");
                 ImGui::ColorEdit3("Border color", subStyle.edge);
@@ -4625,6 +4637,62 @@ int main(int argc, char* argv[]) {
             }
             ImGui::End();
             if (!open) subStyleOpen = false;
+        }
+        if (audioPanelOpen) {
+            if (fxEdit < 0 || fxEdit >= (int)clips.size()) audioPanelOpen = false;
+            else {
+                PlacePanel(0.0f);
+                bool open = true;
+                if (ClickOutsidePanels()) open = false;
+                if (ImGui::Begin("Audio Effects", &open, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse)) {
+                    Clip& c = clips[fxEdit];
+                    ImGui::TextUnformatted("Audio Effects");
+                    ImGui::Separator();
+                    if (ImGui::Checkbox("EQ", &c.eqOn)) c.fx.clear();
+                    const char* names[8] = {"60", "150", "400", "1k", "2.5k", "6k", "12k", "16k"};
+                    for (int b = 0; b < 8; b++) {
+                        ImGui::PushID(b);
+                        ImGui::BeginGroup();
+                        ImGui::VSliderFloat("##g", ImVec2(36, 140), &c.eqGain[b], -12.0f, 12.0f, "%.1f");
+                        ImGui::TextUnformatted(names[b]);
+                        ImGui::EndGroup();
+                        if (b != 7) ImGui::SameLine();
+                        ImGui::PopID();
+                    }
+                    ImGui::TextUnformatted("dB, low to high");
+                    ImGui::Separator();
+                    if (ImGui::Checkbox("Reverb", &c.reverbOn)) c.fx.clear();
+                    ImGui::SliderFloat("Time", &c.reverbTime, 0.2f, 5.0f, "%.2f s");
+                    if (ImGui::Checkbox("Delay", &c.delayOn)) c.fx.clear();
+                    ImGui::SliderFloat("Tempo", &c.delayTempo, 40.0f, 240.0f, "%.0f BPM");
+                    ImVec2 w0 = ImGui::GetWindowPos();
+                    audioPanelRect = ImVec4(w0.x, w0.y, w0.x + ImGui::GetWindowSize().x, w0.y + ImGui::GetWindowSize().y);
+                }
+                ImGui::End();
+                if (!open) audioPanelOpen = false;
+            }
+        }
+        if (mediaPanelOpen) {
+            PlacePanel(420.0f);
+            bool open = true;
+            if (ClickOutsidePanels()) open = false;
+            if (ImGui::Begin("Import", &open, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse)) {
+                ImGui::TextUnformatted("Import");
+                ImGui::Separator();
+                if (mediaMenuIndex >= 0 && mediaMenuIndex < (int)media.size()) {
+                    ImGui::TextUnformatted(media[mediaMenuIndex].name.c_str());
+                    if (ImGui::Button("Delete")) {
+                        RemoveMedia(mediaMenuIndex);
+                        mediaMenuIndex = -1;
+                        open = false;
+                    }
+                }
+                if (ImGui::Button("Import")) ImportFiles(hwnd);
+                ImVec2 w0 = ImGui::GetWindowPos();
+                mediaPanelRect = ImVec4(w0.x, w0.y, w0.x + ImGui::GetWindowSize().x, w0.y + ImGui::GetWindowSize().y);
+            }
+            ImGui::End();
+            if (!open) mediaPanelOpen = false;
         }
         if (fontAtlas.empty()) {
             ImGuiIO& fio = ImGui::GetIO();
@@ -4674,10 +4742,11 @@ int main(int argc, char* argv[]) {
             BlitKeyed(a, b, playerGS->texture, gc.keySim, gc.keySoft, gc.keySpill, gc.gsX, gc.gsY, gc.gsScale);
             if (!fitValid) { fitA = a; fitB = b; fitValid = true; }
         }
-        if (fitValid) DrawPreviewSubs(fitA, fitB);
-        else DrawPreviewSubs(previewMin, previewMax);
         for (const auto& tb : thumbBlits)
             BlitVideo(tb.a, tb.b, tb.tex, tb.w, tb.h, tb.c0, tb.c1);
+        if (pglUseProgram) pglUseProgram(0);
+        if (fitValid) DrawPreviewSubs(fitA, fitB);
+        else DrawPreviewSubs(previewMin, previewMax);
 #endif
         SDL_GL_SwapWindow(window);
     }
