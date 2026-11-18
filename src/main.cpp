@@ -404,8 +404,10 @@ public:
 
 VideoPlayer* player = nullptr;
 int playingMediaId = -1;
+int playingClip = -1;
 VideoPlayer* playerB = nullptr;
 int playingMediaIdB = -1;
+int playingClipB = -1;
 float shownLocalB = -1000.0f;
 VideoPlayer* playerNext = nullptr;
 int nextMediaId = -1;
@@ -1453,8 +1455,8 @@ void SyncSide(int clipIdx, float timelineT) {
     int mid = clips[clipIdx].mediaId;
     if (mid < 0 || mid >= (int)media.size()) return;
     if (!playerB) playerB = new VideoPlayer();
-    if (playingMediaIdB != mid || !playerB->fmtCtx) {
-        if (playerNext && nextMediaId == mid && playerNext->fmtCtx && playerNext->hasFrame) {
+    if (playingClipB != clipIdx || playingMediaIdB != mid || !playerB->fmtCtx) {
+        if (playerNext && nextClipIdx == clipIdx && nextMediaId == mid && playerNext->fmtCtx && playerNext->hasFrame) {
             VideoPlayer* old = playerB;
             playerB = playerNext;
             playerNext = nullptr;
@@ -1469,6 +1471,7 @@ void SyncSide(int clipIdx, float timelineT) {
             playingMediaIdB = mid;
             shownLocalB = -1000.0f;
         }
+        playingClipB = clipIdx;
     }
     if (media[mid].type == "image") {
         if (!playerB->hasFrame) {
@@ -1935,22 +1938,31 @@ void EnsurePlayerForClip(int clipIdx) {
 #ifdef HAVE_FFMPEG
     if (clipIdx < 0 || clipIdx >= (int)clips.size()) return;
     int mid = clips[clipIdx].mediaId;
-    if (mid == playingMediaId && player && player->fmtCtx) return;
-    if (playerB && playingMediaIdB == mid && playerB->fmtCtx && playerB->hasFrame) {
-        std::swap(player, playerB);
-        std::swap(playingMediaId, playingMediaIdB);
-        std::swap(shownLocal, shownLocalB);
-        if (shownLocal < 0.0f && player->lastPts >= 0.0) shownLocal = (float)player->lastPts;
-        return;
-    }
-    if (playerNext && nextMediaId == mid && playerNext->fmtCtx && playerNext->hasFrame) {
+    if (mid < 0 || mid >= (int)media.size()) return;
+    if (clipIdx == playingClip && mid == playingMediaId && player && player->fmtCtx) return;
+    auto land = [&](VideoPlayer* p) {
+        float mediaT = clips[clipIdx].sourceOffset + ClipLocalTime(clipIdx, currentTime) * std::max(0.05f, clips[clipIdx].speed);
+        if (media[mid].type == "image") mediaT = 0.0f;
+        if (mediaT < 0) mediaT = 0;
+        if (!p->hasFrame || p->lastPts < 0.0 || std::fabs((float)p->lastPts - mediaT) > 0.08f) {
+            p->Seek(mediaT);
+            p->GrabFrame();
+        }
+        shownLocal = p->lastPts >= 0.0 ? (float)p->lastPts : mediaT;
+        playingClip = clipIdx;
+        playingMediaId = mid;
+    };
+    if (playerNext && nextClipIdx == clipIdx && nextMediaId == mid && playerNext->fmtCtx && playerNext->hasFrame) {
         if (player) { player->Close(); delete player; }
         player = playerNext;
         playerNext = nullptr;
-        playingMediaId = mid;
         nextMediaId = -1;
         nextClipIdx = -1;
-        shownLocal = player->lastPts >= 0.0 ? (float)player->lastPts : -1000.0f;
+        land(player);
+        return;
+    }
+    if (mid == playingMediaId && player && player->fmtCtx) {
+        land(player);
         return;
     }
     if (!player) player = new VideoPlayer();
@@ -1958,6 +1970,7 @@ void EnsurePlayerForClip(int clipIdx) {
     shownLocal = -1000.0f;
     if (player->Open(media[mid].path)) {
         playingMediaId = mid;
+        playingClip = clipIdx;
         float mediaT = clips[clipIdx].sourceOffset + ClipLocalTime(clipIdx, currentTime) * std::max(0.05f, clips[clipIdx].speed);
         player->Seek(mediaT);
         if (player->GrabFrame()) {
@@ -2017,6 +2030,15 @@ void PrefetchUpcoming(int top) {
     if (playerNext->hasFrame) nextClipIdx = best;
 #else
     (void)top;
+#endif
+}
+
+void ReleaseSidePlayer() {
+#ifdef HAVE_FFMPEG
+    if (playerB && (playerB->fmtCtx || playerB->hasFrame)) playerB->Close();
+    playingMediaIdB = -1;
+    playingClipB = -1;
+    shownLocalB = -1000.0f;
 #endif
 }
 
@@ -2149,7 +2171,14 @@ void ClearProject() {
     for (auto& a : audioSrcs) CloseAudioSrc(a);
     audioSrcs.clear();
     if (player) player->Close();
+    if (playerB) playerB->Close();
+    if (playerNext) playerNext->Close();
     playingMediaId = -1;
+    playingClip = -1;
+    playingMediaIdB = -1;
+    playingClipB = -1;
+    nextMediaId = -1;
+    nextClipIdx = -1;
 #else
     isPlaying = false;
 #endif
@@ -2179,7 +2208,14 @@ void RemoveMedia(int id) {
     for (auto& a : audioSrcs) CloseAudioSrc(a);
     audioSrcs.clear();
     if (player) player->Close();
+    if (playerB) playerB->Close();
+    if (playerNext) playerNext->Close();
     playingMediaId = -1;
+    playingClip = -1;
+    playingMediaIdB = -1;
+    playingClipB = -1;
+    nextMediaId = -1;
+    nextClipIdx = -1;
     ResetAudioSync();
 #endif
 }
@@ -2362,7 +2398,7 @@ int main(int argc, char* argv[]) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
-    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 14",
+    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 15",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900,
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!window) { SDL_Quit(); return 1; }
@@ -2406,6 +2442,11 @@ int main(int argc, char* argv[]) {
                         clips.erase(clips.begin() + selectedClip);
                         selectedClip = -1;
                         selection.clear();
+#ifdef HAVE_FFMPEG
+                        playingClip = -1;
+                        playingClipB = -1;
+                        nextClipIdx = -1;
+#endif
                         draggingClip = -1;
                         trimmingClip = -1;
                         dragVolClip = -1;
@@ -3092,6 +3133,7 @@ int main(int argc, char* argv[]) {
                 if (fx) previewStatus += std::string(" | ") + fx->label();
             } else {
                 PrefetchUpcoming(topClip);
+                ReleaseSidePlayer();
             }
             StopIfFinished();
         }
