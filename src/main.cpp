@@ -111,8 +111,22 @@ struct ThumbBlit {
     int h = 0;
 };
 
+struct BusSegment {
+    float start = 0.0f;
+    float duration = 5.0f;
+    float lightness = 0.0f;
+    float contrast = 0.0f;
+    float warmth = 0.0f;
+    float tint = 0.0f;
+    float saturation = 0.0f;
+    float shadow = 0.0f;
+    float grain = 0.0f;
+    float sharpen = 0.0f;
+};
+
 std::vector<MediaItem> media;
 std::vector<Clip> clips;
+std::vector<BusSegment> bus;
 std::vector<ThumbBlit> thumbBlits;
 float currentTime = 0.0f;
 float pixelsPerSecond = 50.0f;
@@ -147,6 +161,17 @@ int exFpsIdx = 1;
 bool requestExport = false;
 int mediaMenuIndex = -1;
 bool openMediaMenu = false;
+int selectedBus = -1;
+int contextBus = -1;
+bool openBusMenu = false;
+bool busHover = false;
+float busHoverTime = -1.0f;
+float busOriginX = 0.0f;
+int draggingBus = -1;
+float busDragOffset = 0.0f;
+int trimmingBus = -1;
+int trimBusSide = 0;
+const BusSegment* activeGrade = nullptr;
 
 typedef void (APIENTRY *PFN_glUseProgramProc)(GLuint);
 PFN_glUseProgramProc pglUseProgram = nullptr;
@@ -1304,6 +1329,99 @@ bool ExportSession::Begin(const std::string& outPath, int width, int height, int
 bool TransitionForClip(int clip, float t, int& a, int& b, float& progress, std::string& id);
 float ClipLocalTime(int clipIdx, float timelineT);
 
+static float Clamp01(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); }
+
+static float BusHash(int x, int y, int frame) {
+    unsigned n = (unsigned)(x * 374761393 + y * 668265263 + frame * 1440662683);
+    n = (n ^ (n >> 13)) * 1274126177u;
+    return (float)(n & 0xFFFFFF) / (float)0xFFFFFF;
+}
+
+bool BusActive(const BusSegment& s) {
+    return std::fabs(s.lightness) > 0.001f || std::fabs(s.contrast) > 0.001f || std::fabs(s.warmth) > 0.001f
+        || std::fabs(s.tint) > 0.001f || std::fabs(s.saturation) > 0.001f || std::fabs(s.shadow) > 0.001f
+        || s.grain > 0.001f || s.sharpen > 0.001f;
+}
+
+const BusSegment* BusAt(float t) {
+    const BusSegment* hit = nullptr;
+    for (const auto& s : bus) {
+        if (t >= s.start && t < s.start + s.duration) hit = &s;
+    }
+    return hit;
+}
+
+static void GradeRGB(float& r, float& g, float& b, const BusSegment& s, float noise) {
+    float l = 0.299f * r + 0.587f * g + 0.114f * b;
+    float sh = 1.0f - Clamp01(l / 0.5f);
+    float lift = s.shadow * 0.35f * sh;
+    r += lift; g += lift; b += lift;
+    float ct = 1.0f + s.contrast * 1.35f;
+    r = (r - 0.5f) * ct + 0.5f;
+    g = (g - 0.5f) * ct + 0.5f;
+    b = (b - 0.5f) * ct + 0.5f;
+    r += s.lightness * 0.45f;
+    g += s.lightness * 0.45f;
+    b += s.lightness * 0.45f;
+    l = 0.299f * r + 0.587f * g + 0.114f * b;
+    float sat = 1.0f + s.saturation;
+    r = l + (r - l) * sat;
+    g = l + (g - l) * sat;
+    b = l + (b - l) * sat;
+    r += s.warmth * 0.18f;
+    g += s.warmth * 0.05f;
+    b -= s.warmth * 0.18f;
+    g += s.tint * 0.16f;
+    r -= s.tint * 0.08f;
+    b -= s.tint * 0.08f;
+    if (s.grain > 0.001f) {
+        l = Clamp01(0.299f * r + 0.587f * g + 0.114f * b);
+        float mid = 1.0f - std::fabs(l - 0.45f) * 1.7f;
+        if (mid < 0.15f) mid = 0.15f;
+        if (mid > 1.0f) mid = 1.0f;
+        float n = (noise - 0.5f) * s.grain * 0.28f * mid;
+        r += n; g += n; b += n;
+    }
+    r = Clamp01(r); g = Clamp01(g); b = Clamp01(b);
+}
+
+void GradeCanvas(uint8_t* px, int w, int h, const BusSegment& s, int frame) {
+    if (!px || w <= 0 || h <= 0 || !BusActive(s)) return;
+    std::vector<uint8_t> src;
+    const uint8_t* in = px;
+    if (s.sharpen > 0.01f) {
+        src.assign(px, px + (size_t)w * (size_t)h * 4);
+        in = src.data();
+    }
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            const uint8_t* p = in + ((size_t)y * (size_t)w + (size_t)x) * 4;
+            float r = p[0] / 255.0f, g = p[1] / 255.0f, b = p[2] / 255.0f;
+            if (s.sharpen > 0.01f && w > 2 && h > 2) {
+                int xm = x > 0 ? x - 1 : x;
+                int xp = x + 1 < w ? x + 1 : x;
+                int ym = y > 0 ? y - 1 : y;
+                int yp = y + 1 < h ? y + 1 : y;
+                auto at = [&](int xx, int yy, int c) {
+                    return in[((size_t)yy * (size_t)w + (size_t)xx) * 4 + c] / 255.0f;
+                };
+                float br = (at(xm, y, 0) + at(xp, y, 0) + at(x, ym, 0) + at(x, yp, 0)) * 0.25f;
+                float bg = (at(xm, y, 1) + at(xp, y, 1) + at(x, ym, 1) + at(x, yp, 1)) * 0.25f;
+                float bb = (at(xm, y, 2) + at(xp, y, 2) + at(x, ym, 2) + at(x, yp, 2)) * 0.25f;
+                float k = s.sharpen * 1.6f;
+                r += (r - br) * k;
+                g += (g - bg) * k;
+                b += (b - bb) * k;
+            }
+            GradeRGB(r, g, b, s, BusHash(x, y, frame));
+            uint8_t* o = px + ((size_t)y * (size_t)w + (size_t)x) * 4;
+            o[0] = (uint8_t)std::lround(r * 255.0f);
+            o[1] = (uint8_t)std::lround(g * 255.0f);
+            o[2] = (uint8_t)std::lround(b * 255.0f);
+        }
+    }
+}
+
 void ExportSession::Step() {
     if (!active) return;
     if (frameIndex >= total) { Finish(true); return; }
@@ -1344,6 +1462,7 @@ void ExportSession::Step() {
         } else {
             blitClip(top, t);
         }
+        if (const BusSegment* bs = BusAt((float)t)) GradeCanvas(canvas.data(), w, h, *bs, frameIndex);
     }
     if (!vframe || av_frame_make_writable(vframe) < 0) { Fail("Video frame failed"); return; }
     uint8_t* srcData[1] = { canvas.data() };
@@ -1500,6 +1619,158 @@ void SyncSide(int clipIdx, float timelineT) {
 
 #endif
 
+static GLuint gradeProgram = 0;
+static int gradeReady = 0;
+static int uTex = -1, uTexel = -1, uLight = -1, uContrast = -1, uWarm = -1, uTint = -1, uSat = -1, uShadow = -1, uGrain = -1, uSharp = -1, uTime = -1, uAlpha = -1;
+
+typedef unsigned int (APIENTRY *PFN_glCreateShader_t)(unsigned int);
+typedef void (APIENTRY *PFN_glShaderSource_t)(unsigned int, int, const char* const*, const int*);
+typedef void (APIENTRY *PFN_glCompileShader_t)(unsigned int);
+typedef unsigned int (APIENTRY *PFN_glCreateProgram_t)(void);
+typedef void (APIENTRY *PFN_glAttachShader_t)(unsigned int, unsigned int);
+typedef void (APIENTRY *PFN_glLinkProgram_t)(unsigned int);
+typedef void (APIENTRY *PFN_glDeleteShader_t)(unsigned int);
+typedef void (APIENTRY *PFN_glGetShaderiv_t)(unsigned int, unsigned int, int*);
+typedef void (APIENTRY *PFN_glGetProgramiv_t)(unsigned int, unsigned int, int*);
+typedef int (APIENTRY *PFN_glGetUniformLocation_t)(unsigned int, const char*);
+typedef void (APIENTRY *PFN_glUniform1f_t)(int, float);
+typedef void (APIENTRY *PFN_glUniform1i_t)(int, int);
+typedef void (APIENTRY *PFN_glUniform2f_t)(int, float, float);
+
+static PFN_glCreateShader_t pCreateShader = nullptr;
+static PFN_glShaderSource_t pShaderSource = nullptr;
+static PFN_glCompileShader_t pCompileShader = nullptr;
+static PFN_glCreateProgram_t pCreateProgram = nullptr;
+static PFN_glAttachShader_t pAttachShader = nullptr;
+static PFN_glLinkProgram_t pLinkProgram = nullptr;
+static PFN_glDeleteShader_t pDeleteShader = nullptr;
+static PFN_glGetShaderiv_t pGetShaderiv = nullptr;
+static PFN_glGetProgramiv_t pGetProgramiv = nullptr;
+static PFN_glGetUniformLocation_t pGetUniform = nullptr;
+static PFN_glUniform1f_t pUniform1f = nullptr;
+static PFN_glUniform1i_t pUniform1i = nullptr;
+static PFN_glUniform2f_t pUniform2f = nullptr;
+
+static bool CompileStage(unsigned int type, const char* src, unsigned int& out) {
+    out = pCreateShader(type);
+    pShaderSource(out, 1, &src, nullptr);
+    pCompileShader(out);
+    int ok = 0;
+    pGetShaderiv(out, 0x8B81, &ok);
+    return ok == 1;
+}
+
+static bool EnsureGrade() {
+    if (gradeReady == 1) return gradeProgram != 0;
+    if (gradeReady == -1) return false;
+    gradeReady = -1;
+    if (!pglUseProgram) return false;
+    pCreateShader = (PFN_glCreateShader_t)SDL_GL_GetProcAddress("glCreateShader");
+    pShaderSource = (PFN_glShaderSource_t)SDL_GL_GetProcAddress("glShaderSource");
+    pCompileShader = (PFN_glCompileShader_t)SDL_GL_GetProcAddress("glCompileShader");
+    pCreateProgram = (PFN_glCreateProgram_t)SDL_GL_GetProcAddress("glCreateProgram");
+    pAttachShader = (PFN_glAttachShader_t)SDL_GL_GetProcAddress("glAttachShader");
+    pLinkProgram = (PFN_glLinkProgram_t)SDL_GL_GetProcAddress("glLinkProgram");
+    pDeleteShader = (PFN_glDeleteShader_t)SDL_GL_GetProcAddress("glDeleteShader");
+    pGetShaderiv = (PFN_glGetShaderiv_t)SDL_GL_GetProcAddress("glGetShaderiv");
+    pGetProgramiv = (PFN_glGetProgramiv_t)SDL_GL_GetProcAddress("glGetProgramiv");
+    pGetUniform = (PFN_glGetUniformLocation_t)SDL_GL_GetProcAddress("glGetUniformLocation");
+    pUniform1f = (PFN_glUniform1f_t)SDL_GL_GetProcAddress("glUniform1f");
+    pUniform1i = (PFN_glUniform1i_t)SDL_GL_GetProcAddress("glUniform1i");
+    pUniform2f = (PFN_glUniform2f_t)SDL_GL_GetProcAddress("glUniform2f");
+    if (!pCreateShader || !pShaderSource || !pCompileShader || !pCreateProgram || !pAttachShader || !pLinkProgram || !pGetShaderiv || !pGetProgramiv || !pGetUniform || !pUniform1f || !pUniform1i || !pUniform2f)
+        return false;
+    const char* vs =
+        "#version 130\n"
+        "varying vec2 vUV;\n"
+        "void main() {\n"
+        "    gl_Position = ftransform();\n"
+        "    vUV = gl_MultiTexCoord0.xy;\n"
+        "}\n";
+    const char* fs =
+        "#version 130\n"
+        "varying vec2 vUV;\n"
+        "uniform sampler2D tex;\n"
+        "uniform vec2 texel;\n"
+        "uniform float light, contrast, warmth, tint, sat, shadow, grain, sharp, time, alpha;\n"
+        "void main() {\n"
+        "    vec4 c = texture2D(tex, vUV);\n"
+        "    if (sharp > 0.001) {\n"
+        "        vec3 blur = (texture2D(tex, vUV + vec2(texel.x, 0.0)).rgb +\n"
+        "                     texture2D(tex, vUV - vec2(texel.x, 0.0)).rgb +\n"
+        "                     texture2D(tex, vUV + vec2(0.0, texel.y)).rgb +\n"
+        "                     texture2D(tex, vUV - vec2(0.0, texel.y)).rgb) * 0.25;\n"
+        "        c.rgb += (c.rgb - blur) * sharp * 1.6;\n"
+        "    }\n"
+        "    float l = dot(c.rgb, vec3(0.299, 0.587, 0.114));\n"
+        "    float shw = 1.0 - smoothstep(0.0, 0.5, l);\n"
+        "    c.rgb += shadow * 0.35 * shw;\n"
+        "    float ct = 1.0 + contrast * 1.35;\n"
+        "    c.rgb = (c.rgb - 0.5) * ct + 0.5;\n"
+        "    c.rgb += light * 0.45;\n"
+        "    l = dot(c.rgb, vec3(0.299, 0.587, 0.114));\n"
+        "    c.rgb = mix(vec3(l), c.rgb, 1.0 + sat);\n"
+        "    c.r += warmth * 0.18; c.g += warmth * 0.05; c.b -= warmth * 0.18;\n"
+        "    c.g += tint * 0.16; c.r -= tint * 0.08; c.b -= tint * 0.08;\n"
+        "    if (grain > 0.001) {\n"
+        "        float n = fract(sin(dot(gl_FragCoord.xy + vec2(time * 13.1, time * 7.7), vec2(12.9898, 78.233))) * 43758.5453);\n"
+        "        l = clamp(dot(c.rgb, vec3(0.299, 0.587, 0.114)), 0.0, 1.0);\n"
+        "        float mid = clamp(1.0 - abs(l - 0.45) * 1.7, 0.15, 1.0);\n"
+        "        c.rgb += (n - 0.5) * grain * 0.28 * mid;\n"
+        "    }\n"
+        "    c.rgb = clamp(c.rgb, 0.0, 1.0);\n"
+        "    gl_FragColor = vec4(c.rgb, c.a * alpha);\n"
+        "}\n";
+    unsigned int vert = 0, frag = 0;
+    if (!CompileStage(0x8B31, vs, vert) || !CompileStage(0x8B30, fs, frag)) {
+        if (pDeleteShader) {
+            if (vert) pDeleteShader(vert);
+            if (frag) pDeleteShader(frag);
+        }
+        return false;
+    }
+    gradeProgram = pCreateProgram();
+    pAttachShader(gradeProgram, vert);
+    pAttachShader(gradeProgram, frag);
+    pLinkProgram(gradeProgram);
+    int ok = 0;
+    pGetProgramiv(gradeProgram, 0x8B82, &ok);
+    if (pDeleteShader) { pDeleteShader(vert); pDeleteShader(frag); }
+    if (!ok) { gradeProgram = 0; return false; }
+    uTex = pGetUniform(gradeProgram, "tex");
+    uTexel = pGetUniform(gradeProgram, "texel");
+    uLight = pGetUniform(gradeProgram, "light");
+    uContrast = pGetUniform(gradeProgram, "contrast");
+    uWarm = pGetUniform(gradeProgram, "warmth");
+    uTint = pGetUniform(gradeProgram, "tint");
+    uSat = pGetUniform(gradeProgram, "sat");
+    uShadow = pGetUniform(gradeProgram, "shadow");
+    uGrain = pGetUniform(gradeProgram, "grain");
+    uSharp = pGetUniform(gradeProgram, "sharp");
+    uTime = pGetUniform(gradeProgram, "time");
+    uAlpha = pGetUniform(gradeProgram, "alpha");
+    gradeReady = 1;
+    return true;
+}
+
+static bool BindGrade(const BusSegment& s, int tw, int th, float alpha) {
+    if (!BusActive(s) || !EnsureGrade()) return false;
+    pglUseProgram(gradeProgram);
+    if (uTex >= 0) pUniform1i(uTex, 0);
+    if (uTexel >= 0) pUniform2f(uTexel, tw > 0 ? 1.0f / (float)tw : 0.0f, th > 0 ? 1.0f / (float)th : 0.0f);
+    if (uLight >= 0) pUniform1f(uLight, s.lightness);
+    if (uContrast >= 0) pUniform1f(uContrast, s.contrast);
+    if (uWarm >= 0) pUniform1f(uWarm, s.warmth);
+    if (uTint >= 0) pUniform1f(uTint, s.tint);
+    if (uSat >= 0) pUniform1f(uSat, s.saturation);
+    if (uShadow >= 0) pUniform1f(uShadow, s.shadow);
+    if (uGrain >= 0) pUniform1f(uGrain, s.grain);
+    if (uSharp >= 0) pUniform1f(uSharp, s.sharpen);
+    if (uTime >= 0) pUniform1f(uTime, currentTime);
+    if (uAlpha >= 0) pUniform1f(uAlpha, alpha);
+    return true;
+}
+
 void BlitVideo(ImVec2 p0, ImVec2 p1, GLuint tex, int vw, int vh, ImVec2 clip0, ImVec2 clip1) {
     if (!tex || vw <= 0 || vh <= 0) return;
     float areaW = p1.x - p0.x;
@@ -1524,7 +1795,8 @@ void BlitVideo(ImVec2 p0, ImVec2 p1, GLuint tex, int vw, int vh, ImVec2 clip0, I
     float sy1 = std::min(b.y, std::min(io.DisplaySize.y, clip1.y));
     if (sx1 - sx0 < 1.0f || sy1 - sy0 < 1.0f) return;
 
-    if (pglUseProgram) pglUseProgram(0);
+    bool graded = activeGrade && BindGrade(*activeGrade, vw, vh, 1.0f);
+    if (!graded && pglUseProgram) pglUseProgram(0);
     glDisable(GL_BLEND);
     glDisable(GL_DEPTH_TEST);
     glEnable(GL_SCISSOR_TEST);
@@ -1551,6 +1823,7 @@ void BlitVideo(ImVec2 p0, ImVec2 p1, GLuint tex, int vw, int vh, ImVec2 clip0, I
     glMatrixMode(GL_MODELVIEW);
     glDisable(GL_TEXTURE_2D);
     glDisable(GL_SCISSOR_TEST);
+    if (graded && pglUseProgram) pglUseProgram(0);
 }
 
 void BlitFxPair(ImVec2 p0, ImVec2 p1, GLuint texA, int aw, int ah, GLuint texB, int bw, int bh, const FxLook& look) {
@@ -1576,10 +1849,12 @@ void BlitFxPair(ImVec2 p0, ImVec2 p1, GLuint texA, int aw, int ah, GLuint texB, 
     float sx1 = std::min(b.x, std::min(io.DisplaySize.x, p1.x));
     float sy1 = std::min(b.y, std::min(io.DisplaySize.y, p1.y));
     if (sx1 - sx0 < 1.0f || sy1 - sy0 < 1.0f) return;
-    auto quad = [&](GLuint tex, float alpha, float scale) {
+    auto quad = [&](GLuint tex, int tw, int th, float alpha, float scale) {
         ImVec2 c((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f);
         ImVec2 q0(c.x + (a.x - c.x) * scale, c.y + (a.y - c.y) * scale);
         ImVec2 q1(c.x + (b.x - c.x) * scale, c.y + (b.y - c.y) * scale);
+        bool graded = activeGrade && BindGrade(*activeGrade, tw, th, alpha);
+        if (!graded && pglUseProgram) pglUseProgram(0);
         glBindTexture(GL_TEXTURE_2D, tex);
         glColor4f(1.f, 1.f, 1.f, alpha);
         glBegin(GL_QUADS);
@@ -1588,6 +1863,7 @@ void BlitFxPair(ImVec2 p0, ImVec2 p1, GLuint texA, int aw, int ah, GLuint texB, 
         glTexCoord2f(1, 1); glVertex2f(q1.x, q1.y);
         glTexCoord2f(0, 1); glVertex2f(q0.x, q1.y);
         glEnd();
+        if (graded && pglUseProgram) pglUseProgram(0);
     };
     if (pglUseProgram) pglUseProgram(0);
     glDisable(GL_DEPTH_TEST);
@@ -1602,11 +1878,11 @@ void BlitFxPair(ImVec2 p0, ImVec2 p1, GLuint texA, int aw, int ah, GLuint texB, 
     glPushMatrix();
     glLoadIdentity();
     glDisable(GL_BLEND);
-    quad(texA, 1.0f, look.scaleA);
+    quad(texA, aw, ah, 1.0f, look.scaleA);
     if (texB && bw > 0 && bh > 0 && look.alphaB > 0.001f) {
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        quad(texB, look.alphaB, look.scaleB);
+        quad(texB, bw, bh, look.alphaB, look.scaleB);
     }
     glPopMatrix();
     glMatrixMode(GL_PROJECTION);
@@ -1690,10 +1966,23 @@ bool IsSelected(int i) {
     return std::find(selection.begin(), selection.end(), i) != selection.end();
 }
 
+void AddBusSegment(float start, float dur) {
+    if (start < 0) start = 0;
+    if (dur < 0.2f) dur = 0.2f;
+    BusSegment s;
+    s.start = start;
+    s.duration = dur;
+    bus.push_back(s);
+    selectedBus = (int)bus.size() - 1;
+    selectedClip = -1;
+    selection.clear();
+}
+
 void SelectOnly(int i) {
     selection.clear();
     if (i >= 0) selection.push_back(i);
     selectedClip = i;
+    selectedBus = -1;
 }
 
 void ToggleSelect(int i) {
@@ -1701,6 +1990,7 @@ void ToggleSelect(int i) {
     if (it == selection.end()) selection.push_back(i);
     else selection.erase(it);
     selectedClip = i;
+    selectedBus = -1;
 }
 
 int OverlapPartner(int i) {
@@ -2157,7 +2447,9 @@ void ClearProject() {
     }
     media.clear();
     clips.clear();
+    bus.clear();
     selectedClip = -1;
+    selectedBus = -1;
     selection.clear();
     draggingClip = -1;
     trimmingClip = -1;
@@ -2269,6 +2561,11 @@ bool SaveProject(const std::string& path) {
                 c.eqGain[4], c.eqGain[5], c.eqGain[6], c.eqGain[7]);
         fprintf(f, "E %s %.4f\n", c.fxOut.empty() ? "-" : c.fxOut.c_str(), c.fxDur);
     }
+    for (const auto& b : bus) {
+        fprintf(f, "B %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f\n",
+                b.start, b.duration, b.lightness, b.contrast, b.warmth, b.tint,
+                b.saturation, b.shadow, b.grain, b.sharpen);
+    }
     fclose(f);
     return true;
 }
@@ -2355,6 +2652,23 @@ bool LoadProject(const std::string& path) {
                 else c.fxOut.clear();
                 if (dur >= 0.1f && dur <= 5.0f) c.fxDur = dur;
             }
+        } else if (line[0] == 'B' && line[1] == ' ') {
+            BusSegment b;
+            if (sscanf(line, "B %f %f %f %f %f %f %f %f %f %f",
+                       &b.start, &b.duration, &b.lightness, &b.contrast, &b.warmth, &b.tint,
+                       &b.saturation, &b.shadow, &b.grain, &b.sharpen) == 10 && b.duration > 0.05f) {
+                auto lim = [](float v) { return v < -1.0f ? -1.0f : (v > 1.0f ? 1.0f : v); };
+                b.lightness = lim(b.lightness);
+                b.contrast = lim(b.contrast);
+                b.warmth = lim(b.warmth);
+                b.tint = lim(b.tint);
+                b.saturation = lim(b.saturation);
+                b.shadow = lim(b.shadow);
+                b.grain = Clamp01(b.grain);
+                b.sharpen = Clamp01(b.sharpen);
+                if (b.start < 0) b.start = 0;
+                bus.push_back(b);
+            }
         }
     }
     fclose(f);
@@ -2399,7 +2713,7 @@ int main(int argc, char* argv[]) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
-    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 16",
+    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 17",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900,
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!window) { SDL_Quit(); return 1; }
@@ -2436,8 +2750,19 @@ int main(int argc, char* argv[]) {
                 }
                 if (event.key.keysym.sym == SDLK_c && !event.key.repeat && !io.WantTextInput)
                     SplitSelected();
+                if (event.key.keysym.sym == SDLK_s && !event.key.repeat && !io.WantTextInput && busHover) {
+                    float st = SnapTime(-1, busHoverTime);
+                    AddBusSegment(st, 5.0f);
+                }
                 if (event.key.keysym.sym == SDLK_DELETE || event.key.keysym.sym == SDLK_BACKSPACE) {
-                    if (selectedClip >= 0 && selectedClip < (int)clips.size()) {
+                    if (selectedBus >= 0 && selectedBus < (int)bus.size() && !io.WantTextInput) {
+                        bus.erase(bus.begin() + selectedBus);
+                        if (contextBus == selectedBus) contextBus = -1;
+                        else if (contextBus > selectedBus) contextBus--;
+                        selectedBus = -1;
+                        draggingBus = -1;
+                        trimmingBus = -1;
+                    } else if (selectedClip >= 0 && selectedClip < (int)clips.size()) {
                         if (fxEdit == selectedClip) fxEdit = -1;
                         else if (fxEdit > selectedClip) fxEdit--;
                         clips.erase(clips.begin() + selectedClip);
@@ -2622,12 +2947,14 @@ int main(int argc, char* argv[]) {
         if (ImGui::RadioButton("Select", activeTool == 0)) activeTool = 0; ImGui::SameLine();
         if (ImGui::RadioButton("Trim", activeTool == 1)) activeTool = 1; ImGui::SameLine();
         if (ImGui::RadioButton("Split", activeTool == 2)) activeTool = 2; ImGui::SameLine();
-        ImGui::Text("| C = split | Shift+click selects several | Right click: Effects");
+        ImGui::Text("| C = split | S on BUS = segment | Shift+click | Right click: Effects");
         ImGui::Separator();
 
         float tlSeconds = 600.0f;
         for (const auto& c : clips)
             tlSeconds = std::max(tlSeconds, c.startTime + c.duration + 90.0f);
+        for (const auto& b : bus)
+            tlSeconds = std::max(tlSeconds, b.start + b.duration + 30.0f);
         float timeW = tlSeconds * pixelsPerSecond;
         ImGui::BeginChild("Timeline", ImVec2(0, 0), true, ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_AlwaysHorizontalScrollbar);
         const char* trackNames[] = {"V1", "V2", "V3", "A1", "A2", "A3"};
@@ -2663,6 +2990,63 @@ int main(int argc, char* argv[]) {
                 ResetAudioSync();
                 if (player) player->lastPts = -1;
 #endif
+            }
+        }
+        ImGui::EndChild();
+
+        busHover = false;
+        ImGui::BeginChild("buslane", ImVec2(timeW + 90.0f, trackH), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(3, 1));
+        if (ImGui::SmallButton("+")) {
+            float end = 0.0f;
+            for (const auto& c : clips) end = std::max(end, c.startTime + c.duration);
+            if (end < 0.5f) end = 5.0f;
+            AddBusSegment(0.0f, end);
+        }
+        ImGui::PopStyleVar();
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Bus segment for the whole project");
+        ImGui::SameLine();
+        ImGui::TextUnformatted("BUS");
+        ImGui::SameLine(46.0f);
+        ImVec2 busStart = ImGui::GetCursorScreenPos();
+        busOriginX = busStart.x;
+        float busW = ImGui::GetContentRegionAvail().x;
+        ImGui::InvisibleButton("buszone", ImVec2(busW, trackH - 4));
+        if (ImGui::IsItemHovered()) {
+            busHover = true;
+            busHoverTime = (ImGui::GetMousePos().x - busStart.x) / pixelsPerSecond;
+            if (busHoverTime < 0) busHoverTime = 0;
+        }
+        ImDrawList* bdl = ImGui::GetWindowDrawList();
+        for (int i = 0; i < (int)bus.size(); i++) {
+            float x = busStart.x + bus[i].start * pixelsPerSecond;
+            float w = std::max(18.0f, bus[i].duration * pixelsPerSecond);
+            ImVec2 cp0(x, busStart.y);
+            ImVec2 cp1(x + w, busStart.y + trackH - 8);
+            bdl->AddRectFilled(cp0, cp1, IM_COL32(168, 112, 42, 235), 3.0f);
+            if (i == selectedBus) bdl->AddRect(cp0, cp1, IM_COL32(255, 220, 120, 255), 3.0f, 0, 2.0f);
+            char lab[64];
+            snprintf(lab, sizeof(lab), "BUS %.1fs%s", bus[i].duration, BusActive(bus[i]) ? " FX" : "");
+            bdl->AddText(ImVec2(cp0.x + 6, cp0.y + 4), IM_COL32(255, 245, 220, 240), lab);
+            if (!ImGui::IsMouseHoveringRect(cp0, cp1)) continue;
+            busHover = true;
+            busHoverTime = (ImGui::GetMousePos().x - busStart.x) / pixelsPerSecond;
+            ImVec2 mouse = ImGui::GetMousePos();
+            if (mouse.x < cp0.x + 8 || mouse.x > cp1.x - 8) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+            if (ImGui::IsMouseClicked(1)) {
+                contextBus = i;
+                selectedBus = i;
+                selectedClip = -1;
+                selection.clear();
+                openBusMenu = true;
+            }
+            if (ImGui::IsMouseClicked(0)) {
+                selectedBus = i;
+                selectedClip = -1;
+                selection.clear();
+                if (mouse.x < cp0.x + 8) { trimmingBus = i; trimBusSide = 0; }
+                else if (mouse.x > cp1.x - 8) { trimmingBus = i; trimBusSide = 1; }
+                else { draggingBus = i; busDragOffset = mouse.x - cp0.x; trimmingBus = -1; }
             }
         }
         ImGui::EndChild();
@@ -2905,6 +3289,33 @@ int main(int argc, char* argv[]) {
             } else draggingClip = -1;
         }
 
+        if (trimmingBus >= 0 && trimmingBus < (int)bus.size()) {
+            if (ImGui::IsMouseDown(0)) {
+                float mx = (ImGui::GetMousePos().x - busOriginX) / pixelsPerSecond;
+                BusSegment& s = bus[trimmingBus];
+                if (trimBusSide == 1) {
+                    float end = SnapTime(-1, mx);
+                    float nd = end - s.start;
+                    if (nd < 0.2f) nd = 0.2f;
+                    s.duration = nd;
+                } else {
+                    float end = s.start + s.duration;
+                    float ns = SnapTime(-1, mx);
+                    if (ns < 0) ns = 0;
+                    if (ns > end - 0.2f) ns = end - 0.2f;
+                    s.duration = end - ns;
+                    s.start = ns;
+                }
+            } else trimmingBus = -1;
+        }
+
+        if (draggingBus >= 0 && draggingBus < (int)bus.size() && trimmingBus < 0) {
+            if (ImGui::IsMouseDown(0)) {
+                float ns = (ImGui::GetMousePos().x - busDragOffset - busOriginX) / pixelsPerSecond;
+                bus[draggingBus].start = SnapTime(-1, ns);
+            } else draggingBus = -1;
+        }
+
         float phX = trackPositions[0].x + currentTime * pixelsPerSecond;
         ImVec2 tlMin = ImGui::GetWindowPos();
         float tlBottom = tlMin.y + ImGui::GetWindowSize().y;
@@ -3009,6 +3420,37 @@ int main(int argc, char* argv[]) {
                 if (ImGui::MenuItem("Delay", nullptr, &c.delayOn)) {
                     c.fx.clear();
                     fxEdit = contextClip;
+                }
+            }
+            ImGui::EndPopup();
+        }
+
+        if (openBusMenu) {
+            ImGui::OpenPopup("busctx");
+            openBusMenu = false;
+        }
+        if (ImGui::BeginPopup("busctx")) {
+            if (contextBus >= 0 && contextBus < (int)bus.size()) {
+                BusSegment& s = bus[contextBus];
+                ImGui::TextUnformatted("Bus grade");
+                ImGui::Separator();
+                ImGui::SliderFloat("Lightness", &s.lightness, -1.0f, 1.0f, "%.2f");
+                ImGui::SliderFloat("Contrast", &s.contrast, -1.0f, 1.0f, "%.2f");
+                ImGui::SliderFloat("Warmth", &s.warmth, -1.0f, 1.0f, "%.2f");
+                ImGui::SliderFloat("Tint", &s.tint, -1.0f, 1.0f, "%.2f");
+                ImGui::SliderFloat("Saturation", &s.saturation, -1.0f, 1.0f, "%.2f");
+                ImGui::SliderFloat("Shadow", &s.shadow, -1.0f, 1.0f, "%.2f");
+                ImGui::SliderFloat("Film grain", &s.grain, 0.0f, 1.0f, "%.2f");
+                ImGui::SliderFloat("Sharpen", &s.sharpen, 0.0f, 1.0f, "%.2f");
+                ImGui::Separator();
+                if (ImGui::MenuItem("Reset")) {
+                    s.lightness = s.contrast = s.warmth = s.tint = s.saturation = s.shadow = s.grain = s.sharpen = 0;
+                }
+                if (ImGui::MenuItem("Delete segment")) {
+                    bus.erase(bus.begin() + contextBus);
+                    selectedBus = -1;
+                    contextBus = -1;
+                    ImGui::CloseCurrentPopup();
                 }
             }
             ImGui::EndPopup();
@@ -3148,6 +3590,7 @@ int main(int argc, char* argv[]) {
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
 #ifdef HAVE_FFMPEG
+        activeGrade = BusAt(currentTime);
         if (fxOther >= 0 && player && playerB && player->hasFrame && playerB->hasFrame && player->texture && playerB->texture) {
             int drawA = -1, drawB = -1;
             float prog = 0;
@@ -3168,6 +3611,7 @@ int main(int argc, char* argv[]) {
             }
         } else if (player && player->hasFrame && player->texture)
             BlitVideo(previewMin, previewMax, player->texture, player->width, player->height, previewMin, previewMax);
+        activeGrade = nullptr;
         for (const auto& tb : thumbBlits)
             BlitVideo(tb.a, tb.b, tb.tex, tb.w, tb.h, tb.c0, tb.c1);
 #endif
