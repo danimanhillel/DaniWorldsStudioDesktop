@@ -28,9 +28,7 @@ public:
     void evaluate(float p, FxLook& look) const override {
         if (p < 0) p = 0;
         if (p > 1) p = 1;
-        if (p < 0.2f) look.alphaB = (p / 0.2f) * 0.5f;
-        else if (p > 0.8f) look.alphaB = 0.5f + ((p - 0.8f) / 0.2f) * 0.5f;
-        else look.alphaB = 0.5f;
+        look.alphaB = p;
         look.scaleA = 1.0f;
         look.scaleB = 1.0f;
     }
