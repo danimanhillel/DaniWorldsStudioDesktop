@@ -3552,7 +3552,7 @@ int main(int argc, char* argv[]) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
-    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 26",
+    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 27",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900,
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!window) { SDL_Quit(); return 1; }
@@ -3869,10 +3869,11 @@ int main(int argc, char* argv[]) {
         ImGui::EndChild();
 
         busHover = false;
-        ImGui::BeginChild("buslane", ImVec2(timeW + 90.0f, 78.0f), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(2, 1));
+        ImGui::BeginChild("buslane", ImVec2(timeW + 90.0f, 58.0f), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        ImVec2 lane0 = ImGui::GetCursorScreenPos();
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(1, 0));
+        ImGui::BeginGroup();
         ImGui::TextUnformatted("SUB");
-        ImGui::SameLine();
         if (ImGui::SmallButton("+")) {
             float end = 0.0f;
             for (const auto& c : clips) end = std::max(end, c.startTime + c.duration);
@@ -3880,7 +3881,9 @@ int main(int argc, char* argv[]) {
             AddBusSegment(0.0f, end);
         }
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Segment for the whole project");
+        ImGui::EndGroup();
         ImGui::PopStyleVar();
+        ImGui::SetCursorScreenPos(ImVec2(lane0.x + 46.0f, lane0.y));
         ImVec2 busStart = ImGui::GetCursorScreenPos();
         busOriginX = busStart.x;
         float busW = ImGui::GetContentRegionAvail().x;
