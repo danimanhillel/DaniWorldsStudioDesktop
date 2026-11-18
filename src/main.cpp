@@ -3552,7 +3552,7 @@ int main(int argc, char* argv[]) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
-    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 25",
+    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 26",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900,
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!window) { SDL_Quit(); return 1; }
@@ -3585,7 +3585,7 @@ int main(int argc, char* argv[]) {
             if (event.type == SDL_QUIT) running = false;
             if (event.type == SDL_KEYDOWN) {
                 if (event.key.keysym.sym == SDLK_ESCAPE) running = false;
-                if (event.key.keysym.sym == SDLK_SPACE) {
+                if (event.key.keysym.sym == SDLK_SPACE && !event.key.repeat && !io.WantTextInput && !subEditorOpen) {
 #ifdef HAVE_FFMPEG
                     if (!gExport.active) SetPlaying(!isPlaying);
 #else
@@ -3751,7 +3751,7 @@ int main(int argc, char* argv[]) {
 
         ImGui::SameLine();
         ImGui::BeginGroup();
-        ImGui::BeginChild("Preview", ImVec2(0, topH - 40), true);
+        ImGui::BeginChild("Preview", ImVec2(0, topH - 46), true);
         ImGui::Text("Preview | %s", previewStatus.c_str());
         ImVec2 avail = ImGui::GetContentRegionAvail();
         ImGui::InvisibleButton("prev", ImVec2(avail.x, std::max(10.0f, avail.y - 8)));
@@ -3779,6 +3779,11 @@ int main(int argc, char* argv[]) {
         }
         ImGui::EndChild();
 
+        {
+            float row = 40.0f * 3.0f + ImGui::GetStyle().ItemSpacing.x * 2.0f;
+            float spare = ImGui::GetContentRegionAvail().x - row;
+            if (spare > 0.0f) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + spare * 0.5f);
+        }
         if (TransportButton("play", 0)) {
 #ifdef HAVE_FFMPEG
             SetPlaying(true);
@@ -3807,8 +3812,6 @@ int main(int argc, char* argv[]) {
             shownLocal = -1000.0f;
         }
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Stop");
-        ImGui::SameLine();
-        ImGui::Text("Drag clip edges to trim. Snap joins clips with no gap.");
         ImGui::EndGroup();
 
         ImGui::Separator();
