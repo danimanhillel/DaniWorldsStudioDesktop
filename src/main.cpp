@@ -137,7 +137,7 @@ struct SubStyle {
     float text[3] = {1.0f, 1.0f, 1.0f};
     bool border = true;
     float borderPx = 2.2f;
-    float border[3] = {0.0f, 0.0f, 0.0f};
+    float edge[3] = {0.0f, 0.0f, 0.0f};
     bool background = false;
     float bg[3] = {0.0f, 0.0f, 0.0f};
     float bgAlpha = 0.55f;
@@ -1718,9 +1718,9 @@ static void BurnSubtitles(uint8_t* canvas, int cw, int ch, float t) {
     unsigned char tr = (unsigned char)(Clamp01(subStyle.text[0]) * 255);
     unsigned char tg = (unsigned char)(Clamp01(subStyle.text[1]) * 255);
     unsigned char tb = (unsigned char)(Clamp01(subStyle.text[2]) * 255);
-    unsigned char br = (unsigned char)(Clamp01(subStyle.border[0]) * 255);
-    unsigned char bgc = (unsigned char)(Clamp01(subStyle.border[1]) * 255);
-    unsigned char bb = (unsigned char)(Clamp01(subStyle.border[2]) * 255);
+    unsigned char br = (unsigned char)(Clamp01(subStyle.edge[0]) * 255);
+    unsigned char bgc = (unsigned char)(Clamp01(subStyle.edge[1]) * 255);
+    unsigned char bb = (unsigned char)(Clamp01(subStyle.edge[2]) * 255);
     float edge = subStyle.border ? std::max(1.0f, subStyle.borderPx * (size / 42.0f)) : 0.0f;
     const float oxs[8] = {-1, 1, 0, 0, -1, 1, -1, 1};
     const float oys[8] = {0, 0, -1, 1, -1, -1, 1, 1};
@@ -2379,7 +2379,7 @@ void DrawPreviewSubs(ImVec2 pic0, ImVec2 pic1) {
         std::string ln = HasHebrew(raw) ? ReverseUtf8(raw) : raw;
         float x = (pic0.x + pic1.x - TextWidth(font, size, ln)) * 0.5f;
         if (edge > 0.2f) {
-            glColor4f(subStyle.border[0], subStyle.border[1], subStyle.border[2], 1);
+            glColor4f(subStyle.edge[0], subStyle.edge[1], subStyle.edge[2], 1);
             glBegin(GL_QUADS);
             for (int k = 0; k < 8; k++) DrawLineGL(font, size, x + oxs[k] * edge, yy + oys[k] * edge, ln);
             glEnd();
@@ -3174,7 +3174,7 @@ bool SaveProject(const std::string& path) {
     }
     fprintf(f, "Y %.3f %.3f %.3f %d %.2f %.3f %.3f %.3f %.3f %.3f %.3f %d\n",
             subStyle.text[0], subStyle.text[1], subStyle.text[2], subStyle.border ? 1 : 0, subStyle.borderPx,
-            subStyle.border[0], subStyle.border[1], subStyle.border[2],
+            subStyle.edge[0], subStyle.edge[1], subStyle.edge[2],
             subStyle.bg[0], subStyle.bg[1], subStyle.bg[2], subStyle.background ? 1 : 0);
     fprintf(f, "Z %.3f\n", subStyle.bgAlpha);
     for (const auto& s : subs) {
@@ -3300,7 +3300,7 @@ bool LoadProject(const std::string& path) {
                 subStyle.text[0] = Clamp01(tr); subStyle.text[1] = Clamp01(tg); subStyle.text[2] = Clamp01(tb);
                 subStyle.border = border != 0;
                 subStyle.borderPx = bp < 0 ? 0 : (bp > 8 ? 8 : bp);
-                subStyle.border[0] = Clamp01(br); subStyle.border[1] = Clamp01(bg); subStyle.border[2] = Clamp01(bb);
+                subStyle.edge[0] = Clamp01(br); subStyle.edge[1] = Clamp01(bg); subStyle.edge[2] = Clamp01(bb);
                 subStyle.bg[0] = Clamp01(gr); subStyle.bg[1] = Clamp01(gg); subStyle.bg[2] = Clamp01(gb);
                 subStyle.background = back != 0;
             }
@@ -3365,7 +3365,7 @@ int main(int argc, char* argv[]) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
-    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 20",
+    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 21",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900,
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!window) { SDL_Quit(); return 1; }
@@ -4472,7 +4472,7 @@ int main(int argc, char* argv[]) {
                 ImGui::ColorEdit3("Color", subStyle.text);
                 ImGui::Checkbox("Border", &subStyle.border);
                 ImGui::SliderFloat("Border size", &subStyle.borderPx, 0.0f, 6.0f, "%.1f");
-                ImGui::ColorEdit3("Border color", subStyle.border);
+                ImGui::ColorEdit3("Border color", subStyle.edge);
                 ImGui::Checkbox("Background", &subStyle.background);
                 ImGui::ColorEdit3("Background color", subStyle.bg);
                 ImGui::SliderFloat("Background opacity", &subStyle.bgAlpha, 0.0f, 1.0f, "%.2f");
