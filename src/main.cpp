@@ -1632,21 +1632,22 @@ static int SubInputCallback(ImGuiInputTextCallbackData* data) {
     return 0;
 }
 
+static bool RectHit(const ImVec4& r, const ImVec2& m) {
+    return r.z > r.x && m.x >= r.x && m.y >= r.y && m.x <= r.z && m.y <= r.w;
+}
+
 static bool ClickOutsidePanels() {
     if (openedPanelThisFrame) return false;
     if (!ImGui::IsMouseClicked(0) && !ImGui::IsMouseClicked(1)) return false;
     ImVec2 m = ImGui::GetMousePos();
-    auto inside = [&](const ImVec4& r) {
-        return r.z > r.x && m.x >= r.x && m.y >= r.y && m.x <= r.z && m.y <= r.w;
-    };
-    if (busGradeOpen && inside(busPanelRect)) return false;
-    if (gsPanelOpen && inside(gsPanelRect)) return false;
-    if (subEditorOpen && inside(subPanelRect)) return false;
-    if (subStyleOpen && inside(subStyleRect)) return false;
+    if (busGradeOpen && RectHit(busPanelRect, m)) return false;
+    if (gsPanelOpen && RectHit(gsPanelRect, m)) return false;
+    if (subEditorOpen && RectHit(subPanelRect, m)) return false;
+    if (subStyleOpen && RectHit(subStyleRect, m)) return false;
     return true;
 }
 
-static void PlacePanel(float xShift = 0.0f) {
+static void PlacePanel(float xShift) {
     ImGuiIO& pio = ImGui::GetIO();
     ImGui::SetNextWindowPos(ImVec2(18.0f + xShift, pio.DisplaySize.y - 18.0f), ImGuiCond_Appearing, ImVec2(0.0f, 1.0f));
     ImGui::SetNextWindowFocus();
@@ -1824,6 +1825,9 @@ static void BurnSubtitles(uint8_t* canvas, int cw, int ch, float t) {
     }
 }
 
+#ifdef _MSC_VER
+#pragma optimize("", off)
+#endif
 void ExportSession::Step() {
     if (!active) return;
     if (frameIndex >= total) { Finish(true); return; }
@@ -1906,6 +1910,9 @@ void ExportSession::Step() {
     status = buf;
     previewStatus = status;
 }
+#ifdef _MSC_VER
+#pragma optimize("", on)
+#endif
 
 void ExportSession::Finish(bool ok) {
     if (actx && swr) DrainAudio(true);
@@ -3448,6 +3455,9 @@ bool LoadProject(const std::string& path) {
 }
 
 
+#ifdef _MSC_VER
+#pragma optimize("", off)
+#endif
 int main(int argc, char* argv[]) {
 #ifdef _WIN32
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
@@ -3472,7 +3482,7 @@ int main(int argc, char* argv[]) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
-    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 22",
+    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 23",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900,
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!window) { SDL_Quit(); return 1; }
@@ -4375,7 +4385,7 @@ int main(int argc, char* argv[]) {
 
         busPanelHoldsMouse = false;
         if (busGradeOpen && contextBus >= 0 && contextBus < (int)bus.size()) {
-            PlacePanel();
+            PlacePanel(0.0f);
             bool open = true;
             if (ClickOutsidePanels()) open = false;
             if (ImGui::Begin("Bus grade", &open, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse)) {
@@ -4544,7 +4554,7 @@ int main(int argc, char* argv[]) {
 
         gsPanelHolds = false;
         if (gsPanelOpen && gsPanelClip >= 0 && gsPanelClip < (int)clips.size() && clips[gsPanelClip].track == kGsTrack) {
-            PlacePanel();
+            PlacePanel(0.0f);
             bool open = true;
             if (ClickOutsidePanels()) open = false;
             if (ImGui::Begin("Green screen", &open, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse)) {
@@ -4574,7 +4584,7 @@ int main(int argc, char* argv[]) {
         }
         subPanelHolds = false;
         if (subEditorOpen && editingSub >= 0 && editingSub < (int)subs.size()) {
-            PlacePanel();
+            PlacePanel(0.0f);
             bool open = true;
             if (ClickOutsidePanels()) open = false;
             if (ImGui::Begin("Subtitle", &open, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse)) {
@@ -4693,3 +4703,6 @@ int main(int argc, char* argv[]) {
     SDL_Quit();
     return 0;
 }
+#ifdef _MSC_VER
+#pragma optimize("", on)
+#endif
