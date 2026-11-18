@@ -1300,6 +1300,7 @@ bool ExportSession::Begin(const std::string& outPath, int width, int height, int
 }
 
 bool TransitionForClip(int clip, float t, int& a, int& b, float& progress, std::string& id);
+float ClipLocalTime(int clipIdx, float timelineT);
 
 void ExportSession::Step() {
     if (!active) return;
@@ -1321,9 +1322,7 @@ void ExportSession::Step() {
             if (ci < 0 || ci >= (int)clips.size()) return false;
             const Clip& c = clips[ci];
             float speed = std::max(0.05f, c.speed);
-            double local = when - c.startTime;
-            if (local < 0) local = 0;
-            if (local > c.duration) local = std::max(0.0, (double)c.duration - 0.001);
+            double local = ClipLocalTime(ci, (float)when);
             double mediaT = c.sourceOffset + local * (double)speed;
             int idx = OpenDec(c.mediaId);
             if (!EnsureFrame(c.mediaId, mediaT)) return false;
@@ -1419,8 +1418,7 @@ void SyncPreview(int topClip, float dt) {
         return;
     }
     if (playing) currentTime += dt;
-    float local = currentTime - clips[topClip].startTime;
-    if (local < 0) local = 0;
+    float local = ClipLocalTime(topClip, currentTime);
     float speed = std::max(0.05f, clips[topClip].speed);
     float mediaT = clips[topClip].sourceOffset + local * speed;
     if (!playing && player->hasFrame && std::fabs(mediaT - shownLocal) <= 0.04f) {
@@ -1479,12 +1477,9 @@ void SyncSide(int clipIdx, float timelineT) {
         }
         return;
     }
-    float local = timelineT - clips[clipIdx].startTime;
-    if (local < 0) local = 0;
-    if (local > clips[clipIdx].duration) local = std::max(0.0f, clips[clipIdx].duration - 0.001f);
+    float local = ClipLocalTime(clipIdx, timelineT);
     float speed = std::max(0.05f, clips[clipIdx].speed);
     float mediaT = clips[clipIdx].sourceOffset + local * speed;
-    if (playerB->hasFrame && std::fabs(mediaT - shownLocalB) <= 0.04f) return;
     bool jumpedBack = playerB->lastPts >= 0.0 && mediaT + 0.12f < (float)playerB->lastPts;
     bool jumpedFar = playerB->lastPts >= 0.0 && (float)playerB->lastPts + 2.0f < mediaT;
     if (playerB->lastPts < 0.0 || jumpedBack || jumpedFar) {
@@ -1752,6 +1747,29 @@ bool TransitionForClip(int clip, float t, int& a, int& b, float& progress, std::
     return false;
 }
 
+float ClipLocalTime(int clipIdx, float timelineT) {
+    const Clip& c = clips[clipIdx];
+    float local = timelineT - c.startTime;
+    int a = -1, b = -1;
+    float progress = 0;
+    std::string id;
+    if (TransitionForClip(clipIdx, timelineT, a, b, progress, id)) {
+        float dur = clips[a].fxDur;
+        if (dur < 0.1f) dur = 0.1f;
+        dur = std::min(dur, clips[a].duration * 0.8f);
+        dur = std::min(dur, clips[b].duration * 0.8f);
+        if (clipIdx == b) {
+            float endLocal = (clips[a].startTime + clips[a].duration + dur * 0.5f) - clips[b].startTime;
+            if (endLocal < 0.02f) endLocal = dur * 0.5f;
+            if (endLocal > clips[b].duration) endLocal = clips[b].duration;
+            local = progress * endLocal;
+        }
+    }
+    if (local < 0) local = 0;
+    if (local > c.duration) local = std::max(0.0f, c.duration - 0.001f);
+    return local;
+}
+
 int CountSelectedJoins() {
     int n = 0;
     for (int i : selection) {
@@ -1918,6 +1936,13 @@ void EnsurePlayerForClip(int clipIdx) {
     if (clipIdx < 0 || clipIdx >= (int)clips.size()) return;
     int mid = clips[clipIdx].mediaId;
     if (mid == playingMediaId && player && player->fmtCtx) return;
+    if (playerB && playingMediaIdB == mid && playerB->fmtCtx && playerB->hasFrame) {
+        std::swap(player, playerB);
+        std::swap(playingMediaId, playingMediaIdB);
+        std::swap(shownLocal, shownLocalB);
+        if (shownLocal < 0.0f && player->lastPts >= 0.0) shownLocal = (float)player->lastPts;
+        return;
+    }
     if (playerNext && nextMediaId == mid && playerNext->fmtCtx && playerNext->hasFrame) {
         if (player) { player->Close(); delete player; }
         player = playerNext;
@@ -1933,9 +1958,7 @@ void EnsurePlayerForClip(int clipIdx) {
     shownLocal = -1000.0f;
     if (player->Open(media[mid].path)) {
         playingMediaId = mid;
-        float localTime = currentTime - clips[clipIdx].startTime;
-        if (localTime < 0) localTime = 0;
-        float mediaT = clips[clipIdx].sourceOffset + localTime * std::max(0.05f, clips[clipIdx].speed);
+        float mediaT = clips[clipIdx].sourceOffset + ClipLocalTime(clipIdx, currentTime) * std::max(0.05f, clips[clipIdx].speed);
         player->Seek(mediaT);
         if (player->GrabFrame()) {
             char buf[64];
@@ -2339,7 +2362,7 @@ int main(int argc, char* argv[]) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
-    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 13",
+    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 14",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900,
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!window) { SDL_Quit(); return 1; }
