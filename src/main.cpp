@@ -165,6 +165,7 @@ int selectedBus = -1;
 int contextBus = -1;
 bool openBusMenu = false;
 bool busGradeOpen = false;
+bool busPanelHoldsMouse = false;
 ImVec4 busPanelRect(0, 0, 0, 0);
 bool busHover = false;
 float busHoverTime = -1.0f;
@@ -2002,7 +2003,7 @@ void CopyBusGrade() {
 }
 
 bool TimelinePointerBusy() {
-    if (ImGui::IsAnyItemActive()) return true;
+    if (busPanelHoldsMouse) return true;
     if (!busGradeOpen) return false;
     ImVec2 m = ImGui::GetMousePos();
     return m.x >= busPanelRect.x && m.y >= busPanelRect.y && m.x <= busPanelRect.z && m.y <= busPanelRect.w;
@@ -2761,7 +2762,7 @@ int main(int argc, char* argv[]) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
-    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 18",
+    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 19",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900,
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!window) { SDL_Quit(); return 1; }
@@ -3486,9 +3487,9 @@ int main(int argc, char* argv[]) {
             ImGui::EndPopup();
         }
 
+        busPanelHoldsMouse = false;
         if (busGradeOpen && contextBus >= 0 && contextBus < (int)bus.size()) {
             ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, 48.0f), ImGuiCond_Appearing, ImVec2(0.5f, 0.0f));
-            ImGui::SetNextWindowFocus();
             ImGui::SetNextWindowBgAlpha(0.98f);
             bool open = true;
             if (ImGui::Begin("Bus grade", &open, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse)) {
@@ -3517,9 +3518,14 @@ int main(int argc, char* argv[]) {
                 ImVec2 w0 = ImGui::GetWindowPos();
                 ImVec2 w1 = ImVec2(w0.x + ImGui::GetWindowSize().x, w0.y + ImGui::GetWindowSize().y);
                 busPanelRect = ImVec4(w0.x, w0.y, w1.x, w1.y);
+                busPanelHoldsMouse = ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem)
+                    || (ImGui::IsWindowFocused() && ImGui::IsAnyItemActive());
             }
             ImGui::End();
-            if (!open) busGradeOpen = false;
+            if (!open) {
+                busGradeOpen = false;
+                busPanelHoldsMouse = false;
+            }
         }
 
         if (fxEdit >= 0) {
