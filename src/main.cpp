@@ -164,6 +164,8 @@ bool openMediaMenu = false;
 int selectedBus = -1;
 int contextBus = -1;
 bool openBusMenu = false;
+bool busGradeOpen = false;
+ImVec4 busPanelRect(0, 0, 0, 0);
 bool busHover = false;
 float busHoverTime = -1.0f;
 float busOriginX = 0.0f;
@@ -1546,16 +1548,14 @@ void SyncPreview(int topClip, float dt) {
         PumpAudio();
         return;
     }
-    bool jumpedBack = player->lastPts >= 0.0 && mediaT + 0.12f < (float)player->lastPts;
-    bool jumpedFar = player->lastPts >= 0.0 && (float)player->lastPts + 2.0f < mediaT;
-    bool needSeek = player->lastPts < 0.0 || jumpedBack || jumpedFar;
-    if (!playing && player->hasFrame && std::fabs(mediaT - (float)player->lastPts) > 0.05f) needSeek = true;
-    if (needSeek) {
+    bool ahead = player->lastPts >= 0.0 && mediaT + 0.12f < (float)player->lastPts;
+    if (player->lastPts < 0.0 || ahead || (!playing && player->hasFrame && std::fabs(mediaT - (float)player->lastPts) > 0.05f)) {
         player->Seek(std::max(0.0f, mediaT));
         player->GrabFrame();
     }
+    int limit = 2;
+    if (player->lastPts < 0.0 || (float)player->lastPts + 0.08f < mediaT) limit = 400;
     int guard = 0;
-    int limit = playing ? 2 : 8;
     while (player->lastPts >= 0.0 && (float)player->lastPts + 0.0005f < mediaT && guard < limit) {
         if (!player->GrabFrame()) break;
         guard++;
@@ -1602,14 +1602,15 @@ void SyncSide(int clipIdx, float timelineT) {
     float local = ClipLocalTime(clipIdx, timelineT);
     float speed = std::max(0.05f, clips[clipIdx].speed);
     float mediaT = clips[clipIdx].sourceOffset + local * speed;
-    bool jumpedBack = playerB->lastPts >= 0.0 && mediaT + 0.12f < (float)playerB->lastPts;
-    bool jumpedFar = playerB->lastPts >= 0.0 && (float)playerB->lastPts + 2.0f < mediaT;
-    if (playerB->lastPts < 0.0 || jumpedBack || jumpedFar) {
+    bool ahead = playerB->lastPts >= 0.0 && mediaT + 0.12f < (float)playerB->lastPts;
+    if (playerB->lastPts < 0.0 || ahead) {
         playerB->Seek(std::max(0.0f, mediaT));
         playerB->GrabFrame();
     }
+    int limit = 2;
+    if (playerB->lastPts < 0.0 || (float)playerB->lastPts + 0.08f < mediaT) limit = 400;
     int guard = 0;
-    while (playerB->lastPts >= 0.0 && (float)playerB->lastPts + 0.0005f < mediaT && guard < 2) {
+    while (playerB->lastPts >= 0.0 && (float)playerB->lastPts + 0.0005f < mediaT && guard < limit) {
         if (!playerB->GrabFrame()) break;
         guard++;
     }
@@ -1978,6 +1979,35 @@ void AddBusSegment(float start, float dur) {
     selection.clear();
 }
 
+void CopyBusGrade() {
+    if (selectedBus < 0 || selectedBus >= (int)bus.size()) {
+        previewStatus = "Select a bus segment";
+        return;
+    }
+    const BusSegment src = bus[selectedBus];
+    int n = 0;
+    for (int i = 0; i < (int)bus.size(); i++) {
+        if (i == selectedBus) continue;
+        bus[i].lightness = src.lightness;
+        bus[i].contrast = src.contrast;
+        bus[i].warmth = src.warmth;
+        bus[i].tint = src.tint;
+        bus[i].saturation = src.saturation;
+        bus[i].shadow = src.shadow;
+        bus[i].grain = src.grain;
+        bus[i].sharpen = src.sharpen;
+        n++;
+    }
+    previewStatus = n > 0 ? "Bus grade copied" : "No other bus segments";
+}
+
+bool TimelinePointerBusy() {
+    if (ImGui::IsAnyItemActive()) return true;
+    if (!busGradeOpen) return false;
+    ImVec2 m = ImGui::GetMousePos();
+    return m.x >= busPanelRect.x && m.y >= busPanelRect.y && m.x <= busPanelRect.z && m.y <= busPanelRect.w;
+}
+
 void SelectOnly(int i) {
     selection.clear();
     if (i >= 0) selection.push_back(i);
@@ -2231,13 +2261,31 @@ void EnsurePlayerForClip(int clipIdx) {
     int mid = clips[clipIdx].mediaId;
     if (mid < 0 || mid >= (int)media.size()) return;
     if (clipIdx == playingClip && mid == playingMediaId && player && player->fmtCtx) return;
+    if (playerB && playerB != player && playingClipB == clipIdx && playingMediaIdB == mid && playerB->fmtCtx && playerB->hasFrame) {
+        VideoPlayer* previous = player;
+        player = playerB;
+        playerB = previous;
+        playingMediaId = mid;
+        playingClip = clipIdx;
+        playingMediaIdB = -1;
+        playingClipB = -1;
+        shownLocalB = -1000.0f;
+        shownLocal = player->lastPts >= 0.0 ? (float)player->lastPts : shownLocal;
+        return;
+    }
     auto land = [&](VideoPlayer* p) {
         float mediaT = clips[clipIdx].sourceOffset + ClipLocalTime(clipIdx, currentTime) * std::max(0.05f, clips[clipIdx].speed);
         if (media[mid].type == "image") mediaT = 0.0f;
         if (mediaT < 0) mediaT = 0;
         if (!p->hasFrame || p->lastPts < 0.0 || std::fabs((float)p->lastPts - mediaT) > 0.08f) {
-            p->Seek(mediaT);
+            if (p->lastPts < 0.0 || mediaT + 0.12f < (float)p->lastPts)
+                p->Seek(mediaT);
             p->GrabFrame();
+            int guard = 0;
+            while (p->lastPts >= 0.0 && (float)p->lastPts + 0.0005f < mediaT && guard < 400) {
+                if (!p->GrabFrame()) break;
+                guard++;
+            }
         }
         shownLocal = p->lastPts >= 0.0 ? (float)p->lastPts : mediaT;
         playingClip = clipIdx;
@@ -2713,7 +2761,7 @@ int main(int argc, char* argv[]) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
-    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 17",
+    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 18",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900,
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!window) { SDL_Quit(); return 1; }
@@ -2995,23 +3043,26 @@ int main(int argc, char* argv[]) {
         ImGui::EndChild();
 
         busHover = false;
-        ImGui::BeginChild("buslane", ImVec2(timeW + 90.0f, trackH), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(3, 1));
+        ImGui::BeginChild("buslane", ImVec2(timeW + 90.0f, 68.0f), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(2, 1));
+        ImGui::BeginGroup();
+        ImGui::TextUnformatted("BUS");
         if (ImGui::SmallButton("+")) {
             float end = 0.0f;
             for (const auto& c : clips) end = std::max(end, c.startTime + c.duration);
             if (end < 0.5f) end = 5.0f;
             AddBusSegment(0.0f, end);
         }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Segment for the whole project");
+        if (ImGui::SmallButton("COPY")) CopyBusGrade();
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Copy the selected segment grade to the other segments");
+        ImGui::EndGroup();
         ImGui::PopStyleVar();
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Bus segment for the whole project");
-        ImGui::SameLine();
-        ImGui::TextUnformatted("BUS");
-        ImGui::SameLine(46.0f);
+        ImGui::SameLine(48.0f);
         ImVec2 busStart = ImGui::GetCursorScreenPos();
         busOriginX = busStart.x;
         float busW = ImGui::GetContentRegionAvail().x;
-        ImGui::InvisibleButton("buszone", ImVec2(busW, trackH - 4));
+        ImGui::InvisibleButton("buszone", ImVec2(busW, 56.0f));
         if (ImGui::IsItemHovered()) {
             busHover = true;
             busHoverTime = (ImGui::GetMousePos().x - busStart.x) / pixelsPerSecond;
@@ -3022,13 +3073,13 @@ int main(int argc, char* argv[]) {
             float x = busStart.x + bus[i].start * pixelsPerSecond;
             float w = std::max(18.0f, bus[i].duration * pixelsPerSecond);
             ImVec2 cp0(x, busStart.y);
-            ImVec2 cp1(x + w, busStart.y + trackH - 8);
+            ImVec2 cp1(x + w, busStart.y + 50.0f);
             bdl->AddRectFilled(cp0, cp1, IM_COL32(168, 112, 42, 235), 3.0f);
             if (i == selectedBus) bdl->AddRect(cp0, cp1, IM_COL32(255, 220, 120, 255), 3.0f, 0, 2.0f);
             char lab[64];
             snprintf(lab, sizeof(lab), "BUS %.1fs%s", bus[i].duration, BusActive(bus[i]) ? " FX" : "");
             bdl->AddText(ImVec2(cp0.x + 6, cp0.y + 4), IM_COL32(255, 245, 220, 240), lab);
-            if (!ImGui::IsMouseHoveringRect(cp0, cp1)) continue;
+            if (!ImGui::IsMouseHoveringRect(cp0, cp1) || TimelinePointerBusy()) continue;
             busHover = true;
             busHoverTime = (ImGui::GetMousePos().x - busStart.x) / pixelsPerSecond;
             ImVec2 mouse = ImGui::GetMousePos();
@@ -3039,6 +3090,7 @@ int main(int argc, char* argv[]) {
                 selectedClip = -1;
                 selection.clear();
                 openBusMenu = true;
+                busGradeOpen = true;
             }
             if (ImGui::IsMouseClicked(0)) {
                 selectedBus = i;
@@ -3147,7 +3199,7 @@ int main(int argc, char* argv[]) {
                     float w = std::max(24.0f, clips[i].duration * pixelsPerSecond);
                     ImVec2 cp0(x, trackStart.y);
                     ImVec2 cp1(x + w, trackStart.y + trackH - 8);
-                    if (!ImGui::IsMouseHoveringRect(cp0, cp1)) continue;
+                    if (!ImGui::IsMouseHoveringRect(cp0, cp1) || TimelinePointerBusy()) continue;
                     ImVec2 mouse = ImGui::GetMousePos();
                     if (ImGui::IsMouseClicked(0) && std::fabs(mouse.x - (trackStart.x + currentTime * pixelsPerSecond)) <= 6.0f) {
                         draggingPlayhead = true;
@@ -3219,6 +3271,15 @@ int main(int argc, char* argv[]) {
             }
             ImGui::EndChild();
             ImGui::PopID();
+        }
+
+        if (TimelinePointerBusy()) {
+            draggingClip = -1;
+            draggingBus = -1;
+            trimmingClip = -1;
+            trimmingBus = -1;
+            dragVolClip = -1;
+            dragVolPt = -1;
         }
 
         if (dragVolClip >= 0 && dragVolClip < (int)clips.size()) {
@@ -3425,12 +3486,12 @@ int main(int argc, char* argv[]) {
             ImGui::EndPopup();
         }
 
-        if (openBusMenu) {
-            ImGui::OpenPopup("busctx");
-            openBusMenu = false;
-        }
-        if (ImGui::BeginPopup("busctx")) {
-            if (contextBus >= 0 && contextBus < (int)bus.size()) {
+        if (busGradeOpen && contextBus >= 0 && contextBus < (int)bus.size()) {
+            ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, 48.0f), ImGuiCond_Appearing, ImVec2(0.5f, 0.0f));
+            ImGui::SetNextWindowFocus();
+            ImGui::SetNextWindowBgAlpha(0.98f);
+            bool open = true;
+            if (ImGui::Begin("Bus grade", &open, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse)) {
                 BusSegment& s = bus[contextBus];
                 ImGui::TextUnformatted("Bus grade");
                 ImGui::Separator();
@@ -3443,17 +3504,22 @@ int main(int argc, char* argv[]) {
                 ImGui::SliderFloat("Film grain", &s.grain, 0.0f, 1.0f, "%.2f");
                 ImGui::SliderFloat("Sharpen", &s.sharpen, 0.0f, 1.0f, "%.2f");
                 ImGui::Separator();
-                if (ImGui::MenuItem("Reset")) {
+                if (ImGui::Button("Reset")) {
                     s.lightness = s.contrast = s.warmth = s.tint = s.saturation = s.shadow = s.grain = s.sharpen = 0;
                 }
-                if (ImGui::MenuItem("Delete segment")) {
+                ImGui::SameLine();
+                if (ImGui::Button("Delete segment")) {
                     bus.erase(bus.begin() + contextBus);
                     selectedBus = -1;
                     contextBus = -1;
-                    ImGui::CloseCurrentPopup();
+                    open = false;
                 }
+                ImVec2 w0 = ImGui::GetWindowPos();
+                ImVec2 w1 = ImVec2(w0.x + ImGui::GetWindowSize().x, w0.y + ImGui::GetWindowSize().y);
+                busPanelRect = ImVec4(w0.x, w0.y, w1.x, w1.y);
             }
-            ImGui::EndPopup();
+            ImGui::End();
+            if (!open) busGradeOpen = false;
         }
 
         if (fxEdit >= 0) {
