@@ -1703,49 +1703,57 @@ void ToggleSelect(int i) {
     selectedClip = i;
 }
 
-int TouchingNext(int i) {
+int OverlapPartner(int i) {
     if (i < 0 || i >= (int)clips.size()) return -1;
     const Clip& a = clips[i];
-    float end = a.startTime + a.duration;
+    if (a.track >= 3) return -1;
+    float a0 = a.startTime;
+    float a1 = a0 + a.duration;
     int best = -1;
-    float bestAbs = 0.16f;
+    int bestDist = 99;
+    float bestOv = 0.05f;
     for (int j = 0; j < (int)clips.size(); j++) {
-        if (j == i || clips[j].track != a.track) continue;
-        float gap = clips[j].startTime - end;
-        if (gap < -0.16f) continue;
-        float ag = std::fabs(gap);
-        if (ag < bestAbs) { bestAbs = ag; best = j; }
+        if (j == i || clips[j].track >= 3 || clips[j].track == a.track) continue;
+        float b0 = clips[j].startTime;
+        float b1 = b0 + clips[j].duration;
+        float ov = std::min(a1, b1) - std::max(a0, b0);
+        if (ov < 0.05f) continue;
+        int dist = std::abs(clips[j].track - a.track);
+        if (dist < bestDist || (dist == bestDist && ov > bestOv)) {
+            bestDist = dist;
+            bestOv = ov;
+            best = j;
+        }
     }
     return best;
 }
 
 bool TransitionForClip(int clip, float t, int& a, int& b, float& progress, std::string& id) {
     if (clip < 0 || clip >= (int)clips.size()) return false;
-    auto window = [&](int left) -> bool {
-        if (left < 0 || left >= (int)clips.size() || clips[left].fxOut.empty()) return false;
-        if (!FxKnown(clips[left].fxOut.c_str())) return false;
-        int right = TouchingNext(left);
-        if (right < 0) return false;
-        float dur = clips[left].fxDur;
-        if (dur < 0.1f) dur = 0.1f;
-        dur = std::min(dur, clips[left].duration * 0.8f);
-        dur = std::min(dur, clips[right].duration * 0.8f);
-        if (dur < 0.08f) return false;
-        float cut = clips[left].startTime + clips[left].duration;
-        float t0 = cut - dur * 0.5f;
-        if (t < t0 || t >= t0 + dur) return false;
-        a = left;
-        b = right;
-        progress = (t - t0) / dur;
+    auto window = [&](int owner) -> bool {
+        if (owner < 0 || owner >= (int)clips.size() || clips[owner].fxOut.empty()) return false;
+        if (!FxKnown(clips[owner].fxOut.c_str())) return false;
+        int other = OverlapPartner(owner);
+        if (other < 0) return false;
+        float o0 = clips[owner].startTime;
+        float o1 = o0 + clips[owner].duration;
+        float p0 = clips[other].startTime;
+        float p1 = p0 + clips[other].duration;
+        float t0 = std::max(o0, p0);
+        float t1 = std::min(o1, p1);
+        if (t1 - t0 < 0.05f || t < t0 || t >= t1) return false;
+        bool ownerFirst = o0 < p0 - 0.001f || (std::fabs(o0 - p0) <= 0.001f && clips[owner].track > clips[other].track);
+        a = ownerFirst ? owner : other;
+        b = ownerFirst ? other : owner;
+        progress = (t - t0) / (t1 - t0);
         if (progress < 0) progress = 0;
         if (progress > 1) progress = 1;
-        id = clips[left].fxOut;
+        id = clips[owner].fxOut;
         return true;
     };
     if (window(clip)) return true;
     for (int i = 0; i < (int)clips.size(); i++) {
-        if (clips[i].track != clips[clip].track) continue;
-        if (TouchingNext(i) == clip && window(i)) return true;
+        if (i != clip && OverlapPartner(i) == clip && window(i)) return true;
     }
     return false;
 }
@@ -1753,21 +1761,6 @@ bool TransitionForClip(int clip, float t, int& a, int& b, float& progress, std::
 float ClipLocalTime(int clipIdx, float timelineT) {
     const Clip& c = clips[clipIdx];
     float local = timelineT - c.startTime;
-    int a = -1, b = -1;
-    float progress = 0;
-    std::string id;
-    if (TransitionForClip(clipIdx, timelineT, a, b, progress, id)) {
-        float dur = clips[a].fxDur;
-        if (dur < 0.1f) dur = 0.1f;
-        dur = std::min(dur, clips[a].duration * 0.8f);
-        dur = std::min(dur, clips[b].duration * 0.8f);
-        if (clipIdx == b) {
-            float endLocal = (clips[a].startTime + clips[a].duration + dur * 0.5f) - clips[b].startTime;
-            if (endLocal < 0.02f) endLocal = dur * 0.5f;
-            if (endLocal > clips[b].duration) endLocal = clips[b].duration;
-            local = progress * endLocal;
-        }
-    }
     if (local < 0) local = 0;
     if (local > c.duration) local = std::max(0.0f, c.duration - 0.001f);
     return local;
@@ -1776,25 +1769,33 @@ float ClipLocalTime(int clipIdx, float timelineT) {
 int CountSelectedJoins() {
     int n = 0;
     for (int i : selection) {
-        int nxt = TouchingNext(i);
-        if (nxt >= 0 && IsSelected(nxt)) n++;
+        int j = OverlapPartner(i);
+        if (j > i && IsSelected(j)) n++;
     }
     return n;
 }
 
 int ApplyFxToSelection(const char* id, float dur) {
-    if (dur < 0.15f) dur = 0.15f;
-    if (dur > 3.0f) dur = 3.0f;
+    (void)dur;
     int n = 0;
+    std::vector<int> used;
     for (int i : selection) {
         if (i < 0 || i >= (int)clips.size()) continue;
-        int nxt = TouchingNext(i);
-        if (nxt < 0 || !IsSelected(nxt)) continue;
+        int j = OverlapPartner(i);
+        if (j < 0 || !IsSelected(j)) continue;
+        int owner = (clips[i].track <= clips[j].track) ? i : j;
+        int other = (owner == i) ? j : i;
+        if (std::find(used.begin(), used.end(), owner) != used.end()) continue;
+        used.push_back(owner);
         if (id && id[0] && FxKnown(id)) {
-            clips[i].fxOut = id;
-            clips[i].fxDur = dur;
+            float t0 = std::max(clips[i].startTime, clips[j].startTime);
+            float t1 = std::min(clips[i].startTime + clips[i].duration, clips[j].startTime + clips[j].duration);
+            clips[owner].fxOut = id;
+            clips[owner].fxDur = std::max(0.05f, t1 - t0);
+            clips[other].fxOut.clear();
         } else {
             clips[i].fxOut.clear();
+            clips[j].fxOut.clear();
         }
         n++;
     }
@@ -2398,7 +2399,7 @@ int main(int argc, char* argv[]) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
-    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 15",
+    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 16",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900,
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!window) { SDL_Quit(); return 1; }
@@ -2977,22 +2978,20 @@ int main(int argc, char* argv[]) {
                 ImGui::Separator();
                 if (ImGui::BeginMenu("Effects")) {
                     int joins = CountSelectedJoins();
-                    static float effectDur = 1.0f;
                     if (joins <= 0) {
-                        ImGui::TextDisabled("Shift+click clips that touch");
+                        ImGui::TextDisabled("Shift+click two overlapping clips");
                     } else {
-                        ImGui::Text("%d joined", joins);
-                        ImGui::SliderFloat("Duration", &effectDur, 0.2f, 2.5f, "%.2fs");
+                        ImGui::Text("%d overlap%s", joins, joins == 1 ? "" : "s");
                         for (int fi = 0; fi < FxCount(); fi++) {
                             ClipEffect* fx = FxAt(fi);
                             if (!fx) continue;
                             if (ImGui::MenuItem(fx->label())) {
-                                int n = ApplyFxToSelection(fx->id(), effectDur);
-                                previewStatus = n > 0 ? std::string(fx->label()) + " on " + std::to_string(n) : "No adjacent clips";
+                                int n = ApplyFxToSelection(fx->id(), 0);
+                                previewStatus = n > 0 ? std::string(fx->label()) + " on overlap" : "No overlapping clips";
                             }
                         }
                         if (ImGui::MenuItem("None")) {
-                            ApplyFxToSelection("", effectDur);
+                            ApplyFxToSelection("", 0);
                             previewStatus = "Effect cleared";
                         }
                     }
