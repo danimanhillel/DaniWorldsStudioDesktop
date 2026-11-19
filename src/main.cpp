@@ -4087,12 +4087,13 @@ void SyncGreen() {
 void ApplyTrim(int idx, float mouseX) {
     if (idx < 0 || idx >= (int)clips.size()) return;
     Clip& c = clips[idx];
-    float srcDur = (c.mediaId >= 0 && c.mediaId < (int)media.size()) ? media[c.mediaId].duration : (c.duration * c.speed);
+    bool image = c.mediaId >= 0 && c.mediaId < (int)media.size() && media[c.mediaId].type == "image";
+    float srcDur = image ? 100000.0f : ((c.mediaId >= 0 && c.mediaId < (int)media.size()) ? media[c.mediaId].duration : (c.duration * c.speed));
     float speed = c.speed < 0.05f ? 1.0f : c.speed;
     float dt = (mouseX - trimAnchorX) / pixelsPerSecond;
     if (trimSide == 1) {
         float nd = trimOrigDur + dt;
-        float maxD = (srcDur - trimOrigOffset) / speed;
+        float maxD = image ? 100000.0f : (srcDur - trimOrigOffset) / speed;
         if (nd < 0.1f) nd = 0.1f;
         if (nd > maxD) nd = maxD;
         float end = SnapTime(idx, trimOrigStart + nd);
@@ -4100,19 +4101,19 @@ void ApplyTrim(int idx, float mouseX) {
         if (nd < 0.1f) nd = 0.1f;
         if (nd > maxD) nd = maxD;
         c.duration = nd;
-        c.sourceOffset = trimOrigOffset;
+        c.sourceOffset = image ? 0.0f : trimOrigOffset;
         c.startTime = trimOrigStart;
     } else {
         float nstart = trimOrigStart + dt;
-        float noff = trimOrigOffset + dt * speed;
+        float noff = image ? 0.0f : trimOrigOffset + dt * speed;
         float ndur = trimOrigDur - dt;
         if (nstart < 0) {
             float back = -nstart;
             nstart = 0;
-            noff -= back * speed;
+            if (!image) noff -= back * speed;
             ndur -= back;
         }
-        if (noff < 0) {
+        if (!image && noff < 0) {
             float back = -noff / speed;
             noff = 0;
             nstart -= back;
@@ -4120,18 +4121,18 @@ void ApplyTrim(int idx, float mouseX) {
             if (nstart < 0) nstart = 0;
         }
         if (ndur < 0.1f) ndur = 0.1f;
-        if (noff + ndur * speed > srcDur) ndur = std::max(0.1f, (srcDur - noff) / speed);
+        if (!image && noff + ndur * speed > srcDur) ndur = std::max(0.1f, (srcDur - noff) / speed);
         float snapped = SnapTime(idx, nstart);
         float applied = snapped - trimOrigStart;
         nstart = snapped;
-        noff = trimOrigOffset + applied * speed;
+        if (!image) noff = trimOrigOffset + applied * speed;
         ndur = trimOrigDur - applied;
-        if (noff < 0) { ndur += (-noff) / speed; noff = 0; }
+        if (!image && noff < 0) { ndur += (-noff) / speed; noff = 0; }
         if (nstart < 0) nstart = 0;
         if (ndur < 0.1f) ndur = 0.1f;
-        if (noff + ndur * speed > srcDur) ndur = std::max(0.1f, (srcDur - noff) / speed);
+        if (!image && noff + ndur * speed > srcDur) ndur = std::max(0.1f, (srcDur - noff) / speed);
         c.startTime = nstart;
-        c.sourceOffset = noff;
+        c.sourceOffset = image ? 0.0f : noff;
         c.duration = ndur;
     }
 }
@@ -4582,7 +4583,7 @@ int main(int argc, char* argv[]) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
-    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 45",
+    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 46",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900,
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!window) { SDL_Quit(); return 1; }
