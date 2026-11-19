@@ -213,6 +213,7 @@ bool PreloadCuda(const std::wstring& dir, std::string& why) {
         else if (!sawCublas) why += "cublas64_13.dll is missing a dependency. Install the CUDA 13.5 libraries.";
         else why += "cuDNN 9 for CUDA 13 was not loaded.";
         Log(dir, why);
+        SetDllDirectoryW(dir.c_str());
         return false;
     }
     Log(dir, "load " + Narrow(provider) + " ok");
