@@ -532,6 +532,12 @@ int nextClipIdx = -1;
 VideoPlayer* playerGS = nullptr;
 int playingGsClip = -1;
 int playingGsMedia = -1;
+VideoPlayer* playerLib = nullptr;
+int libPlayId = -1;
+std::vector<int> mediaSel;
+int floatMedia = -1;
+bool floatMediaOpen = false;
+ImVec4 floatMediaRect(0, 0, 0, 0);
 
 float ProbeDuration(const std::string& path) {
     AVFormatContext* fmt = nullptr;
@@ -2392,6 +2398,7 @@ static bool ClickOutsidePanels() {
     if (subStyleOpen && RectHit(subStyleRect, m)) return false;
     if (mediaPanelOpen && RectHit(mediaPanelRect, m)) return false;
     if (audioPanelOpen && RectHit(audioPanelRect, m)) return false;
+    if (floatMediaOpen && RectHit(floatMediaRect, m)) return false;
     return true;
 }
 
@@ -3772,11 +3779,13 @@ bool TimelinePointerBusy() {
     if (subPanelHolds || (subEditorOpen && inside(subPanelRect)) || (subStyleOpen && inside(subStyleRect))) return true;
     if (mediaPanelOpen && inside(mediaPanelRect)) return true;
     if (audioPanelOpen && inside(audioPanelRect)) return true;
+    if (floatMediaOpen && inside(floatMediaRect)) return true;
     return false;
 }
 
 void SelectOnly(int i) {
     selection.clear();
+    mediaSel.clear();
     if (i >= 0) selection.push_back(i);
     selectedClip = i;
     selectedBus = -1;
@@ -4388,6 +4397,10 @@ void ClearProject() {
     contextClip = -1;
     fxEdit = -1;
     mediaMenuIndex = -1;
+    mediaSel.clear();
+    floatMedia = -1;
+    floatMediaOpen = false;
+    libPlayId = -1;
     currentTime = 0;
     shownLocal = -1000.0f;
 #ifdef HAVE_FFMPEG
@@ -4398,6 +4411,8 @@ void ClearProject() {
     if (playerB) playerB->Close();
     if (playerNext) playerNext->Close();
     if (playerGS) playerGS->Close();
+    if (playerLib) playerLib->Close();
+    libPlayId = -1;
     playingMediaId = -1;
     playingClip = -1;
     playingMediaIdB = -1;
@@ -4438,6 +4453,8 @@ void RemoveMedia(int id) {
     if (playerB) playerB->Close();
     if (playerNext) playerNext->Close();
     if (playerGS) playerGS->Close();
+    if (playerLib) playerLib->Close();
+    libPlayId = -1;
     playingMediaId = -1;
     playingClip = -1;
     playingMediaIdB = -1;
@@ -4448,6 +4465,20 @@ void RemoveMedia(int id) {
     nextClipIdx = -1;
     ResetAudioSync();
 #endif
+}
+
+void DeleteSelectedMedia() {
+    std::vector<int> ids = mediaSel;
+    std::sort(ids.begin(), ids.end());
+    ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+    for (int k = (int)ids.size() - 1; k >= 0; --k) {
+        int id = ids[k];
+        if (id < 0 || id >= (int)media.size()) continue;
+        if (floatMedia == id) { floatMediaOpen = false; floatMedia = -1; libPlayId = -1; }
+        else if (floatMedia > id) floatMedia--;
+        RemoveMedia(id);
+    }
+    mediaSel.clear();
 }
 
 float TimelineEnd() {
@@ -4717,7 +4748,7 @@ int main(int argc, char* argv[]) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
-    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 49",
+    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 50",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900,
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!window) { SDL_Quit(); return 1; }
@@ -4765,7 +4796,11 @@ int main(int argc, char* argv[]) {
                     float st = SnapTime(-1, busHoverTime);
                     AddBusSegment(st, 5.0f);
                 }
-                if (event.key.keysym.sym == SDLK_DELETE || event.key.keysym.sym == SDLK_BACKSPACE) {
+                if ((event.key.keysym.sym == SDLK_i) && !event.key.repeat && !io.WantTextInput && !subEditorOpen && !(SDL_GetModState() & KMOD_CTRL))
+                    ImportFiles(hwnd);
+                if (event.key.keysym.sym == SDLK_DELETE && !event.key.repeat && !mediaSel.empty() && !io.WantTextInput) {
+                    DeleteSelectedMedia();
+                } else if (event.key.keysym.sym == SDLK_DELETE || event.key.keysym.sym == SDLK_BACKSPACE) {
                     if (selectedBus >= 0 && selectedBus < (int)bus.size() && !io.WantTextInput) {
                         bus.erase(bus.begin() + selectedBus);
                         if (contextBus == selectedBus) contextBus = -1;
@@ -4906,11 +4941,32 @@ int main(int argc, char* argv[]) {
                 DrawThumb(dl, p0, p1, mediaClip0, mediaClip1, m.thumb, m.thumbW, m.thumbH);
             else if (vis)
                 DrawPlaceholder(dl, p0, p1, m);
+            if (std::find(mediaSel.begin(), mediaSel.end(), i) != mediaSel.end())
+                dl->AddRect(p0, p1, IM_COL32(255, 210, 60, 255), 2.0f, 0, 2.0f);
             ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + cellW);
             ImGui::TextUnformatted(m.name.c_str());
             ImGui::Text("%.1fs %s", m.duration, m.type.c_str());
             ImGui::PopTextWrapPos();
             ImGui::EndGroup();
+            ImVec2 g0 = ImGui::GetItemRectMin();
+            ImVec2 g1 = ImGui::GetItemRectMax();
+            if (ImGui::IsMouseHoveringRect(g0, g1) && ImGui::IsMouseClicked(0) && !ImGui::IsMouseDragging(0)) {
+                if (ImGui::GetIO().KeyShift) {
+                    auto it = std::find(mediaSel.begin(), mediaSel.end(), i);
+                    if (it == mediaSel.end()) mediaSel.push_back(i);
+                    else mediaSel.erase(it);
+                } else {
+                    mediaSel.clear();
+                    mediaSel.push_back(i);
+                }
+            }
+            if (ImGui::IsMouseHoveringRect(g0, g1) && ImGui::IsMouseClicked(1)) {
+                mediaSel.clear();
+                mediaSel.push_back(i);
+                floatMedia = i;
+                floatMediaOpen = true;
+                libPlayId = -1;
+            }
             if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID | ImGuiDragDropFlags_SourceNoPreviewTooltip)) {
                 ImGui::SetDragDropPayload("MEDIA", &i, sizeof(int));
                 ImGui::EndDragDropSource();
@@ -5928,6 +5984,48 @@ int main(int argc, char* argv[]) {
                 if (!open) audioPanelOpen = false;
             }
         }
+        if (floatMediaOpen) {
+            if (floatMedia < 0 || floatMedia >= (int)media.size()) floatMediaOpen = false;
+            else {
+                PlacePanel(0.0f);
+                bool open = true;
+                if (ImGui::Begin("Library clip", &open, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse)) {
+                    MediaItem& m = media[floatMedia];
+                    ImGui::TextUnformatted(m.name.c_str());
+                    ImGui::Text("%.1fs   %s", m.duration, m.type.c_str());
+                    ImVec2 box(440.0f, 248.0f);
+                    ImGui::InvisibleButton("libview", box);
+                    ImDrawList* fdl = ImGui::GetWindowDrawList();
+                    ImVec2 a = ImGui::GetItemRectMin();
+                    ImVec2 b = ImGui::GetItemRectMax();
+                    fdl->AddRectFilled(a, b, IM_COL32(0, 0, 0, 255));
+                    GLuint tex = m.thumb;
+                    int tw = m.thumbW, th = m.thumbH;
+#ifdef HAVE_FFMPEG
+                    if (m.type != "audio") {
+                        if (!playerLib) playerLib = new VideoPlayer();
+                        if (libPlayId != floatMedia) {
+                            libPlayId = floatMedia;
+                            if (playerLib->Open(m.path)) {
+                                for (int n = 0; n < 12 && !playerLib->hasFrame; n++) playerLib->GrabFrame();
+                            }
+                        }
+                        if (playerLib->hasFrame && playerLib->texture) {
+                            tex = playerLib->texture;
+                            tw = playerLib->width;
+                            th = playerLib->height;
+                        }
+                    }
+#endif
+                    if (tex && tw > 0 && th > 0) DrawThumb(fdl, a, b, a, b, tex, tw, th);
+                    else fdl->AddText(ImVec2(a.x + 12, a.y + 12), IM_COL32(180, 180, 180, 255), m.type == "audio" ? "Audio" : "No picture");
+                    ImVec2 w0 = ImGui::GetWindowPos();
+                    floatMediaRect = ImVec4(w0.x, w0.y, w0.x + ImGui::GetWindowSize().x, w0.y + ImGui::GetWindowSize().y);
+                }
+                ImGui::End();
+                if (!open) { floatMediaOpen = false; libPlayId = -1; }
+            }
+        }
         if (fontAtlas.empty()) {
             ImGuiIO& fio = ImGui::GetIO();
             unsigned char* px = fio.Fonts->TexPixelsAlpha8;
@@ -5993,6 +6091,7 @@ int main(int argc, char* argv[]) {
     if (playerB) { delete playerB; playerB = nullptr; }
     if (playerNext) { delete playerNext; playerNext = nullptr; }
     if (playerGS) { delete playerGS; playerGS = nullptr; }
+    if (playerLib) { delete playerLib; playerLib = nullptr; }
     for (auto& a : audioSrcs) CloseAudioSrc(a);
     audioSrcs.clear();
     if (audioDev) SDL_CloseAudioDevice(audioDev);
