@@ -18,6 +18,7 @@ namespace {
 
 RifeInfo gInfo;
 const OrtApi* gApi = nullptr;
+int gApiVersion = 0;
 OrtEnv* gEnv = nullptr;
 OrtSession* gSession = nullptr;
 OrtAllocator* gAlloc = nullptr;
@@ -64,6 +65,7 @@ void ClearSession() {
     if (gApi && gEnv) gApi->ReleaseEnv(gEnv);
     gEnv = nullptr;
     gApi = nullptr;
+    gApiVersion = 0;
     gAlloc = nullptr;
     gLayout = 0;
     gInfo.ready = false;
@@ -165,9 +167,17 @@ bool RifeStartup(std::string& err) {
         return false;
     }
     const OrtApiBase* base = getBase();
-    gApi = base ? base->GetApi(ORT_API_VERSION) : nullptr;
+    gApi = nullptr;
+    gApiVersion = 0;
+    if (base) {
+        for (uint32_t v = ORT_API_VERSION; v >= 8; --v) {
+            const OrtApi* api = base->GetApi(v);
+            if (api) { gApi = api; gApiVersion = (int)v; break; }
+        }
+    }
     if (!gApi) {
-        err = "This onnxruntime.dll is too old";
+        err = "onnxruntime.dll is too old. Use ONNX Runtime 1.16 or newer.";
+        gInfo.detail = err;
         RifeShutdown();
         return false;
     }
@@ -194,10 +204,13 @@ bool RifeStartup(std::string& err) {
     }
     gApi->SetIntraOpNumThreads(opt, 2);
     gApi->SetSessionGraphOptimizationLevel(opt, ORT_ENABLE_EXTENDED);
-    OrtCUDAProviderOptions cuda{};
-    OrtStatus* cst = gApi->SessionOptionsAppendExecutionProvider_CUDA(opt, &cuda);
-    gInfo.cuda = cst == nullptr;
-    if (cst) gApi->ReleaseStatus(cst);
+    using AppendCuda = OrtStatus*(ORT_API_CALL*)(OrtSessionOptions*, int);
+    auto appendCuda = (AppendCuda)GetProcAddress(gOrt, "OrtSessionOptionsAppendExecutionProvider_CUDA");
+    if (appendCuda) {
+        OrtStatus* cst = appendCuda(opt, 0);
+        gInfo.cuda = cst == nullptr;
+        if (cst) gApi->ReleaseStatus(cst);
+    }
     OrtStatus* created = gApi->CreateSession(gEnv, model.c_str(), opt, &gSession);
     gApi->ReleaseSessionOptions(opt);
     if (!Ok(created, err, "RIFE model")) {
@@ -253,7 +266,8 @@ bool RifeStartup(std::string& err) {
     }
     gInfo.ready = true;
     gInfo.files = true;
-    gInfo.detail = gInfo.cuda ? "RIFE on GPU" : "RIFE on CPU (slow). Use the GPU build of ONNX Runtime.";
+    gInfo.detail = std::string(gInfo.cuda ? "RIFE on GPU" : "RIFE on CPU") + " (ORT API " + std::to_string(gApiVersion) + ")";
+    if (!gInfo.cuda) gInfo.detail += ". The CUDA provider was not loaded.";
     return true;
 #endif
 }
