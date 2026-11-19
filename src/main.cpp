@@ -1006,10 +1006,29 @@ struct ExportSession {
     std::vector<int16_t> afifo;
     bool rifeOn = false;
     int rifeFails = 0;
+    int phase = 0;
+    int outFps = 0;
+    int baseFps = 0;
+    std::string finalPath;
+    std::string tempPath;
+    AVFormatContext* rifeIn = nullptr;
+    AVFormatContext* rifeAudio = nullptr;
+    AVCodecContext* rifeDec = nullptr;
+    AVFrame* rifeFrame = nullptr;
+    AVPacket* rifePkt = nullptr;
+    SwsContext* rifeSws = nullptr;
+    int rifeStream = -1;
+    std::vector<uint8_t> prevRGBA, nextRGBA, rifeMid;
+    bool haveNext = false;
+    bool emitMid = false;
 
     void CloseAll();
     bool Begin(const std::string& outPath, int width, int height, int framesPerSec, bool useRife);
     void Step();
+    void StepRife();
+    bool BeginRifePass();
+    void SealPass();
+    bool ReadRifeFrame(std::vector<uint8_t>& dst);
     void Cancel();
     void Fail(const char* msg);
     void Finish(bool ok);
@@ -1071,9 +1090,21 @@ void ExportSession::CloseAll() {
     canvas.clear();
     afifo.clear();
     headerWritten = false;
+    if (rifeSws) { sws_freeContext(rifeSws); rifeSws = nullptr; }
+    if (rifeFrame) av_frame_free(&rifeFrame);
+    if (rifePkt) av_packet_free(&rifePkt);
+    if (rifeDec) avcodec_free_context(&rifeDec);
+    if (rifeIn) avformat_close_input(&rifeIn);
+    if (rifeAudio) avformat_close_input(&rifeAudio);
+    rifeStream = -1;
+    if (!tempPath.empty()) { ::remove(tempPath.c_str()); tempPath.clear(); }
     if (rifeOn) RifeShutdown();
     rifeOn = false;
     rifeFails = 0;
+    phase = 0;
+    outFps = 0;
+    baseFps = 0;
+    finalPath.clear();
 }
 
 void ExportSession::Fail(const char* msg) {
@@ -1284,7 +1315,7 @@ bool ExportSession::HoldFrameView(ExpDec& d, double want, const uint8_t*& data, 
 }
 
 bool ExportSession::RifePair(int mediaId, double mediaT, float speed, std::vector<uint8_t>& out, int& rw, int& rh) {
-    if (!rifeOn || mediaId < 0 || mediaId >= (int)media.size()) return false;
+    if (phase != 1 || !rifeOn || mediaId < 0 || mediaId >= (int)media.size()) return false;
     if (media[mediaId].type == "image") return false;
     int idx = OpenDec(mediaId);
     if (idx < 0 || idx >= (int)decs.size()) return false;
@@ -1373,13 +1404,20 @@ bool ExportSession::Begin(const std::string& outPath, int width, int height, int
     }
     for (const auto& s : subs) timelineEnd = std::max(timelineEnd, (double)s.start + (double)s.duration);
     if (timelineEnd < 0.05 || (clips.empty() && subs.empty())) { status = "Nothing to export"; previewStatus = status; return false; }
-    if (useRife) {
-        std::string err;
-        if (!RifeStartup(err)) {
-            status = err;
-            previewStatus = status;
-            return false;
-        }
+    path = outPath;
+    fps = framesPerSec;
+    phase = 0;
+    outFps = 0;
+    baseFps = framesPerSec;
+    finalPath.clear();
+    tempPath.clear();
+    if (useRife && framesPerSec >= 48 && (framesPerSec % 2) == 0) {
+        outFps = framesPerSec;
+        baseFps = framesPerSec / 2;
+        finalPath = outPath;
+        tempPath = outPath + ".rife-tmp.mp4";
+        path = tempPath;
+        fps = baseFps;
         rifeOn = true;
     }
     total = (int)std::ceil(timelineEnd * (double)fps);
@@ -1535,7 +1573,7 @@ bool ExportSession::Begin(const std::string& outPath, int width, int height, int
     pkt = av_packet_alloc();
     active = true;
     char buf[160];
-    snprintf(buf, sizeof(buf), "Exporting %dx%d %d fps %s%s", w, h, fps, encLabel, videoOnly ? " (no audio)" : "");
+    snprintf(buf, sizeof(buf), "Exporting %dx%d %d fps %s%s", w, h, rifeOn ? outFps : fps, encLabel, videoOnly ? " (no audio)" : "");
     status = buf;
     previewStatus = status;
     return true;
@@ -2006,7 +2044,12 @@ static void BurnSubtitles(uint8_t* canvas, int cw, int ch, float t) {
 #endif
 void ExportSession::Step() {
     if (!active) return;
-    if (frameIndex >= total) { Finish(true); return; }
+    if (phase == 1) { StepRife(); return; }
+    if (frameIndex >= total) {
+        if (rifeOn && outFps > baseFps) { BeginRifePass(); return; }
+        Finish(true);
+        return;
+    }
     double t = (double)frameIndex / (double)fps;
     std::fill(canvas.begin(), canvas.end(), 0);
     int top = -1, bestTrack = 99;
@@ -2085,7 +2128,7 @@ void ExportSession::Step() {
             }
         }
     }
-    BurnSubtitles(canvas.data(), w, h, (float)t);
+    if (!rifeOn) BurnSubtitles(canvas.data(), w, h, (float)t);
     if (!vframe || av_frame_make_writable(vframe) < 0) { Fail("Video frame failed"); return; }
     uint8_t* srcData[1] = { canvas.data() };
     int srcLines[1] = { w * 4 };
@@ -2107,14 +2150,219 @@ void ExportSession::Step() {
     frameIndex++;
     int pct = total ? (frameIndex * 100) / total : 0;
     char buf[160];
-    snprintf(buf, sizeof(buf), "Export %d%%  (%d/%d)  %dx%d%s", pct, frameIndex, total, w, h,
-             rifeOn ? (RifeProbe().cuda ? "  RIFE GPU" : "  RIFE CPU") : "");
+    if (rifeOn)
+        snprintf(buf, sizeof(buf), "Rendering %d%%  (%d/%d)  then RIFE", pct, frameIndex, total);
+    else
+        snprintf(buf, sizeof(buf), "Export %d%%  (%d/%d)  %dx%d", pct, frameIndex, total, w, h);
     status = buf;
     previewStatus = status;
 }
 #ifdef _MSC_VER
 #pragma optimize("", on)
 #endif
+
+void ExportSession::SealPass() {
+    if (actx && swr) DrainAudio(true);
+    if (vctx) { avcodec_send_frame(vctx, nullptr); WriteEncoded(vctx, vst); }
+    if (actx) { avcodec_send_frame(actx, nullptr); WriteEncoded(actx, ast); }
+    if (fmt && headerWritten) av_write_trailer(fmt);
+    headerWritten = false;
+    for (auto& d : decs) {
+        if (d.fit) sws_freeContext(d.fit);
+        if (d.sws) sws_freeContext(d.sws);
+        if (d.frame) av_frame_free(&d.frame);
+        if (d.pkt) av_packet_free(&d.pkt);
+        if (d.ctx) avcodec_free_context(&d.ctx);
+        if (d.hw) { d.hw->Free(); delete d.hw; d.hw = nullptr; }
+        if (d.fmt) avformat_close_input(&d.fmt);
+        d.fit = nullptr;
+        d.sws = nullptr;
+    }
+    decs.clear();
+    if (swr) swr_free(&swr);
+    if (toYuv) { sws_freeContext(toYuv); toYuv = nullptr; }
+    if (vframe) av_frame_free(&vframe);
+    if (aframe) av_frame_free(&aframe);
+    if (pkt) av_packet_free(&pkt);
+    if (vctx) avcodec_free_context(&vctx);
+    if (actx) avcodec_free_context(&actx);
+    if (fmt) {
+        if (fmt->pb) avio_closep(&fmt->pb);
+        avformat_free_context(fmt);
+        fmt = nullptr;
+    }
+    vst = nullptr;
+    ast = nullptr;
+    afifo.clear();
+}
+
+bool ExportSession::ReadRifeFrame(std::vector<uint8_t>& dst) {
+    if (!rifeIn || !rifeDec || !rifePkt || !rifeFrame) return false;
+    while (av_read_frame(rifeIn, rifePkt) >= 0) {
+        if (rifePkt->stream_index != rifeStream) { av_packet_unref(rifePkt); continue; }
+        int send = avcodec_send_packet(rifeDec, rifePkt);
+        av_packet_unref(rifePkt);
+        if (send < 0 && send != AVERROR(EAGAIN)) continue;
+        if (avcodec_receive_frame(rifeDec, rifeFrame) != 0) continue;
+        if (rifeFrame->width <= 0 || rifeFrame->height <= 0) continue;
+        if (!rifeSws) {
+            rifeSws = sws_getContext(rifeFrame->width, rifeFrame->height, (AVPixelFormat)rifeFrame->format,
+                                     w, h, AV_PIX_FMT_RGBA, SWS_BILINEAR, nullptr, nullptr, nullptr);
+            prevRGBA.assign((size_t)w * (size_t)h * 4, 0);
+        }
+        if (!rifeSws) return false;
+        dst.assign((size_t)w * (size_t)h * 4, 0);
+        uint8_t* data[1] = { dst.data() };
+        int lines[1] = { w * 4 };
+        sws_scale(rifeSws, rifeFrame->data, rifeFrame->linesize, 0, rifeFrame->height, data, lines);
+        return true;
+    }
+    return false;
+}
+
+bool ExportSession::BeginRifePass() {
+    std::string rendered = tempPath;
+    SealPass();
+    std::string err;
+    if (!RifeStartup(err)) { Fail(err.c_str()); return false; }
+    if (avformat_open_input(&rifeIn, rendered.c_str(), nullptr, nullptr) < 0 || avformat_find_stream_info(rifeIn, nullptr) < 0) {
+        Fail("Cannot open the rendered video");
+        return false;
+    }
+    for (unsigned i = 0; i < rifeIn->nb_streams; i++) {
+        if (rifeIn->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) { rifeStream = (int)i; break; }
+    }
+    if (rifeStream < 0) { Fail("Rendered video has no picture"); return false; }
+    const AVCodec* codec = avcodec_find_decoder(rifeIn->streams[rifeStream]->codecpar->codec_id);
+    rifeDec = codec ? avcodec_alloc_context3(codec) : nullptr;
+    if (!rifeDec || avcodec_parameters_to_context(rifeDec, rifeIn->streams[rifeStream]->codecpar) < 0 || avcodec_open2(rifeDec, codec, nullptr) < 0) {
+        Fail("Cannot decode the rendered video");
+        return false;
+    }
+    rifeFrame = av_frame_alloc();
+    rifePkt = av_packet_alloc();
+    if (!ReadRifeFrame(prevRGBA)) { Fail("Rendered video is empty"); return false; }
+    haveNext = ReadRifeFrame(nextRGBA);
+    emitMid = false;
+
+    if (avformat_alloc_output_context2(&fmt, nullptr, "mp4", finalPath.c_str()) < 0 || !fmt) {
+        Fail("Cannot create the final mp4");
+        return false;
+    }
+    const AVCodec* vcodec = avcodec_find_encoder_by_name("h264_nvenc");
+    bool nv = vcodec != nullptr;
+    if (!vcodec) vcodec = avcodec_find_encoder_by_name("libx264");
+    if (!vcodec) vcodec = avcodec_find_encoder(AV_CODEC_ID_H264);
+    if (!vcodec) { Fail("Encoder not found"); return false; }
+    vctx = avcodec_alloc_context3(vcodec);
+    vctx->width = w;
+    vctx->height = h;
+    vctx->time_base = AVRational{1, outFps};
+    vctx->framerate = AVRational{outFps, 1};
+    vctx->gop_size = outFps;
+    vctx->max_b_frames = 0;
+    vctx->pix_fmt = AV_PIX_FMT_YUV420P;
+    int64_t br = (int64_t)w * (int64_t)h;
+    if (br < 4000000) br = 4000000;
+    if (br > 80000000) br = 80000000;
+    vctx->bit_rate = br;
+    if (fmt->oformat->flags & AVFMT_GLOBALHEADER) vctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+    if (nv && vctx->priv_data) {
+        av_opt_set(vctx->priv_data, "preset", "p1", 0);
+        av_opt_set(vctx->priv_data, "rc", "vbr", 0);
+        av_opt_set(vctx->priv_data, "cq", "19", 0);
+    } else if (vctx->priv_data) {
+        av_opt_set(vctx->priv_data, "preset", "veryfast", 0);
+        av_opt_set(vctx->priv_data, "crf", "20", 0);
+    }
+    if (avcodec_open2(vctx, vcodec, nullptr) < 0) { Fail("Cannot open the final encoder"); return false; }
+    vst = avformat_new_stream(fmt, nullptr);
+    if (!vst) { Fail("Cannot add the final video"); return false; }
+    avcodec_parameters_from_context(vst->codecpar, vctx);
+    vst->time_base = vctx->time_base;
+
+    int astream = -1;
+    if (!videoOnly && avformat_open_input(&rifeAudio, rendered.c_str(), nullptr, nullptr) == 0 && avformat_find_stream_info(rifeAudio, nullptr) == 0) {
+        for (unsigned i = 0; i < rifeAudio->nb_streams; i++) {
+            if (rifeAudio->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) { astream = (int)i; break; }
+        }
+        if (astream >= 0) {
+            ast = avformat_new_stream(fmt, nullptr);
+            if (ast) {
+                avcodec_parameters_copy(ast->codecpar, rifeAudio->streams[astream]->codecpar);
+                ast->codecpar->codec_tag = 0;
+                ast->time_base = rifeAudio->streams[astream]->time_base;
+            }
+        }
+    }
+    if (avio_open(&fmt->pb, finalPath.c_str(), AVIO_FLAG_WRITE) < 0) { Fail("Cannot open the final file"); return false; }
+    AVDictionary* opt = nullptr;
+    av_dict_set(&opt, "movflags", "+faststart", 0);
+    if (avformat_write_header(fmt, &opt) < 0) { av_dict_free(&opt); Fail("Cannot write the final header"); return false; }
+    av_dict_free(&opt);
+    headerWritten = true;
+    if (rifeAudio && ast && astream >= 0) {
+        AVPacket* ap = av_packet_alloc();
+        while (ap && av_read_frame(rifeAudio, ap) >= 0) {
+            if (ap->stream_index == astream) {
+                av_packet_rescale_ts(ap, rifeAudio->streams[astream]->time_base, ast->time_base);
+                ap->stream_index = ast->index;
+                av_interleaved_write_frame(fmt, ap);
+            }
+            av_packet_unref(ap);
+        }
+        av_packet_free(&ap);
+        avformat_close_input(&rifeAudio);
+    }
+    vframe = av_frame_alloc();
+    vframe->format = vctx->pix_fmt;
+    vframe->width = w;
+    vframe->height = h;
+    if (av_frame_get_buffer(vframe, 32) < 0) { Fail("Out of memory"); return false; }
+    toYuv = sws_getContext(w, h, AV_PIX_FMT_RGBA, w, h, vctx->pix_fmt, SWS_BILINEAR, nullptr, nullptr, nullptr);
+    if (!toYuv) { Fail("Scaler failed"); return false; }
+    pkt = av_packet_alloc();
+    canvas.assign((size_t)w * (size_t)h * 4, 0);
+    frameIndex = 0;
+    total = (int)std::llround(timelineEnd * (double)outFps);
+    if (total < 1) total = 1;
+    phase = 1;
+    fps = outFps;
+    status = RifeProbe().cuda ? "RIFE GPU" : "RIFE CPU";
+    previewStatus = status;
+    return true;
+}
+
+void ExportSession::StepRife() {
+    if (frameIndex >= total) { Finish(true); return; }
+    double t = (double)frameIndex / (double)std::max(1, outFps);
+    const uint8_t* src = prevRGBA.data();
+    if (emitMid && haveNext && !nextRGBA.empty() && nextRGBA.size() == prevRGBA.size()) {
+        rifeMid.assign(prevRGBA.size(), 255);
+        if (!RifeRun(prevRGBA.data(), nextRGBA.data(), w, h, 0.5f, rifeMid.data())) rifeMid = prevRGBA;
+        src = rifeMid.data();
+        prevRGBA.swap(nextRGBA);
+        haveNext = ReadRifeFrame(nextRGBA);
+        emitMid = false;
+    } else if (haveNext) {
+        emitMid = true;
+    }
+    if (src && canvas.size() == prevRGBA.size()) memcpy(canvas.data(), src, canvas.size());
+    BurnSubtitles(canvas.data(), w, h, (float)t);
+    if (!vframe || av_frame_make_writable(vframe) < 0) { Fail("Video frame failed"); return; }
+    uint8_t* data[1] = { canvas.data() };
+    int lines[1] = { w * 4 };
+    sws_scale(toYuv, data, lines, 0, h, vframe->data, vframe->linesize);
+    vframe->pts = frameIndex;
+    if (avcodec_send_frame(vctx, vframe) < 0) { Fail("Video encode failed"); return; }
+    if (!WriteEncoded(vctx, vst)) { Fail("Video write failed"); return; }
+    frameIndex++;
+    int pct = total ? (frameIndex * 100) / total : 0;
+    char buf[160];
+    snprintf(buf, sizeof(buf), "%s %d%%  (%d/%d)", RifeProbe().cuda ? "RIFE GPU" : "RIFE CPU", pct, frameIndex, total);
+    status = buf;
+    previewStatus = status;
+}
 
 void ExportSession::Finish(bool ok) {
     if (actx && swr) DrainAudio(true);
@@ -2128,7 +2376,7 @@ void ExportSession::Finish(bool ok) {
     }
     if (fmt && headerWritten) av_write_trailer(fmt);
     headerWritten = false;
-    std::string saved = path;
+    std::string saved = finalPath.empty() ? path : finalPath;
     CloseAll();
     if (ok) {
         status = "Exported " + saved;
@@ -3721,7 +3969,7 @@ int main(int argc, char* argv[]) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
-    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 30",
+    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 31",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900,
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!window) { SDL_Quit(); return 1; }
@@ -4719,7 +4967,7 @@ int main(int argc, char* argv[]) {
             ImGui::Text("Output: %d x %d   @ %d fps", ew, eh, fps);
             if (exRes >= 3) ImGui::TextDisabled("4K and 8K take a long time.");
             ImGui::Checkbox("Frame interpolation", &exRife);
-            ImGui::TextDisabled("RIFE, when the export is smoother than the clip. Up to 4K.");
+            ImGui::TextDisabled("Renders the movie first, then fills frames on the GPU. 50 or 60 fps. Subtitles are added after.");
             ImGui::TextDisabled("%s", RifeProbe().detail.c_str());
             if (ImGui::Button("Choose file and export")) {
                 ImGui::CloseCurrentPopup();
@@ -4746,13 +4994,14 @@ int main(int argc, char* argv[]) {
             ImGui::TextUnformatted(gExport.status.c_str());
             if (ImGui::Button("Cancel export")) gExport.Cancel();
             ImGui::End();
+            bool gpu = gExport.phase == 1;
             Uint32 slice = SDL_GetTicks();
             int guard = 0;
-            int limit = gExport.rifeOn ? 8 : (gExport.w * gExport.h >= 3840 * 2160 ? 1 : (gExport.w * gExport.h <= 1280 * 720 ? 4 : 2));
+            int limit = gpu ? 16 : (gExport.w * gExport.h >= 3840 * 2160 ? 1 : (gExport.w * gExport.h <= 1280 * 720 ? 4 : 2));
             do {
                 gExport.Step();
                 guard++;
-            } while (gExport.active && guard < limit && (!gExport.rifeOn || SDL_GetTicks() - slice < 70));
+            } while (gExport.active && guard < limit && (!gpu || SDL_GetTicks() - slice < 80));
         } else {
             SyncPreview(topClip, io.DeltaTime);
             SyncGreen();
