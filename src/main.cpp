@@ -497,6 +497,22 @@ public:
             }
             av_packet_unref(packet);
         }
+        avcodec_send_packet(codecCtx, nullptr);
+        if (avcodec_receive_frame(codecCtx, frame) == 0) {
+            if (frame->best_effort_timestamp != AV_NOPTS_VALUE && fmtCtx && videoStream >= 0)
+                lastPts = frame->best_effort_timestamp * av_q2d(fmtCtx->streams[videoStream]->time_base);
+            else lastPts = (lastPts < 0.0 ? 0.0 : lastPts);
+            AVFrame* src = DownloadFrame(hw, frame);
+            if (src && EnsureTextureFrom(src)) {
+                sws_scale(swsCtx, src->data, src->linesize, 0, height, rgbFrame->data, rgbFrame->linesize);
+                glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+                glBindTexture(GL_TEXTURE_2D, texture);
+                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, rgbFrame->data[0]);
+                hasFrame = true;
+                av_packet_free(&packet);
+                return true;
+            }
+        }
         av_packet_free(&packet);
         return false;
     }
@@ -2244,6 +2260,8 @@ static void ChromaKey(float r, float g, float b, float sim, float soft, float sp
     float k = 0.0f;
     if (dom >= t1) k = 1.0f;
     else if (dom > t0) k = (dom - t0) / (t1 - t0);
+    float peak = std::max(r, std::max(g, b));
+    if (peak > 0.82f && dom < 0.18f) k = 0.0f;
     orr = r;
     og = g;
     ob = b;
@@ -3372,6 +3390,8 @@ static bool BindKey(float sim, float soft, float spill, float opacity) {
             "  float t0 = 0.04 + sim * 0.50;\n"
             "  float t1 = t0 + 0.03 + soft * 0.40;\n"
             "  float k = smoothstep(t0, max(t0 + 0.001, t1), dom);\n"
+            "  float peak = max(c.r, max(c.g, c.b));\n"
+            "  if (peak > 0.82 && dom < 0.18) k = 0.0;\n"
             "  vec3 rgb = c.rgb;\n"
             "  rgb.g -= max(0.0, rgb.g - rb) * spill;\n"
             "  gl_FragColor = vec4(clamp(rgb, 0.0, 1.0), (1.0 - k) * c.a * opacity);\n"
@@ -4201,7 +4221,12 @@ void SyncGreen() {
         playingGsClip = gsDrawClip;
     }
     if (media[mid].type == "image") {
-        if (!playerGS->hasFrame) { playerGS->Seek(0); playerGS->GrabFrame(); }
+        if (!playerGS->hasFrame) {
+            if (!playerGS->GrabFrame()) {
+                playerGS->Seek(0);
+                playerGS->GrabFrame();
+            }
+        }
         return;
     }
     float speed = std::max(0.05f, clips[gsDrawClip].speed);
@@ -4748,7 +4773,7 @@ int main(int argc, char* argv[]) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
-    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 50",
+    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 51",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900,
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!window) { SDL_Quit(); return 1; }
@@ -6069,12 +6094,28 @@ int main(int argc, char* argv[]) {
             BlitVideo(view0, view1, player->texture, player->width, player->height, view0, view1);
         activeGrade = nullptr;
         recordFit = false;
-        if (gsDrawClip >= 0 && playerGS && playerGS->hasFrame && playerGS->texture) {
-            ImVec2 a = fitValid ? fitA : view0;
-            ImVec2 b = fitValid ? fitB : view1;
-            const Clip& gc = clips[gsDrawClip];
-            BlitKeyed(a, b, playerGS->texture, gc.keySim, gc.keySoft, gc.keySpill, gc.gsX, gc.gsY, gc.gsScale, gc.gsOpacity);
-            if (!fitValid) { fitA = a; fitB = b; fitValid = true; }
+        if (gsDrawClip >= 0) {
+            GLuint tex = 0;
+            int tw = 0, th = 0;
+            if (playerGS && playerGS->hasFrame && playerGS->texture) {
+                tex = playerGS->texture;
+                tw = playerGS->width;
+                th = playerGS->height;
+            } else if (gsDrawClip < (int)clips.size()) {
+                int mid = clips[gsDrawClip].mediaId;
+                if (mid >= 0 && mid < (int)media.size() && media[mid].thumb) {
+                    tex = media[mid].thumb;
+                    tw = media[mid].thumbW;
+                    th = media[mid].thumbH;
+                }
+            }
+            if (tex && tw > 0 && th > 0) {
+                ImVec2 a = fitValid ? fitA : view0;
+                ImVec2 b = fitValid ? fitB : view1;
+                const Clip& gc = clips[gsDrawClip];
+                BlitKeyed(a, b, tex, gc.keySim, gc.keySoft, gc.keySpill, gc.gsX, gc.gsY, gc.gsScale, gc.gsOpacity);
+                if (!fitValid) { fitA = a; fitB = b; fitValid = true; }
+            }
         }
         for (const auto& tb : thumbBlits)
             BlitVideo(tb.a, tb.b, tb.tex, tb.w, tb.h, tb.c0, tb.c1);
