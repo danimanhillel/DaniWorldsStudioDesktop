@@ -199,6 +199,9 @@ double asrCursor = 0;
 double asrEnd = 0;
 std::vector<float> asrPcm;
 std::vector<AsrSeg> asrSegs;
+std::vector<int> asrList;
+int asrListPos = 0;
+float asrBase = 0;
 bool requestExport = false;
 int mediaMenuIndex = -1;
 int mediaArm = -1;
@@ -956,6 +959,56 @@ static double ProjectEnd() {
     return end;
 }
 
+static void MixOneClip(int ci, double timelineTime, int sampleCount, int16_t* dst) {
+    if (!dst || sampleCount <= 0) return;
+    memset(dst, 0, (size_t)sampleCount * 2 * sizeof(int16_t));
+    if (ci < 0 || ci >= (int)clips.size()) return;
+    Clip& c = clips[ci];
+    if (c.mediaId < 0 || c.mediaId >= (int)media.size() || c.muted) return;
+    if (media[c.mediaId].type == "image") return;
+    if (timelineTime < c.startTime || timelineTime >= c.startTime + c.duration) return;
+    int idx = EnsureAudio(c.mediaId);
+    if (audioSrcs[idx].noAudio || audioSrcs[idx].failed) return;
+    float speed = c.speed < 0.05f ? 1.0f : c.speed;
+    double mediaT = c.sourceOffset + (timelineTime - c.startTime) * speed;
+    int srcN = std::max(1, (int)std::lround(sampleCount * speed));
+    std::vector<int16_t> src((size_t)srcN * 2, 0);
+    PullSamples(audioSrcs[idx], mediaT, srcN, src.data());
+    float local = (float)(timelineTime - c.startTime);
+    float blockDur = sampleCount / 48000.0f;
+    float g0 = GainAt(c, std::min(local, c.duration));
+    float g1 = GainAt(c, std::min(local + blockDur, c.duration));
+    for (int i = 0; i < sampleCount; i++) {
+        float pos = (sampleCount <= 1) ? 0.0f : (float)i * (float)(srcN - 1) / (float)(sampleCount - 1);
+        int i0 = (int)pos;
+        int i1 = std::min(srcN - 1, i0 + 1);
+        float fr = pos - (float)i0;
+        float g = g0 + (g1 - g0) * ((float)i / (float)sampleCount);
+        for (int ch = 0; ch < 2; ch++) {
+            float s = src[(size_t)i0 * 2 + ch] * (1.0f - fr) + src[(size_t)i1 * 2 + ch] * fr;
+            int v = (int)(s * g);
+            if (v > 32767) v = 32767;
+            if (v < -32768) v = -32768;
+            dst[i * 2 + ch] = (int16_t)v;
+        }
+    }
+}
+
+static bool ClipCanSpeak(int ci) {
+    if (ci < 0 || ci >= (int)clips.size()) return false;
+    const Clip& c = clips[ci];
+    if (c.muted || c.duration < 0.3f || c.mediaId < 0 || c.mediaId >= (int)media.size()) return false;
+    if (media[c.mediaId].type == "image") return false;
+    int idx = EnsureAudio(c.mediaId);
+    return !audioSrcs[idx].noAudio && !audioSrcs[idx].failed;
+}
+
+static const char* TrackLabel(int track) {
+    const char* names[] = {"V1", "V2", "V3", "A1", "A2", "A3", "GS"};
+    if (track < 0 || track > 6) return "clip";
+    return names[track];
+}
+
 static void AsrPump() {
     if (!asrOn) return;
     if (asrPhase == 0) {
@@ -966,39 +1019,33 @@ static void AsrPump() {
             return;
         }
         asrPhase = 1;
-        previewStatus = "Reading audio for subtitles";
-        return;
-    }
-    if (asrPhase == 1) {
-        if (asrCursor >= asrEnd) {
-            asrPhase = 2;
-            asrChunk = 0;
-            previewStatus = "Transcribing";
+        asrList.clear();
+        for (int t = 0; t <= 6; t++) {
+            for (int i = 0; i < (int)clips.size(); i++) {
+                if (clips[i].track == t && ClipCanSpeak(i)) asrList.push_back(i);
+            }
+        }
+        asrListPos = 0;
+        asrPcm.clear();
+        asrSegs.clear();
+        asrCursor = 0;
+        asrChunk = 0;
+        if (asrList.empty()) {
+            asrOn = false;
+            AsrClose();
+            previewStatus = "No audio clips to transcribe";
             return;
         }
-        const int n48 = 48000;
-        std::vector<int16_t> block((size_t)n48 * 2, 0);
-        MixTimeline(asrCursor, n48, block.data());
-        asrPcm.reserve(asrPcm.size() + 16000);
-        for (int i = 0; i < 16000; i++) {
-            int j = i * 3;
-            int l = block[(size_t)j * 2] + block[(size_t)(j + 1) * 2] + block[(size_t)(j + 2) * 2];
-            int r = block[(size_t)j * 2 + 1] + block[(size_t)(j + 1) * 2 + 1] + block[(size_t)(j + 2) * 2 + 1];
-            asrPcm.push_back(((l + r) / 6) / 32768.0f);
-        }
-        asrCursor += 1.0;
-        int pct = asrEnd > 0 ? (int)(100.0 * asrCursor / asrEnd) : 0;
-        previewStatus = "Reading audio " + std::to_string(pct) + "%";
+        previewStatus = std::string("Reading ") + TrackLabel(clips[asrList[0]].track);
         return;
     }
-    const int chunk = 16000 * 30;
-    int off = asrChunk * chunk;
-    if (off >= (int)asrPcm.size()) {
+    if (asrListPos < 0 || asrListPos >= (int)asrList.size()) {
         subs.clear();
+        std::sort(asrSegs.begin(), asrSegs.end(), [](const AsrSeg& a, const AsrSeg& b) { return a.start < b.start; });
         for (const AsrSeg& s : asrSegs) {
             Subtitle sub;
             sub.start = std::max(0.0f, s.start);
-            sub.duration = std::max(0.4f, s.end - s.start);
+            sub.duration = std::max(0.35f, s.end - s.start);
             sub.text = s.text;
             subs.push_back(sub);
         }
@@ -1009,11 +1056,52 @@ static void AsrPump() {
         previewStatus = subs.empty() ? "No speech found" : ("Subtitles " + std::to_string(subs.size()));
         return;
     }
+    int ci = asrList[asrListPos];
+    const Clip& c = clips[ci];
+    if (asrPhase == 1) {
+        if (asrPcm.empty()) asrCursor = c.startTime;
+        if (asrCursor >= c.startTime + c.duration) {
+            asrPhase = 2;
+            asrChunk = 0;
+            asrBase = c.startTime;
+            previewStatus = std::string("Transcribing ") + TrackLabel(c.track);
+            return;
+        }
+        const int n48 = 48000;
+        std::vector<int16_t> block((size_t)n48 * 2, 0);
+        MixOneClip(ci, asrCursor, n48, block.data());
+        asrPcm.reserve(asrPcm.size() + 16000);
+        for (int i = 0; i < 16000; i++) {
+            int j = i * 3;
+            float l = block[(size_t)j * 2] + block[(size_t)(j + 1) * 2] + block[(size_t)(j + 2) * 2];
+            float r = block[(size_t)j * 2 + 1] + block[(size_t)(j + 1) * 2 + 1] + block[(size_t)(j + 2) * 2 + 1];
+            asrPcm.push_back((l + r) / 6.0f / 32768.0f);
+        }
+        asrCursor += 1.0;
+        int pct = c.duration > 0 ? (int)(100.0 * (asrCursor - c.startTime) / c.duration) : 100;
+        previewStatus = std::string("Reading ") + TrackLabel(c.track) + " " + std::to_string(pct) + "%";
+        return;
+    }
+    const int chunk = 16000 * 30;
+    int off = asrChunk * chunk;
+    if (off >= (int)asrPcm.size()) {
+        asrListPos++;
+        asrPcm.clear();
+        asrPhase = 1;
+        asrChunk = 0;
+        return;
+    }
     int n = std::min(chunk, (int)asrPcm.size() - off);
+    double energy = 0;
+    for (int i = 0; i < n; i++) energy += (double)asrPcm[off + i] * asrPcm[off + i];
+    if (n > 0 && energy / n < 0.00002) {
+        asrChunk++;
+        return;
+    }
     std::vector<AsrSeg> part;
     std::string err;
-    previewStatus = "Transcribing " + std::to_string(off / 16000) + "s";
-    if (!AsrTranscribeChunk(asrPcm.data() + off, n, off / 16000.0f, asrLang, part, err)) {
+    previewStatus = std::string("Transcribing ") + TrackLabel(c.track) + " " + std::to_string((int)(asrBase + off / 16000.0f)) + "s";
+    if (!AsrTranscribeChunk(asrPcm.data() + off, n, asrBase + off / 16000.0f, asrLang, part, err)) {
         asrOn = false;
         AsrClose();
         previewStatus = err;
@@ -2077,38 +2165,25 @@ static void DrawTextLine(uint8_t* canvas, int cw, int ch, ImFont* font, float si
     }
 }
 
+static void ActiveSubs(float t, std::vector<int>& ids) {
+    ids.clear();
+    for (int i = 0; i < (int)subs.size(); i++) {
+        if (subs[i].text.empty()) continue;
+        if (t < subs[i].start || t >= subs[i].start + subs[i].duration) continue;
+        ids.push_back(i);
+    }
+}
+
 static void BurnSubtitles(uint8_t* canvas, int cw, int ch, float t) {
-    int si = FindSub(t);
-    if (si < 0 || subs[si].text.empty() || fontAtlas.empty()) return;
+    std::vector<int> ids;
+    ActiveSubs(t, ids);
+    if (ids.empty() || fontAtlas.empty()) return;
     ImFont* font = ImGui::GetFont();
     if (!font) return;
     float size = std::max(18.0f, ch * 0.048f) * std::max(0.3f, subStyle.fontScale);
     float maxW = cw * 0.82f;
-    std::vector<std::string> lines;
-    WrapBalanced(font, size, subs[si].text, maxW, lines);
-    if (lines.empty()) return;
     float lineH = size * 1.18f;
-    float blockH = lineH * (float)lines.size();
-    float y = ch - blockH - ch * 0.07f;
-    float widest = 0;
-    for (const auto& ln : lines) widest = std::max(widest, TextWidth(font, size, ln));
-    if (subStyle.background) {
-        int x0 = (int)((cw - widest) * 0.5f - size * 0.35f);
-        int y0 = (int)(y - size * 0.15f);
-        int x1 = (int)((cw + widest) * 0.5f + size * 0.35f);
-        int y1 = (int)(y + blockH + size * 0.2f);
-        unsigned char br = (unsigned char)(Clamp01(subStyle.bg[0]) * 255);
-        unsigned char bg = (unsigned char)(Clamp01(subStyle.bg[1]) * 255);
-        unsigned char bb = (unsigned char)(Clamp01(subStyle.bg[2]) * 255);
-        float ba = Clamp01(subStyle.bgAlpha);
-        for (int yy = y0; yy < y1; yy++) for (int xx = x0; xx < x1; xx++) {
-            if (xx < 0 || yy < 0 || xx >= cw || yy >= ch) continue;
-            uint8_t* d = canvas + ((size_t)yy * cw + xx) * 4;
-            d[0] = (uint8_t)std::lround(br * ba + d[0] * (1.0f - ba));
-            d[1] = (uint8_t)std::lround(bg * ba + d[1] * (1.0f - ba));
-            d[2] = (uint8_t)std::lround(bb * ba + d[2] * (1.0f - ba));
-        }
-    }
+    float yBottom = ch - ch * 0.07f;
     unsigned char tr = (unsigned char)(Clamp01(subStyle.text[0]) * 255);
     unsigned char tg = (unsigned char)(Clamp01(subStyle.text[1]) * 255);
     unsigned char tb = (unsigned char)(Clamp01(subStyle.text[2]) * 255);
@@ -2118,15 +2193,42 @@ static void BurnSubtitles(uint8_t* canvas, int cw, int ch, float t) {
     float edge = subStyle.border ? std::max(1.0f, subStyle.borderPx * (size / 42.0f)) : 0.0f;
     const float oxs[8] = {-1, 1, 0, 0, -1, 1, -1, 1};
     const float oys[8] = {0, 0, -1, 1, -1, -1, 1, 1};
-    for (const auto& raw : lines) {
-        std::string ln = HasHebrew(raw) ? ReverseUtf8(raw) : raw;
-        float x = (cw - TextWidth(font, size, ln)) * 0.5f;
-        if (edge > 0.2f) {
-            for (int k = 0; k < 8; k++)
-                DrawTextLine(canvas, cw, ch, font, size, x + oxs[k] * edge, y + oys[k] * edge, ln, br, bgc, bb);
+    for (int n = (int)ids.size() - 1; n >= 0; n--) {
+        std::vector<std::string> lines;
+        WrapBalanced(font, size, subs[ids[n]].text, maxW, lines);
+        if (lines.empty()) continue;
+        float blockH = lineH * (float)lines.size();
+        float y = yBottom - blockH;
+        if (subStyle.background) {
+            float widest = 0;
+            for (const auto& ln : lines) widest = std::max(widest, TextWidth(font, size, ln));
+            int x0 = (int)((cw - widest) * 0.5f - size * 0.35f);
+            int y0 = (int)(y - size * 0.15f);
+            int x1 = (int)((cw + widest) * 0.5f + size * 0.35f);
+            int y1 = (int)(y + blockH + size * 0.2f);
+            unsigned char bgr = (unsigned char)(Clamp01(subStyle.bg[0]) * 255);
+            unsigned char bgg = (unsigned char)(Clamp01(subStyle.bg[1]) * 255);
+            unsigned char bgb = (unsigned char)(Clamp01(subStyle.bg[2]) * 255);
+            float ba = Clamp01(subStyle.bgAlpha);
+            for (int yy = y0; yy < y1; yy++) for (int xx = x0; xx < x1; xx++) {
+                if (xx < 0 || yy < 0 || xx >= cw || yy >= ch) continue;
+                uint8_t* d = canvas + ((size_t)yy * cw + xx) * 4;
+                d[0] = (uint8_t)std::lround(bgr * ba + d[0] * (1.0f - ba));
+                d[1] = (uint8_t)std::lround(bgg * ba + d[1] * (1.0f - ba));
+                d[2] = (uint8_t)std::lround(bgb * ba + d[2] * (1.0f - ba));
+            }
         }
-        DrawTextLine(canvas, cw, ch, font, size, x, y, ln, tr, tg, tb);
-        y += lineH;
+        for (const auto& raw : lines) {
+            std::string ln = HasHebrew(raw) ? ReverseUtf8(raw) : raw;
+            float x = (cw - TextWidth(font, size, ln)) * 0.5f;
+            if (edge > 0.2f) {
+                for (int k = 0; k < 8; k++)
+                    DrawTextLine(canvas, cw, ch, font, size, x + oxs[k] * edge, y + oys[k] * edge, ln, br, bgc, bb);
+            }
+            DrawTextLine(canvas, cw, ch, font, size, x, y, ln, tr, tg, tb);
+            y += lineH;
+        }
+        yBottom -= blockH + size * 0.35f;
     }
 }
 
@@ -2981,20 +3083,14 @@ static void DrawLineGL(ImFont* font, float size, float x, float y, const std::st
 }
 
 void DrawPreviewSubs(ImVec2 pic0, ImVec2 pic1) {
-    int si = FindSub(currentTime);
-    if (si < 0 || subs[si].text.empty()) return;
+    std::vector<int> ids;
+    ActiveSubs(currentTime, ids);
+    if (ids.empty()) return;
     ImFont* font = ImGui::GetFont();
     if (!font || pic1.x - pic0.x < 20) return;
     float size = std::max(16.0f, (pic1.y - pic0.y) * 0.055f) * std::max(0.3f, subStyle.fontScale);
     float maxW = (pic1.x - pic0.x) * 0.82f;
-    std::vector<std::string> lines;
-    WrapBalanced(font, size, subs[si].text, maxW, lines);
-    if (lines.empty()) return;
     float lineH = size * 1.18f;
-    float blockH = lineH * (float)lines.size();
-    float y = pic1.y - blockH - (pic1.y - pic0.y) * 0.06f;
-    float widest = 0;
-    for (const auto& ln : lines) widest = std::max(widest, TextWidth(font, size, ln));
     ImGuiIO& io = ImGui::GetIO();
     if (pglUseProgram) pglUseProgram(0);
     glDisable(GL_DEPTH_TEST);
@@ -3009,37 +3105,48 @@ void DrawPreviewSubs(ImVec2 pic0, ImVec2 pic1) {
     glMatrixMode(GL_MODELVIEW);
     glPushMatrix();
     glLoadIdentity();
-    if (subStyle.background) {
-        glDisable(GL_TEXTURE_2D);
-        glColor4f(subStyle.bg[0], subStyle.bg[1], subStyle.bg[2], Clamp01(subStyle.bgAlpha));
-        float x0 = (pic0.x + pic1.x - widest) * 0.5f - size * 0.35f;
-        float x1 = (pic0.x + pic1.x + widest) * 0.5f + size * 0.35f;
-        float y0 = y - size * 0.12f;
-        float y1 = y + blockH + size * 0.15f;
-        glBegin(GL_QUADS);
-        glVertex2f(x0, y0); glVertex2f(x1, y0); glVertex2f(x1, y1); glVertex2f(x0, y1);
-        glEnd();
-        glEnable(GL_TEXTURE_2D);
-        glBindTexture(GL_TEXTURE_2D, (GLuint)(intptr_t)io.Fonts->TexID);
-    }
     const float oxs[8] = {-1, 1, 0, 0, -1, 1, -1, 1};
     const float oys[8] = {0, 0, -1, 1, -1, -1, 1, 1};
     float edge = subStyle.border ? std::max(1.0f, subStyle.borderPx * (size / 48.0f)) : 0.0f;
-    float yy = y;
-    for (const auto& raw : lines) {
-        std::string ln = HasHebrew(raw) ? ReverseUtf8(raw) : raw;
-        float x = (pic0.x + pic1.x - TextWidth(font, size, ln)) * 0.5f;
-        if (edge > 0.2f) {
-            glColor4f(subStyle.edge[0], subStyle.edge[1], subStyle.edge[2], 1);
+    float yBottom = pic1.y - (pic1.y - pic0.y) * 0.06f;
+    for (int n = (int)ids.size() - 1; n >= 0; n--) {
+        std::vector<std::string> lines;
+        WrapBalanced(font, size, subs[ids[n]].text, maxW, lines);
+        if (lines.empty()) continue;
+        float blockH = lineH * (float)lines.size();
+        float y = yBottom - blockH;
+        float widest = 0;
+        for (const auto& ln : lines) widest = std::max(widest, TextWidth(font, size, ln));
+        if (subStyle.background) {
+            glDisable(GL_TEXTURE_2D);
+            glColor4f(subStyle.bg[0], subStyle.bg[1], subStyle.bg[2], Clamp01(subStyle.bgAlpha));
+            float x0 = (pic0.x + pic1.x - widest) * 0.5f - size * 0.35f;
+            float x1 = (pic0.x + pic1.x + widest) * 0.5f + size * 0.35f;
+            float y0 = y - size * 0.12f;
+            float y1 = y + blockH + size * 0.15f;
             glBegin(GL_QUADS);
-            for (int k = 0; k < 8; k++) DrawLineGL(font, size, x + oxs[k] * edge, yy + oys[k] * edge, ln);
+            glVertex2f(x0, y0); glVertex2f(x1, y0); glVertex2f(x1, y1); glVertex2f(x0, y1);
             glEnd();
+            glEnable(GL_TEXTURE_2D);
+            glBindTexture(GL_TEXTURE_2D, (GLuint)(intptr_t)io.Fonts->TexID);
         }
-        glColor4f(subStyle.text[0], subStyle.text[1], subStyle.text[2], 1);
-        glBegin(GL_QUADS);
-        DrawLineGL(font, size, x, yy, ln);
-        glEnd();
-        yy += lineH;
+        float yy = y;
+        for (const auto& raw : lines) {
+            std::string ln = HasHebrew(raw) ? ReverseUtf8(raw) : raw;
+            float x = (pic0.x + pic1.x - TextWidth(font, size, ln)) * 0.5f;
+            if (edge > 0.2f) {
+                glColor4f(subStyle.edge[0], subStyle.edge[1], subStyle.edge[2], 1);
+                glBegin(GL_QUADS);
+                for (int k = 0; k < 8; k++) DrawLineGL(font, size, x + oxs[k] * edge, yy + oys[k] * edge, ln);
+                glEnd();
+            }
+            glColor4f(subStyle.text[0], subStyle.text[1], subStyle.text[2], 1);
+            glBegin(GL_QUADS);
+            DrawLineGL(font, size, x, yy, ln);
+            glEnd();
+            yy += lineH;
+        }
+        yBottom = y - size * 0.35f;
     }
     glPopMatrix();
     glMatrixMode(GL_PROJECTION);
@@ -4105,7 +4212,7 @@ int main(int argc, char* argv[]) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
-    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 39",
+    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 40",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900,
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!window) { SDL_Quit(); return 1; }
@@ -5181,7 +5288,7 @@ int main(int argc, char* argv[]) {
                 gExport.Step();
                 guard++;
             } while (gExport.active && guard < limit && (!gpu || SDL_GetTicks() - slice < 80));
-        } else {
+        } else if (!asrOn) {
             SyncPreview(topClip, io.DeltaTime);
             SyncGreen();
             fxOther = -1;
@@ -5198,8 +5305,8 @@ int main(int argc, char* argv[]) {
                 ReleaseSidePlayer();
             }
             StopIfFinished();
-            if (asrOn) AsrPump();
         }
+        if (asrOn) AsrPump();
 #else
         if (isPlaying && !draggingPlayhead) currentTime += io.DeltaTime;
         StopIfFinished();
