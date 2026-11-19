@@ -25,6 +25,7 @@ const int kSot = 50258;
 const int kEot = 50257;
 const int kTranscribe = 50359;
 const int kNoSpeech = 50362;
+const int kNoTimestamps = 50363;
 const int kTimestamp = 50364;
 const int kEn = 50259;
 const int kHe = 50279;
@@ -406,7 +407,7 @@ bool AsrTranscribeChunk(const float* pcm, int samples, float timeOffset, int lan
     gApi->ReleaseValue(encOut);
 
     int lang = language == 1 ? kEn : kHe;
-    std::vector<int64_t> ids = {kSot, lang, kTranscribe};
+    std::vector<int64_t> ids = {kSot, lang, kTranscribe, kNoTimestamps};
     std::string text;
     float segStart = -1.0f;
     int lastStamp = kTimestamp;
