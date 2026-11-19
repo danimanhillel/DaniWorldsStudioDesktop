@@ -2477,7 +2477,7 @@ static bool SliderTyped(const char* label, float* v, float mn, float mx, const c
     ImGui::PushID(label);
     ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted(label);
-    ImGui::SameLine(78.0f);
+    ImGui::SameLine(118.0f);
     ImGui::SetNextItemWidth(150.0f);
     bool changed = ImGui::SliderFloat("##s", v, mn, mx, fmt);
     ImGui::SameLine();
@@ -2490,11 +2490,23 @@ static bool SliderTyped(const char* label, float* v, float mn, float mx, const c
 }
 
 static void DrawPictureControls(Clip& c) {
-    SliderTyped("X", &c.gsX, -1.0f, 1.0f, "%.2f");
-    SliderTyped("Y", &c.gsY, -1.0f, 1.0f, "%.2f");
+    SliderTyped("Position X", &c.gsX, -1.0f, 1.0f, "%.2f");
+    SliderTyped("Position Y", &c.gsY, -1.0f, 1.0f, "%.2f");
     SliderTyped("Size", &c.gsScale, 0.05f, 4.0f, "%.2f");
     SliderTyped("Aspect", &c.gsAspect, 0.25f, 4.0f, "%.2f");
     SliderTyped("Rotate", &c.gsRot, -180.0f, 180.0f, "%.1f");
+}
+
+static void PlaceAtCursor() {
+    ImVec2 m = ImGui::GetMousePos();
+    ImGuiIO& pio = ImGui::GetIO();
+    if (m.x > pio.DisplaySize.x - 360.0f) m.x = pio.DisplaySize.x - 360.0f;
+    if (m.y > pio.DisplaySize.y - 280.0f) m.y = pio.DisplaySize.y - 280.0f;
+    if (m.x < 8.0f) m.x = 8.0f;
+    if (m.y < 8.0f) m.y = 8.0f;
+    ImGui::SetNextWindowPos(m, ImGuiCond_Appearing);
+    ImGui::SetNextWindowFocus();
+    ImGui::SetNextWindowBgAlpha(0.98f);
 }
 
 static void PlacePanel(float) {
@@ -4894,7 +4906,7 @@ int main(int argc, char* argv[]) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
-    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 52",
+    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 53",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900,
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!window) { SDL_Quit(); return 1; }
@@ -5005,6 +5017,24 @@ int main(int argc, char* argv[]) {
         if (ImGui::Button("Import")) ImportFiles(hwnd);
         ImGui::SameLine();
         if (ImGui::Button("Export")) requestExport = true;
+        ImGui::SameLine();
+        if (ImGui::Button("Transform")) {
+            int pick = selectedClip;
+            if (pick < 0 || pick >= (int)clips.size()) pick = gsPanelClip;
+            if (pick >= 0 && pick < (int)clips.size()) {
+                int mid = clips[pick].mediaId;
+                if (mid >= 0 && mid < (int)media.size() && media[mid].type != "audio") {
+                    if (clips[pick].track == kGsTrack) {
+                        gsPanelClip = pick;
+                        gsPanelOpen = true;
+                    }
+                    xformClip = pick;
+                    xformOpen = true;
+                    openedPanelThisFrame = true;
+                    previewStatus = "Transform";
+                } else previewStatus = "Select a video or image";
+            } else previewStatus = "Select a video or image";
+        }
         ImGui::SameLine();
         if (ImGui::Button(asrOn ? "Stop subs" : "Auto subs")) {
             if (asrOn) {
@@ -5369,6 +5399,8 @@ int main(int argc, char* argv[]) {
                     SelectOnly(i);
                     gsPanelClip = i;
                     gsPanelOpen = true;
+                    contextClip = i;
+                    openClipMenu = true;
                     openedPanelThisFrame = true;
                 }
                 if (ImGui::IsMouseClicked(0)) {
@@ -5558,6 +5590,12 @@ int main(int argc, char* argv[]) {
                         contextClip = i;
                         EnsureEnvelope(clips[i]);
                         openClipMenu = true;
+                        int mid = clips[i].mediaId;
+                        if (mid >= 0 && mid < (int)media.size() && media[mid].type != "audio") {
+                            xformClip = i;
+                            xformOpen = true;
+                            openedPanelThisFrame = true;
+                        }
                         break;
                     }
                     if (ImGui::IsMouseDoubleClicked(0)) {
@@ -5794,8 +5832,20 @@ int main(int argc, char* argv[]) {
         if (ImGui::BeginPopup("clipctx")) {
             if (contextClip >= 0 && contextClip < (int)clips.size()) {
                 Clip& c = clips[contextClip];
-                ImGui::TextUnformatted("Clip");
+                bool picture = c.mediaId >= 0 && c.mediaId < (int)media.size() && media[c.mediaId].type != "audio";
+                ImGui::TextUnformatted(picture ? "Transform" : "Clip");
                 ImGui::Separator();
+                if (picture) {
+                    DrawPictureControls(c);
+                    if (c.track == kGsTrack) {
+                        ImGui::Separator();
+                        SliderTyped("Similarity", &c.keySim, 0.0f, 1.0f, "%.2f");
+                        SliderTyped("Softness", &c.keySoft, 0.0f, 1.0f, "%.2f");
+                        SliderTyped("Spill", &c.keySpill, 0.0f, 1.0f, "%.2f");
+                        SliderTyped("Opacity", &c.gsOpacity, 0.0f, 1.0f, "%.2f");
+                    }
+                    ImGui::Separator();
+                }
                 if (ImGui::MenuItem("Fade In", nullptr, &c.fadeIn)) {
                     shownLocal = -1000.0f;
 #ifdef HAVE_FFMPEG
@@ -6026,7 +6076,7 @@ int main(int argc, char* argv[]) {
 
         gsPanelHolds = false;
         if (gsPanelOpen && gsPanelClip >= 0 && gsPanelClip < (int)clips.size() && clips[gsPanelClip].track == kGsTrack) {
-            PlacePanel(0.0f);
+            PlaceAtCursor();
             bool open = true;
             if (ClickOutsidePanels()) open = false;
             if (ImGui::Begin("Green screen", &open, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse)) {
@@ -6061,7 +6111,7 @@ int main(int argc, char* argv[]) {
                 bool picture = mid >= 0 && mid < (int)media.size() && media[mid].type != "audio";
                 if (!picture) xformOpen = false;
                 else {
-                    PlacePanel(0.0f);
+                    PlaceAtCursor();
                     bool open = true;
                     if (ClickOutsidePanels()) open = false;
                     if (ImGui::Begin("Transform", &open, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse)) {
