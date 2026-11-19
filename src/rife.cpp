@@ -24,7 +24,13 @@ OrtSession* gSession = nullptr;
 OrtAllocator* gAlloc = nullptr;
 #ifdef _WIN32
 HMODULE gOrt = nullptr;
+HMODULE gCuda = nullptr;
+HMODULE gCudaShared = nullptr;
 #endif
+std::vector<float> gIn0, gIn1, gTimePlane;
+const uint8_t* gLast0 = nullptr;
+const uint8_t* gLast1 = nullptr;
+int gLastW = 0, gLastH = 0;
 
 std::string gName0, gName1, gNameT, gNameOut;
 int gLayout = 0;
@@ -67,6 +73,8 @@ void ClearSession() {
     gApi = nullptr;
     gApiVersion = 0;
     gAlloc = nullptr;
+    gLast0 = gLast1 = nullptr;
+    gLastW = gLastH = 0;
     gLayout = 0;
     gInfo.ready = false;
     gInfo.cuda = false;
@@ -75,20 +83,29 @@ void ClearSession() {
 int Pad32(int v) { return (v + 31) & ~31; }
 
 void ToPlanar(const uint8_t* rgba, int w, int h, int pw, int ph, float* dst, int channelOffset) {
+    const float scale = 1.0f / 255.0f;
     size_t plane = (size_t)ph * (size_t)pw;
     float* r = dst + (size_t)channelOffset * plane;
-    float* g = r + plane;
-    float* b = g + plane;
-    for (int y = 0; y < ph; y++) {
-        int sy = std::min(y, h - 1);
-        for (int x = 0; x < pw; x++) {
-            int sx = std::min(x, w - 1);
-            const uint8_t* p = rgba + ((size_t)sy * (size_t)w + (size_t)sx) * 4;
-            size_t i = (size_t)y * (size_t)pw + (size_t)x;
-            r[i] = p[0] / 255.0f;
-            g[i] = p[1] / 255.0f;
-            b[i] = p[2] / 255.0f;
+    float* gch = r + plane;
+    float* b = gch + plane;
+    for (int y = 0; y < h; y++) {
+        const uint8_t* row = rgba + ((size_t)y * (size_t)w) * 4;
+        float* rr = r + (size_t)y * (size_t)pw;
+        float* gg = gch + (size_t)y * (size_t)pw;
+        float* bb = b + (size_t)y * (size_t)pw;
+        for (int x = 0; x < w; x++) {
+            const uint8_t* p = row + (size_t)x * 4;
+            rr[x] = p[0] * scale;
+            gg[x] = p[1] * scale;
+            bb[x] = p[2] * scale;
         }
+        float er = rr[w - 1], eg = gg[w - 1], eb = bb[w - 1];
+        for (int x = w; x < pw; x++) { rr[x] = er; gg[x] = eg; bb[x] = eb; }
+    }
+    for (int y = h; y < ph; y++) {
+        memcpy(r + (size_t)y * (size_t)pw, r + (size_t)(h - 1) * (size_t)pw, (size_t)pw * sizeof(float));
+        memcpy(gch + (size_t)y * (size_t)pw, gch + (size_t)(h - 1) * (size_t)pw, (size_t)pw * sizeof(float));
+        memcpy(b + (size_t)y * (size_t)pw, b + (size_t)(h - 1) * (size_t)pw, (size_t)pw * sizeof(float));
     }
 }
 
@@ -102,9 +119,8 @@ void FromPlanar(const float* src, int stride, int planeH, int w, int h, uint8_t*
             size_t i = (size_t)y * (size_t)stride + (size_t)x;
             uint8_t* p = rgba + ((size_t)y * (size_t)w + (size_t)x) * 4;
             auto u = [](float v) {
-                if (v < 0) v = 0;
-                if (v > 1) v = 1;
-                return (uint8_t)std::lround(v * 255.0f);
+                v = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+                return (uint8_t)(v * 255.0f + 0.5f);
             };
             p[0] = u(r[i]);
             p[1] = u(g[i]);
@@ -202,14 +218,43 @@ bool RifeStartup(std::string& err) {
         RifeShutdown();
         return false;
     }
-    gApi->SetIntraOpNumThreads(opt, 2);
-    gApi->SetSessionGraphOptimizationLevel(opt, ORT_ENABLE_EXTENDED);
-    using AppendCuda = OrtStatus*(ORT_API_CALL*)(OrtSessionOptions*, int);
-    auto appendCuda = (AppendCuda)GetProcAddress(gOrt, "OrtSessionOptionsAppendExecutionProvider_CUDA");
-    if (appendCuda) {
-        OrtStatus* cst = appendCuda(opt, 0);
-        gInfo.cuda = cst == nullptr;
-        if (cst) gApi->ReleaseStatus(cst);
+    gApi->SetIntraOpNumThreads(opt, 8);
+    gApi->SetSessionGraphOptimizationLevel(opt, ORT_ENABLE_ALL);
+    std::string cudaWhy;
+#ifdef _WIN32
+    SetDllDirectoryW(dir.c_str());
+    gCudaShared = LoadLibraryW((dir + L"onnxruntime_providers_shared.dll").c_str());
+    gCuda = LoadLibraryW((dir + L"onnxruntime_providers_cuda.dll").c_str());
+    if (gApiVersion >= 14) {
+        const char* keys[] = {"device_id", "arena_extend_strategy", "cudnn_conv_algo_search", "do_copy_in_default_stream", "cudnn_conv_use_max_workspace", "gpu_mem_limit"};
+        const char* vals[] = {"0", "1", "HEURISTIC", "1", "1", "17179869184"};
+        OrtStatus* st = gApi->SessionOptionsAppendExecutionProvider(opt, "CUDA", keys, vals, 6);
+        if (!st) gInfo.cuda = true;
+        else {
+            cudaWhy = gApi->GetErrorMessage(st);
+            gApi->ReleaseStatus(st);
+            const char* k2[] = {"device_id"};
+            const char* v2[] = {"0"};
+            st = gApi->SessionOptionsAppendExecutionProvider(opt, "CUDA", k2, v2, 1);
+            if (!st) { gInfo.cuda = true; cudaWhy.clear(); }
+            else {
+                cudaWhy = gApi->GetErrorMessage(st);
+                gApi->ReleaseStatus(st);
+            }
+        }
+    }
+#endif
+    if (!gInfo.cuda) {
+        using AppendCuda = OrtStatus*(ORT_API_CALL*)(OrtSessionOptions*, int);
+        auto appendCuda = (AppendCuda)GetProcAddress(gOrt, "OrtSessionOptionsAppendExecutionProvider_CUDA");
+        if (appendCuda) {
+            OrtStatus* cst = appendCuda(opt, 0);
+            gInfo.cuda = cst == nullptr;
+            if (cst) {
+                if (cudaWhy.empty()) cudaWhy = gApi->GetErrorMessage(cst);
+                gApi->ReleaseStatus(cst);
+            }
+        }
     }
     OrtStatus* created = gApi->CreateSession(gEnv, model.c_str(), opt, &gSession);
     gApi->ReleaseSessionOptions(opt);
@@ -267,7 +312,10 @@ bool RifeStartup(std::string& err) {
     gInfo.ready = true;
     gInfo.files = true;
     gInfo.detail = std::string(gInfo.cuda ? "RIFE on GPU" : "RIFE on CPU") + " (ORT API " + std::to_string(gApiVersion) + ")";
-    if (!gInfo.cuda) gInfo.detail += ". The CUDA provider was not loaded.";
+    if (!gInfo.cuda) {
+        gInfo.detail += ". CUDA was not used";
+        if (!cudaWhy.empty()) gInfo.detail += ": " + cudaWhy;
+    }
     return true;
 #endif
 }
@@ -276,6 +324,8 @@ void RifeShutdown() {
     ClearSession();
 #ifdef _WIN32
     if (gOrt) { FreeLibrary(gOrt); gOrt = nullptr; }
+    if (gCuda) { FreeLibrary(gCuda); gCuda = nullptr; }
+    if (gCudaShared) { FreeLibrary(gCudaShared); gCudaShared = nullptr; }
 #endif
     gInfo.ready = false;
     gInfo.cuda = false;
@@ -289,18 +339,26 @@ bool RifeRun(const uint8_t* rgba0, const uint8_t* rgba1, int w, int h, float t, 
     int pw = Pad32(w);
     int ph = Pad32(h);
     size_t plane = (size_t)pw * (size_t)ph;
-    std::vector<float> in0(gLayout == 2 ? plane * 6 : plane * 3);
-    std::vector<float> in1(gLayout == 2 ? 0 : plane * 3);
-    std::vector<float> timePlane;
-    float timeScalar = t;
-    if (gLayout == 2) ToPlanar(rgba0, w, h, pw, ph, in0.data(), 0), ToPlanar(rgba1, w, h, pw, ph, in0.data(), 3);
-    else {
-        ToPlanar(rgba0, w, h, pw, ph, in0.data(), 0);
-        ToPlanar(rgba1, w, h, pw, ph, in1.data(), 0);
+    bool same = rgba0 == gLast0 && rgba1 == gLast1 && w == gLastW && h == gLastH && !gIn0.empty();
+    if (!same) {
+        gIn0.resize(gLayout == 2 ? plane * 6 : plane * 3);
+        if (gLayout == 2) {
+            ToPlanar(rgba0, w, h, pw, ph, gIn0.data(), 0);
+            ToPlanar(rgba1, w, h, pw, ph, gIn0.data(), 3);
+        } else {
+            gIn1.resize(plane * 3);
+            ToPlanar(rgba0, w, h, pw, ph, gIn0.data(), 0);
+            ToPlanar(rgba1, w, h, pw, ph, gIn1.data(), 0);
+        }
+        gLast0 = rgba0;
+        gLast1 = rgba1;
+        gLastW = w;
+        gLastH = h;
     }
+    float timeScalar = t;
     int timeRank = gTimeRank < 0 ? 1 : gTimeRank;
     if (timeRank >= 4) {
-        timePlane.assign(plane, t);
+        gTimePlane.assign(plane, t);
         timeRank = 4;
     }
 
@@ -318,10 +376,10 @@ bool RifeRun(const uint8_t* rgba0, const uint8_t* rgba1, int w, int h, float t, 
     int64_t shapeT1[1] = {1};
     int64_t shapeT4[4] = {1, 1, ph, pw};
     bool built = false;
-    if (gLayout == 2) built = make(in0.data(), in0.size(), shape6, 4, v0);
-    else built = make(in0.data(), in0.size(), shape3, 4, v0) && make(in1.data(), in1.size(), shape3, 4, v1);
+    if (gLayout == 2) built = make(gIn0.data(), gIn0.size(), shape6, 4, v0);
+    else built = make(gIn0.data(), gIn0.size(), shape3, 4, v0) && make(gIn1.data(), gIn1.size(), shape3, 4, v1);
     if (built) {
-        if (timeRank >= 4) built = make(timePlane.data(), timePlane.size(), shapeT4, 4, vt);
+        if (timeRank >= 4) built = make(gTimePlane.data(), gTimePlane.size(), shapeT4, 4, vt);
         else built = make(&timeScalar, 1, shapeT1, timeRank == 0 ? 0 : 1, vt);
     }
     if (!built) {
