@@ -35,6 +35,7 @@ int gLastW = 0, gLastH = 0;
 std::string gName0, gName1, gNameT, gNameOut;
 int gLayout = 0;
 int gTimeRank = 1;
+bool gCudaRegistered = false;
 
 void ReleaseStatus(OrtStatus* st) {
     if (st && gApi) gApi->ReleaseStatus(st);
@@ -68,6 +69,11 @@ bool FileExists(const std::wstring& p) {
 void ClearSession() {
     if (gApi && gSession) gApi->ReleaseSession(gSession);
     gSession = nullptr;
+    if (gCudaRegistered && gApi && gEnv && gApiVersion >= 22) {
+        OrtStatus* st = gApi->UnregisterExecutionProviderLibrary(gEnv, "cuda_ep");
+        if (st) gApi->ReleaseStatus(st);
+    }
+    gCudaRegistered = false;
     if (gApi && gEnv) gApi->ReleaseEnv(gEnv);
     gEnv = nullptr;
     gApi = nullptr;
@@ -223,24 +229,45 @@ bool RifeStartup(std::string& err) {
     std::string cudaWhy;
 #ifdef _WIN32
     SetDllDirectoryW(dir.c_str());
-    gCudaShared = LoadLibraryW((dir + L"onnxruntime_providers_shared.dll").c_str());
-    gCuda = LoadLibraryW((dir + L"onnxruntime_providers_cuda.dll").c_str());
+    auto note = [&](OrtStatus* st) {
+        if (!st) return;
+        const char* m = gApi->GetErrorMessage(st);
+        if (m && *m) cudaWhy = m;
+        gApi->ReleaseStatus(st);
+    };
     if (gApiVersion >= 14) {
-        const char* keys[] = {"device_id", "arena_extend_strategy", "cudnn_conv_algo_search", "do_copy_in_default_stream", "cudnn_conv_use_max_workspace", "gpu_mem_limit"};
-        const char* vals[] = {"0", "1", "HEURISTIC", "1", "1", "17179869184"};
-        OrtStatus* st = gApi->SessionOptionsAppendExecutionProvider(opt, "CUDA", keys, vals, 6);
+        const char* keys[] = {"device_id"};
+        const char* vals[] = {"0"};
+        OrtStatus* st = gApi->SessionOptionsAppendExecutionProvider(opt, "CUDAExecutionProvider", keys, vals, 1);
         if (!st) gInfo.cuda = true;
-        else {
-            cudaWhy = gApi->GetErrorMessage(st);
-            gApi->ReleaseStatus(st);
-            const char* k2[] = {"device_id"};
-            const char* v2[] = {"0"};
-            st = gApi->SessionOptionsAppendExecutionProvider(opt, "CUDA", k2, v2, 1);
+        else note(st);
+        if (!gInfo.cuda) {
+            st = gApi->SessionOptionsAppendExecutionProvider(opt, "CUDA", keys, vals, 1);
             if (!st) { gInfo.cuda = true; cudaWhy.clear(); }
-            else {
-                cudaWhy = gApi->GetErrorMessage(st);
-                gApi->ReleaseStatus(st);
-            }
+            else note(st);
+        }
+    }
+    if (!gInfo.cuda && gApiVersion >= 22 && FileExists(dir + L"onnxruntime_providers_cuda.dll")) {
+        std::wstring dll = dir + L"onnxruntime_providers_cuda.dll";
+        OrtStatus* st = gApi->RegisterExecutionProviderLibrary(gEnv, "cuda_ep", dll.c_str());
+        if (st) note(st);
+        else {
+            gCudaRegistered = true;
+            const OrtEpDevice* const* devices = nullptr;
+            size_t count = 0;
+            st = gApi->GetEpDevices(gEnv, &devices, &count);
+            const OrtEpDevice* chosen = nullptr;
+            if (!st && devices) {
+                for (size_t i = 0; i < count; i++) {
+                    const char* name = gApi->EpDevice_EpName(devices[i]);
+                    if (name && std::strstr(name, "CUDA")) { chosen = devices[i]; break; }
+                }
+            } else note(st);
+            if (chosen) {
+                st = gApi->SessionOptionsAppendExecutionProvider_V2(opt, gEnv, &chosen, 1, nullptr, nullptr, 0);
+                if (!st) { gInfo.cuda = true; cudaWhy.clear(); }
+                else note(st);
+            } else if (cudaWhy.empty()) cudaWhy = "CUDA provider loaded but no GPU device was found";
         }
     }
 #endif
@@ -314,7 +341,7 @@ bool RifeStartup(std::string& err) {
     gInfo.detail = std::string(gInfo.cuda ? "RIFE on GPU" : "RIFE on CPU") + " (ORT API " + std::to_string(gApiVersion) + ")";
     if (!gInfo.cuda) {
         gInfo.detail += ". CUDA was not used";
-        if (!cudaWhy.empty()) gInfo.detail += ": " + cudaWhy;
+        if (!cudaWhy.empty()) gInfo.detail += ": " + cudaWhy.substr(0, 180);
     }
     return true;
 #endif
