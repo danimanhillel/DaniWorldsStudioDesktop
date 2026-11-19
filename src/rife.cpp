@@ -212,26 +212,14 @@ bool PreloadCuda(const std::wstring& dir, std::string& why) {
     }
     HMODULE shared = LoadLibraryW((dir + L"onnxruntime_providers_shared.dll").c_str());
     if (shared) gKeep.push_back(shared);
-    for (const auto& b : bins) {
-        if (b.find(L"CUDNN") != std::wstring::npos && b.find(L"\\13.5\\x64") != std::wstring::npos) {
-            SetDllDirectoryW(b.c_str());
-            break;
-        }
-    }
-    std::wstring provider = dir + L"onnxruntime_providers_cuda.dll";
-    gCuda = LoadLibraryW(provider.c_str());
-    if (!gCuda) {
-        DWORD e = GetLastError();
-        Log(dir, "load " + Narrow(provider) + " FAILED error " + std::to_string(e));
-        why = "CUDA provider did not load (Windows error " + std::to_string(e) + "). See rife.log. ";
-        if (!cublasFile) why += "cublas64_13.dll was not found.";
-        else if (!sawCublas) why += "cublas64_13.dll is missing a dependency.";
-        else why += "cudnn_cnn64_9.dll did not load. Copy zlibwapi.dll next to the program.";
+    Log(dir, std::string("shared provider ") + (shared ? "ok" : "FAILED"));
+    if (!sawCublas) {
+        why = cublasFile ? "cublas64_13.dll failed to load." : "cublas64_13.dll was not found.";
         Log(dir, why);
         SetDllDirectoryW(dir.c_str());
         return false;
     }
-    Log(dir, "load " + Narrow(provider) + " ok");
+    Log(dir, "CUDA libraries are loaded. ONNX Runtime will open the provider.");
     SetDllDirectoryW(dir.c_str());
     return true;
 }
