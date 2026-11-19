@@ -12,6 +12,7 @@
 #include <cstring>
 #include <cstdlib>
 #include "effects.h"
+#include "rife.h"
 
 #ifdef HAVE_FFMPEG
 extern "C" {
@@ -187,6 +188,7 @@ float timeOriginX = 0.0f;
 int exAspect = 0;
 int exRes = 1;
 int exFpsIdx = 1;
+bool exRife = false;
 bool requestExport = false;
 int mediaMenuIndex = -1;
 int mediaArm = -1;
@@ -968,6 +970,11 @@ struct ExpDec {
     bool imageDone = false;
     std::vector<uint8_t> rgba;
     std::vector<uint8_t> fitted;
+    double srcFps = 0;
+    double holdPts[2] = {-1, -1};
+    std::vector<uint8_t> hold[2];
+    int holdW = 0, holdH = 0;
+    int holdSlot = 0;
     HwDec* hw = nullptr;
 };
 
@@ -997,9 +1004,10 @@ struct ExportSession {
     std::vector<ExpDec> decs;
     std::vector<uint8_t> canvas;
     std::vector<int16_t> afifo;
+    bool rifeOn = false;
 
     void CloseAll();
-    bool Begin(const std::string& outPath, int width, int height, int framesPerSec);
+    bool Begin(const std::string& outPath, int width, int height, int framesPerSec, bool useRife);
     void Step();
     void Cancel();
     void Fail(const char* msg);
@@ -1009,6 +1017,8 @@ struct ExportSession {
     int OpenDec(int mediaId);
     bool ReadOne(ExpDec& d);
     bool EnsureFrame(int mediaId, double mediaTime);
+    bool HoldFrame(ExpDec& d, double want, std::vector<uint8_t>& dst, int& rw, int& rh);
+    bool RifePair(int mediaId, double mediaT, float speed, std::vector<uint8_t>& out, int& rw, int& rh);
     void BlitToCanvas(int idx);
 };
 
@@ -1059,6 +1069,8 @@ void ExportSession::CloseAll() {
     canvas.clear();
     afifo.clear();
     headerWritten = false;
+    if (rifeOn) RifeShutdown();
+    rifeOn = false;
 }
 
 void ExportSession::Fail(const char* msg) {
@@ -1116,6 +1128,12 @@ int ExportSession::OpenDec(int mediaId) {
     }
     for (unsigned i = 0; i < d.fmt->nb_streams; i++) {
         if (d.fmt->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) { d.stream = (int)i; break; }
+    }
+    if (d.stream >= 0) {
+        AVRational rate = d.fmt->streams[d.stream]->avg_frame_rate;
+        if (rate.num <= 0 || rate.den <= 0) rate = d.fmt->streams[d.stream]->r_frame_rate;
+        if (rate.num > 0 && rate.den > 0) d.srcFps = (double)rate.num / (double)rate.den;
+        if (d.srcFps < 1.0 || d.srcFps > 240.0) d.srcFps = 0;
     }
     const AVCodec* codec = (d.stream >= 0) ? avcodec_find_decoder(d.fmt->streams[d.stream]->codecpar->codec_id) : nullptr;
     const char* how = "CPU";
@@ -1195,6 +1213,64 @@ bool ExportSession::EnsureFrame(int mediaId, double mediaTime) {
     return d.rw > 0;
 }
 
+bool ExportSession::HoldFrame(ExpDec& d, double want, std::vector<uint8_t>& dst, int& rw, int& rh) {
+    double tol = 0.45 / std::max(1.0, d.srcFps);
+    int best = -1;
+    double bestd = 1e9;
+    for (int i = 0; i < 2; i++) {
+        if (d.holdPts[i] < 0 || d.hold[i].empty()) continue;
+        double dd = std::fabs(d.holdPts[i] - want);
+        if (dd < bestd) { bestd = dd; best = i; }
+    }
+    if (best >= 0 && bestd <= tol) {
+        dst = d.hold[best];
+        rw = d.holdW;
+        rh = d.holdH;
+        return rw > 0;
+    }
+    if (d.lastPts >= 0 && want + 0.012 < d.lastPts && d.fmt && d.ctx && d.stream >= 0) {
+        int64_t ts = (int64_t)(want / av_q2d(d.fmt->streams[d.stream]->time_base));
+        av_seek_frame(d.fmt, d.stream, ts, AVSEEK_FLAG_BACKWARD);
+        avcodec_flush_buffers(d.ctx);
+        d.lastPts = -1;
+    }
+    if (!EnsureFrame(d.mediaId, want) || d.rgba.empty()) return false;
+    d.holdPts[d.holdSlot] = d.lastPts;
+    d.hold[d.holdSlot] = d.rgba;
+    d.holdW = d.rw;
+    d.holdH = d.rh;
+    d.holdSlot ^= 1;
+    dst = d.rgba;
+    rw = d.rw;
+    rh = d.rh;
+    return true;
+}
+
+bool ExportSession::RifePair(int mediaId, double mediaT, float speed, std::vector<uint8_t>& out, int& rw, int& rh) {
+    if (!rifeOn || mediaId < 0 || mediaId >= (int)media.size()) return false;
+    if (media[mediaId].type == "image") return false;
+    int idx = OpenDec(mediaId);
+    if (idx < 0 || idx >= (int)decs.size()) return false;
+    ExpDec& d = decs[idx];
+    if (d.failed || d.srcFps < 1.0) return false;
+    double mediaStep = (double)std::max(0.05f, speed) / (double)std::max(1, fps);
+    if (mediaStep >= (1.0 / d.srcFps) * 0.92) return false;
+    double pos = std::max(0.0, mediaT) * d.srcFps;
+    double base = std::floor(pos);
+    double frac = pos - base;
+    if (frac < 0.04 || frac > 0.96) return false;
+    std::vector<uint8_t> a, b;
+    int aw = 0, ah = 0, bw = 0, bh = 0;
+    if (!HoldFrame(d, base / d.srcFps, a, aw, ah)) return false;
+    if (!HoldFrame(d, (base + 1.0) / d.srcFps, b, bw, bh)) return false;
+    if (aw != bw || ah != bh || aw < 2 || a.size() != b.size() || a.empty()) return false;
+    out.assign((size_t)aw * (size_t)ah * 4, 255);
+    if (!RifeRun(a.data(), b.data(), aw, ah, (float)frac, out.data())) return false;
+    rw = aw;
+    rh = ah;
+    return true;
+}
+
 void ExportSession::BlitToCanvas(int idx) {
     if (idx < 0 || idx >= (int)decs.size()) return;
     ExpDec& d = decs[idx];
@@ -1223,7 +1299,7 @@ void ExportSession::BlitToCanvas(int idx) {
     }
 }
 
-bool ExportSession::Begin(const std::string& outPath, int width, int height, int framesPerSec) {
+bool ExportSession::Begin(const std::string& outPath, int width, int height, int framesPerSec, bool useRife) {
     CloseAll();
     path = outPath;
     w = width & ~1;
@@ -1239,6 +1315,15 @@ bool ExportSession::Begin(const std::string& outPath, int width, int height, int
     }
     for (const auto& s : subs) timelineEnd = std::max(timelineEnd, (double)s.start + (double)s.duration);
     if (timelineEnd < 0.05 || (clips.empty() && subs.empty())) { status = "Nothing to export"; previewStatus = status; return false; }
+    if (useRife) {
+        std::string err;
+        if (!RifeStartup(err)) {
+            status = err;
+            previewStatus = status;
+            return false;
+        }
+        rifeOn = true;
+    }
     total = (int)std::ceil(timelineEnd * (double)fps);
     if (total < 1) total = 1;
     frameIndex = 0;
@@ -1883,6 +1968,23 @@ void ExportSession::Step() {
             float speed = std::max(0.05f, c.speed);
             double local = ClipLocalTime(ci, (float)when);
             double mediaT = c.sourceOffset + local * (double)speed;
+            std::vector<uint8_t> mid;
+            int mw = 0, mh = 0;
+            if (RifePair(c.mediaId, mediaT, speed, mid, mw, mh)) {
+                int idx = OpenDec(c.mediaId);
+                if (idx < 0 || idx >= (int)decs.size()) return false;
+                ExpDec& d = decs[idx];
+                std::vector<uint8_t> saved = std::move(d.rgba);
+                int srw = d.rw, srh = d.rh;
+                d.rgba = std::move(mid);
+                d.rw = mw;
+                d.rh = mh;
+                BlitToCanvas(idx);
+                d.rgba = std::move(saved);
+                d.rw = srw;
+                d.rh = srh;
+                return true;
+            }
             int idx = OpenDec(c.mediaId);
             if (!EnsureFrame(c.mediaId, mediaT)) return false;
             BlitToCanvas(idx);
@@ -1909,12 +2011,20 @@ void ExportSession::Step() {
         float speed = std::max(0.05f, c.speed);
         double mediaT = c.sourceOffset + ClipLocalTime(gs, (float)t) * (double)speed;
         std::vector<uint8_t> base = canvas;
-        int idx = OpenDec(c.mediaId);
-        if (idx >= 0 && EnsureFrame(c.mediaId, mediaT) && idx < (int)decs.size() && !decs[idx].rgba.empty()) {
-            ExpDec& d = decs[idx];
-            BlendChromaPlaced(base.data(), w, h, d.rgba.data(), d.rw, d.rh,
+        std::vector<uint8_t> mid;
+        int mw = 0, mh = 0;
+        if (RifePair(c.mediaId, mediaT, speed, mid, mw, mh)) {
+            BlendChromaPlaced(base.data(), w, h, mid.data(), mw, mh,
                               c.keySim, c.keySoft, c.keySpill, c.gsX, c.gsY, c.gsScale, c.gsOpacity);
             canvas.swap(base);
+        } else {
+            int idx = OpenDec(c.mediaId);
+            if (idx >= 0 && EnsureFrame(c.mediaId, mediaT) && idx < (int)decs.size() && !decs[idx].rgba.empty()) {
+                ExpDec& d = decs[idx];
+                BlendChromaPlaced(base.data(), w, h, d.rgba.data(), d.rw, d.rh,
+                                  c.keySim, c.keySoft, c.keySpill, c.gsX, c.gsY, c.gsScale, c.gsOpacity);
+                canvas.swap(base);
+            }
         }
     }
     BurnSubtitles(canvas.data(), w, h, (float)t);
@@ -1939,7 +2049,7 @@ void ExportSession::Step() {
     frameIndex++;
     int pct = total ? (frameIndex * 100) / total : 0;
     char buf[160];
-    snprintf(buf, sizeof(buf), "Export %d%%  (%d/%d)  %dx%d", pct, frameIndex, total, w, h);
+    snprintf(buf, sizeof(buf), "Export %d%%  (%d/%d)  %dx%d%s", pct, frameIndex, total, w, h, rifeOn ? "  RIFE" : "");
     status = buf;
     previewStatus = status;
 }
@@ -3552,7 +3662,7 @@ int main(int argc, char* argv[]) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
-    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 27",
+    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 28",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900,
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!window) { SDL_Quit(); return 1; }
@@ -4549,12 +4659,15 @@ int main(int argc, char* argv[]) {
             ImGui::Separator();
             ImGui::Text("Output: %d x %d   @ %d fps", ew, eh, fps);
             if (exRes >= 3) ImGui::TextDisabled("4K and 8K take a long time.");
+            ImGui::Checkbox("Frame interpolation", &exRife);
+            ImGui::TextDisabled("RIFE, when the export is smoother than the clip. Up to 4K.");
+            ImGui::TextDisabled("%s", RifeProbe().detail.c_str());
             if (ImGui::Button("Choose file and export")) {
                 ImGui::CloseCurrentPopup();
                 std::string out = SaveDialog(hwnd, "MP4 video (*.mp4)\0*.mp4\0", "mp4", "Export Video");
                 if (!out.empty()) {
 #ifdef HAVE_FFMPEG
-                    gExport.Begin(out, ew, eh, fps);
+                    gExport.Begin(out, ew, eh, fps, exRife);
 #else
                     previewStatus = "FFmpeg not linked";
 #endif
