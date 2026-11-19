@@ -205,6 +205,8 @@ std::vector<std::pair<int, int>> asrSpans;
 int asrSpanPos = 0;
 bool asrSpansReady = false;
 float asrBase = 0;
+float asrSpeed = 1.0f;
+int asrOff = 0;
 bool requestExport = false;
 int mediaMenuIndex = -1;
 int mediaArm = -1;
@@ -1110,6 +1112,165 @@ static void SplitTimedText(float start, float end, const std::string& text, std:
     }
 }
 
+struct AsrRead {
+    AVFormatContext* fmt = nullptr;
+    AVCodecContext* codec = nullptr;
+    SwrContext* swr = nullptr;
+    AVFrame* frame = nullptr;
+    AVPacket* pkt = nullptr;
+    int stream = -1;
+    bool eof = false;
+    double origin = 0;
+    int want = 0;
+    int gotTotal = 0;
+    int packets = 0;
+    int audioPackets = 0;
+    double lastPts = -1;
+    void Close() {
+        if (pkt) av_packet_free(&pkt);
+        if (frame) av_frame_free(&frame);
+        if (swr) swr_free(&swr);
+        if (codec) avcodec_free_context(&codec);
+        if (fmt) avformat_close_input(&fmt);
+        *this = AsrRead();
+    }
+    bool Open(const Clip& c) {
+        Close();
+        if (c.mediaId < 0 || c.mediaId >= (int)media.size()) return false;
+        float speed = c.speed < 0.05f ? 1.0f : c.speed;
+        origin = std::max(0.0, (double)c.sourceOffset);
+        want = std::max(1, (int)std::lround((double)c.duration * speed * 48000.0));
+        auto tryOpen = [&](bool ignoreEdit) -> bool {
+            Close();
+            want = std::max(1, (int)std::lround((double)c.duration * speed * 48000.0));
+            origin = std::max(0.0, (double)c.sourceOffset);
+            AVDictionary* opt = nullptr;
+            if (ignoreEdit) av_dict_set(&opt, "ignore_editlist", "1", 0);
+            if (avformat_open_input(&fmt, media[c.mediaId].path.c_str(), nullptr, &opt) < 0) {
+                av_dict_free(&opt);
+                return false;
+            }
+            av_dict_free(&opt);
+            if (avformat_find_stream_info(fmt, nullptr) < 0) return false;
+            stream = -1;
+            for (unsigned i = 0; i < fmt->nb_streams; i++) {
+                if (fmt->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) { stream = (int)i; break; }
+            }
+            if (stream < 0) return false;
+            const AVCodec* dec = avcodec_find_decoder(fmt->streams[stream]->codecpar->codec_id);
+            codec = dec ? avcodec_alloc_context3(dec) : nullptr;
+            if (!codec || avcodec_parameters_to_context(codec, fmt->streams[stream]->codecpar) < 0 || avcodec_open2(codec, dec, nullptr) < 0)
+                return false;
+            AVChannelLayout outLayout;
+            av_channel_layout_default(&outLayout, 2);
+            AVChannelLayout fallback;
+            const AVChannelLayout* inLay = &codec->ch_layout;
+            bool usedFallback = codec->ch_layout.nb_channels <= 0;
+            if (usedFallback) {
+                av_channel_layout_default(&fallback, 2);
+                inLay = &fallback;
+            }
+            int ok = swr_alloc_set_opts2(&swr, &outLayout, AV_SAMPLE_FMT_S16, 48000, inLay, codec->sample_fmt, codec->sample_rate, 0, nullptr);
+            av_channel_layout_uninit(&outLayout);
+            if (usedFallback) av_channel_layout_uninit(&fallback);
+            if (ok < 0 || !swr || swr_init(swr) < 0) return false;
+            frame = av_frame_alloc();
+            pkt = av_packet_alloc();
+            if (origin > 0.02) {
+                av_seek_frame(fmt, -1, (int64_t)(origin * AV_TIME_BASE), AVSEEK_FLAG_BACKWARD);
+                avcodec_flush_buffers(codec);
+            }
+            return true;
+        };
+        if (!tryOpen(true)) {
+            Close();
+            if (!tryOpen(false)) { Close(); return false; }
+        } else {
+            AVStream* st = fmt->streams[stream];
+            double listed = (st->duration > 0) ? st->duration * av_q2d(st->time_base) : 0;
+            if (listed > 0.2 && listed + 0.3 < c.duration) {
+                Close();
+                if (tryOpen(false)) {
+                    AVStream* st2 = fmt->streams[stream];
+                    double listed2 = (st2->duration > 0) ? st2->duration * av_q2d(st2->time_base) : 0;
+                    if (listed2 + 0.05 < listed) {
+                        Close();
+                        tryOpen(true);
+                    }
+                } else tryOpen(true);
+            }
+        }
+        if (!fmt || stream < 0) return false;
+        AVStream* st = fmt->streams[stream];
+        double listed = (st->duration > 0) ? st->duration * av_q2d(st->time_base) : -1;
+        char line[320];
+        snprintf(line, sizeof(line), "decode %s %s rate=%d ch=%d stream=%.2fs from=%.2f want=%.2fs",
+                 avcodec_get_name(codec->codec_id), TrackLabel(c.track), codec->sample_rate, codec->ch_layout.nb_channels,
+                 listed, origin, want / 48000.0);
+        AsrLog(line);
+        return true;
+    }
+    void Take() {
+        while (avcodec_receive_frame(codec, frame) == 0) {
+            int outCount = (int)av_rescale_rnd(swr_get_delay(swr, codec->sample_rate) + frame->nb_samples, 48000, codec->sample_rate, AV_ROUND_UP);
+            if (outCount < 1) outCount = 1;
+            std::vector<int16_t> tmp((size_t)outCount * 2 + 8);
+            uint8_t* planes[1] = { (uint8_t*)tmp.data() };
+            int got = swr_convert(swr, planes, outCount, (const uint8_t**)frame->data, frame->nb_samples);
+            if (got <= 0) continue;
+            double pts = origin;
+            if (frame->best_effort_timestamp != AV_NOPTS_VALUE)
+                pts = frame->best_effort_timestamp * av_q2d(fmt->streams[stream]->time_base);
+            lastPts = pts;
+            int start = 0;
+            if (gotTotal == 0) {
+                int drop = (int)((origin - pts) * 48000.0);
+                if (drop >= got) continue;
+                if (drop > 0) start = drop;
+            }
+            fifo.insert(fifo.end(), tmp.begin() + (size_t)start * 2, tmp.begin() + (size_t)got * 2);
+        }
+    }
+    std::vector<int16_t> fifo;
+    int Pull(std::vector<int16_t>& dst, int count) {
+        dst.assign((size_t)count * 2, 0);
+        if (!fmt || eof || want <= 0) return 0;
+        int need = std::min(count, want);
+        int guard = 0;
+        while ((int)fifo.size() / 2 < need && !eof && guard < 20000) {
+            guard++;
+            Take();
+            if ((int)fifo.size() / 2 >= need) break;
+            if (av_read_frame(fmt, pkt) < 0) { eof = true; break; }
+            packets++;
+            if (pkt->stream_index == stream) {
+                audioPackets++;
+                int send = avcodec_send_packet(codec, pkt);
+                if (send == AVERROR(EAGAIN)) { Take(); send = avcodec_send_packet(codec, pkt); }
+                if (send == 0) Take();
+            }
+            av_packet_unref(pkt);
+        }
+        if (eof) {
+            avcodec_send_packet(codec, nullptr);
+            Take();
+            std::vector<int16_t> tmp(48000 * 2);
+            uint8_t* planes[1] = { (uint8_t*)tmp.data() };
+            int got = swr_convert(swr, planes, 48000, nullptr, 0);
+            if (got > 0) fifo.insert(fifo.end(), tmp.begin(), tmp.begin() + (size_t)got * 2);
+        }
+        int have = std::min(need, (int)fifo.size() / 2);
+        if (have > 0) {
+            memcpy(dst.data(), fifo.data(), (size_t)have * 2 * sizeof(int16_t));
+            fifo.erase(fifo.begin(), fifo.begin() + (size_t)have * 2);
+            gotTotal += have;
+            want -= have;
+        }
+        return have;
+    }
+};
+static AsrRead asrRead;
+
 static void AsrPump() {
     if (!asrOn) return;
     if (asrPhase == 0) {
@@ -1151,6 +1312,7 @@ static void AsrPump() {
         asrSpansReady = false;
         if (asrList.empty()) {
             asrOn = false;
+            asrRead.Close();
             AsrClose();
             previewStatus = "No audio clips to transcribe";
             return;
@@ -1171,6 +1333,7 @@ static void AsrPump() {
         asrOn = false;
         asrPcm.clear();
         asrPcm.shrink_to_fit();
+        asrRead.Close();
         AsrClose();
         previewStatus = subs.empty() ? "No speech found" : ("Subtitles " + std::to_string(subs.size()));
         AsrLog("result subtitles=" + std::to_string(subs.size()));
@@ -1188,65 +1351,82 @@ static void AsrPump() {
     if (asrPhase == 1) {
         if (asrPcm.empty()) {
             asrCursor = c.startTime;
-            int idx = EnsureAudio(c.mediaId);
-            audioSrcs[idx].nextTime = -1;
-            audioSrcs[idx].fifo.clear();
+            asrSpeed = c.speed < 0.05f ? 1.0f : c.speed;
+            if (!asrRead.Open(c)) {
+                AsrLog(std::string("decode failed ") + TrackLabel(c.track));
+                asrRead.Close();
+                asrListPos++;
+                return;
+            }
             char line[256];
             snprintf(line, sizeof(line), "read clip %d %s timeline %.2f-%.2f", ci, TrackLabel(c.track), c.startTime, c.startTime + c.duration);
             AsrLog(line);
         }
-        if (asrCursor >= c.startTime + c.duration) {
+        if (asrRead.want <= 0 || asrRead.eof) {
+            char line[200];
+            snprintf(line, sizeof(line), "audio end %.2fs packets=%d audioPackets=%d lastPts=%.2f eof=%d",
+                     asrRead.gotTotal / 48000.0, asrRead.packets, asrRead.audioPackets, asrRead.lastPts, asrRead.eof ? 1 : 0);
+            AsrLog(line);
+            asrRead.Close();
             asrPhase = 2;
-            asrSpans.clear();
-            asrSpanPos = 0;
+            asrOff = 0;
             asrSpansReady = false;
             asrBase = c.startTime;
             previewStatus = std::string("Transcribing ") + TrackLabel(c.track);
             return;
         }
         const int n48 = 48000;
-        std::vector<int16_t> block((size_t)n48 * 2, 0);
-        MixOneClip(ci, asrCursor, n48, block.data());
+        std::vector<int16_t> block;
+        int have = asrRead.Pull(block, n48);
+        if (have <= 0) {
+            asrRead.eof = true;
+            return;
+        }
         asrPcm.reserve(asrPcm.size() + 16000);
         double energy = 0;
         float peak = 0;
-        for (int16_t s : block) {
-            float a = std::fabs((float)s) / 32768.0f;
-            peak = std::max(peak, a);
+        int use = std::min(have, n48);
+        for (int i = 0; i < use; i++) {
+            float a = std::fabs((float)block[(size_t)i * 2]) / 32768.0f;
+            float b = std::fabs((float)block[(size_t)i * 2 + 1]) / 32768.0f;
+            peak = std::max(peak, std::max(a, b));
         }
-        for (int i = 0; i < 16000; i++) {
+        int outN = std::max(1, use / 3);
+        for (int i = 0; i < outN; i++) {
             int j = i * 3;
+            if (j + 2 >= use) break;
             float l = block[(size_t)j * 2] + block[(size_t)(j + 1) * 2] + block[(size_t)(j + 2) * 2];
             float r = block[(size_t)j * 2 + 1] + block[(size_t)(j + 1) * 2 + 1] + block[(size_t)(j + 2) * 2 + 1];
             float sample = (l + r) / 6.0f / 32768.0f;
             energy += (double)sample * sample;
             asrPcm.push_back(sample);
         }
-        asrCursor += 1.0;
-        int sec = (int)(asrCursor - c.startTime);
+        asrCursor += use / 48000.0;
+        int sec = (int)((asrRead.gotTotal) / 48000.0);
         if (sec <= 8 || sec % 5 == 0) {
-            char line[160];
-            snprintf(line, sizeof(line), "audio %s t=%.1f rms=%.4f peak=%.3f", TrackLabel(c.track), asrCursor - 1.0, std::sqrt(energy / 16000.0), peak);
+            char line[180];
+            snprintf(line, sizeof(line), "audio %s t=%.1f rms=%.4f peak=%.3f lastPts=%.2f",
+                     TrackLabel(c.track), asrRead.gotTotal / 48000.0 - use / 48000.0, std::sqrt(energy / std::max(1, outN)), peak, asrRead.lastPts);
             AsrLog(line);
         }
-        int pct = c.duration > 0 ? (int)(100.0 * (asrCursor - c.startTime) / c.duration) : 100;
+        int pct = c.duration > 0 ? (int)(100.0 * (asrRead.gotTotal / 48000.0) / (c.duration * asrSpeed)) : 100;
         previewStatus = std::string("Reading ") + TrackLabel(c.track) + " " + std::to_string(pct) + "%";
         return;
     }
     if (!asrSpansReady) {
-        BuildSpeechSpans(asrPcm, asrSpans);
-        asrSpanPos = 0;
         asrSpansReady = true;
-        char head[128];
-        snprintf(head, sizeof(head), "speech spans=%d pcm=%.2fs %s", (int)asrSpans.size(), asrPcm.size() / 16000.0, TrackLabel(c.track));
-        AsrLog(head);
-        for (size_t i = 0; i < asrSpans.size(); i++) {
-            char line[128];
-            snprintf(line, sizeof(line), "span %d %.2f-%.2f", (int)i,
-                     asrSpans[i].first / 16000.0, asrSpans[i].second / 16000.0);
-            AsrLog(line);
+        asrOff = 0;
+        float peak = 0;
+        double energy = 0;
+        for (float s : asrPcm) {
+            peak = std::max(peak, std::fabs(s));
+            energy += (double)s * s;
         }
-        if (asrSpans.empty()) {
+        char head[180];
+        snprintf(head, sizeof(head), "pcm %.2fs rms=%.4f peak=%.3f %s",
+                 asrPcm.size() / 16000.0, asrPcm.empty() ? 0.0 : std::sqrt(energy / asrPcm.size()), peak, TrackLabel(c.track));
+        AsrLog(head);
+        if (asrPcm.size() < 1600) {
             asrListPos++;
             asrPcm.clear();
             asrPhase = 1;
@@ -1254,38 +1434,51 @@ static void AsrPump() {
         }
         return;
     }
-    if (asrSpanPos >= (int)asrSpans.size()) {
+    if (asrOff >= (int)asrPcm.size()) {
         asrListPos++;
         asrPcm.clear();
         asrPhase = 1;
         asrSpansReady = false;
         return;
     }
-    int a = asrSpans[asrSpanPos].first;
-    int b = asrSpans[asrSpanPos].second;
-    if (a < 0) a = 0;
-    if (b > (int)asrPcm.size()) b = (int)asrPcm.size();
-    int n = b - a;
-    float origin = asrBase + a / 16000.0f;
-    float spanDur = std::max(0.25f, n / 16000.0f);
-    previewStatus = std::string("Transcribing ") + TrackLabel(c.track) + " " + std::to_string(asrSpanPos + 1) + "/" + std::to_string(asrSpans.size());
+    const int window = 16000 * 20;
+    int off = asrOff;
+    int n = std::min(window, (int)asrPcm.size() - off);
+    float origin = off / 16000.0f;
+    previewStatus = std::string("Transcribing ") + TrackLabel(c.track) + " " + std::to_string((int)origin) + "s";
     std::vector<AsrSeg> part;
     std::string err;
-    if (n >= 1600 && !AsrTranscribeChunk(asrPcm.data() + a, n, origin, asrLang, part, err)) {
+    if (!AsrTranscribeChunk(asrPcm.data() + off, n, origin, asrLang, part, err)) {
         asrOn = false;
+        asrRead.Close();
         AsrClose();
         previewStatus = err;
         return;
     }
-    std::string joined;
     for (const AsrSeg& s : part) {
         if (s.text.empty()) continue;
-        if (!joined.empty() && joined.back() != ' ') joined += " ";
-        joined += s.text;
+        float t0 = asrBase + s.start / asrSpeed;
+        float t1 = asrBase + s.end / asrSpeed;
+        SplitTimedText(t0, std::max(t0 + 0.25f, t1), s.text, asrSegs);
     }
-    if (!joined.empty()) SplitTimedText(origin, origin + spanDur, joined, asrSegs);
-    else AsrLog("span produced no words");
-    asrSpanPos++;
+    if (part.empty()) AsrLog("window produced no words");
+    float covered = 0.0f;
+    if (!part.empty()) covered = part.back().end - origin;
+    float span = n / 16000.0f;
+    int advance = n;
+    if (!part.empty() && covered + 0.8f < span) {
+        int from = off + std::max(0, (int)(covered * 16000.0f));
+        double tail = 0;
+        int cnt = 0;
+        for (int i = from; i < off + n && i < (int)asrPcm.size(); i++) { tail += (double)asrPcm[i] * asrPcm[i]; cnt++; }
+        if (cnt > 0 && tail / cnt > 0.00004) {
+            advance = std::max(16000, (int)(covered * 16000.0f));
+            if (advance > n) advance = n;
+            AsrLog("model stopped early, continuing");
+        }
+    }
+    if (advance < 1) advance = 1;
+    asrOff += advance;
 }
 
 void QueueAudioBlock(double timelineTime, int sampleCount) {
@@ -4389,7 +4582,7 @@ int main(int argc, char* argv[]) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
-    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 44",
+    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 45",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900,
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!window) { SDL_Quit(); return 1; }
