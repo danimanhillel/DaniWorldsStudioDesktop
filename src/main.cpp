@@ -201,7 +201,9 @@ std::vector<float> asrPcm;
 std::vector<AsrSeg> asrSegs;
 std::vector<int> asrList;
 int asrListPos = 0;
-int asrOff = 0;
+std::vector<std::pair<int, int>> asrSpans;
+int asrSpanPos = 0;
+bool asrSpansReady = false;
 float asrBase = 0;
 bool requestExport = false;
 int mediaMenuIndex = -1;
@@ -1010,6 +1012,82 @@ static const char* TrackLabel(int track) {
     return names[track];
 }
 
+static void BuildSpeechSpans(const std::vector<float>& pcm, std::vector<std::pair<int, int>>& spans) {
+    spans.clear();
+    const int hop = 1600;
+    const float thresh = 0.01f;
+    int speechStart = -1;
+    int lastSpeech = -1;
+    auto closeSpan = [&](int a, int b) {
+        if (b - a < 1600 * 3) return;
+        const int piece = 16000 * 4;
+        int p = a;
+        while (p < b) {
+            int e = std::min(b, p + piece);
+            if (b - e < 16000) e = b;
+            spans.push_back({p, e});
+            if (e <= p) break;
+            p = e;
+        }
+    };
+    for (int i = 0; i + hop <= (int)pcm.size(); i += hop) {
+        double energy = 0;
+        for (int k = 0; k < hop; k++) energy += (double)pcm[i + k] * pcm[i + k];
+        float rms = std::sqrt((float)(energy / hop));
+        if (rms >= thresh) {
+            if (speechStart < 0) speechStart = i;
+            lastSpeech = i + hop;
+        } else if (speechStart >= 0 && i - lastSpeech > 16000 * 0.45) {
+            closeSpan(speechStart, lastSpeech);
+            speechStart = -1;
+        }
+    }
+    if (speechStart >= 0) closeSpan(speechStart, std::max(lastSpeech, speechStart + hop));
+}
+
+static void SplitTimedText(float start, float end, const std::string& text, std::vector<AsrSeg>& out) {
+    std::vector<std::string> bits;
+    std::string cur;
+    for (size_t i = 0; i < text.size();) {
+        unsigned char c = (unsigned char)text[i];
+        int need = c < 0x80 ? 1 : ((c & 0xE0) == 0xC0 ? 2 : ((c & 0xF0) == 0xE0 ? 3 : 4));
+        if (need < 1 || i + (size_t)need > text.size()) need = 1;
+        cur.append(text, i, (size_t)need);
+        i += (size_t)need;
+        bool brk = c == '.' || c == '!' || c == '?' || c == '\n';
+        if (brk && cur.size() > 1) {
+            size_t a = 0;
+            while (a < cur.size() && cur[a] == ' ') a++;
+            size_t b = cur.size();
+            while (b > a && (cur[b - 1] == ' ' || cur[b - 1] == '\n')) b--;
+            if (b > a) bits.push_back(cur.substr(a, b - a));
+            cur.clear();
+        }
+    }
+    if (!cur.empty()) {
+        size_t a = 0;
+        while (a < cur.size() && cur[a] == ' ') a++;
+        size_t b = cur.size();
+        while (b > a && cur[b - 1] == ' ') b--;
+        if (b > a) bits.push_back(cur.substr(a, b - a));
+    }
+    if (bits.empty()) return;
+    float dur = std::max(0.25f, end - start);
+    int weight = 0;
+    for (const auto& bit : bits) weight += std::max(1, (int)bit.size());
+    float t = start;
+    for (size_t i = 0; i < bits.size(); i++) {
+        float d = dur * (float)std::max(1, (int)bits[i].size()) / (float)weight;
+        if (i + 1 == bits.size()) d = std::max(0.25f, end - t);
+        AsrSeg s;
+        s.start = t;
+        s.end = t + std::max(0.25f, d);
+        s.text = bits[i];
+        out.push_back(s);
+        t = s.end;
+    }
+}
+
 static void AsrPump() {
     if (!asrOn) return;
     if (asrPhase == 0) {
@@ -1031,7 +1109,9 @@ static void AsrPump() {
         asrSegs.clear();
         asrCursor = 0;
         asrChunk = 0;
-        asrOff = 0;
+        asrSpans.clear();
+        asrSpanPos = 0;
+        asrSpansReady = false;
         if (asrList.empty()) {
             asrOn = false;
             AsrClose();
@@ -1064,7 +1144,9 @@ static void AsrPump() {
         if (asrPcm.empty()) asrCursor = c.startTime;
         if (asrCursor >= c.startTime + c.duration) {
             asrPhase = 2;
-            asrOff = 0;
+            asrSpans.clear();
+            asrSpanPos = 0;
+            asrSpansReady = false;
             asrBase = c.startTime;
             previewStatus = std::string("Transcribing ") + TrackLabel(c.track);
             return;
@@ -1084,46 +1166,49 @@ static void AsrPump() {
         previewStatus = std::string("Reading ") + TrackLabel(c.track) + " " + std::to_string(pct) + "%";
         return;
     }
-    const int window = 16000 * 20;
-    int off = asrOff;
-    if (off >= (int)asrPcm.size()) {
+    if (!asrSpansReady) {
+        BuildSpeechSpans(asrPcm, asrSpans);
+        asrSpanPos = 0;
+        asrSpansReady = true;
+        if (asrSpans.empty()) {
+            asrListPos++;
+            asrPcm.clear();
+            asrPhase = 1;
+            asrSpansReady = false;
+        }
+        return;
+    }
+    if (asrSpanPos >= (int)asrSpans.size()) {
         asrListPos++;
         asrPcm.clear();
         asrPhase = 1;
-        asrOff = 0;
+        asrSpansReady = false;
         return;
     }
-    int n = std::min(window, (int)asrPcm.size() - off);
-    double energy = 0;
-    for (int i = 0; i < n; i++) energy += (double)asrPcm[off + i] * asrPcm[off + i];
-    if (n > 0 && energy / n < 0.000004) {
-        asrOff += n;
-        return;
-    }
+    int a = asrSpans[asrSpanPos].first;
+    int b = asrSpans[asrSpanPos].second;
+    if (a < 0) a = 0;
+    if (b > (int)asrPcm.size()) b = (int)asrPcm.size();
+    int n = b - a;
+    float origin = asrBase + a / 16000.0f;
+    float spanDur = std::max(0.25f, n / 16000.0f);
+    previewStatus = std::string("Transcribing ") + TrackLabel(c.track) + " " + std::to_string(asrSpanPos + 1) + "/" + std::to_string(asrSpans.size());
     std::vector<AsrSeg> part;
     std::string err;
-    float origin = asrBase + off / 16000.0f;
-    previewStatus = std::string("Transcribing ") + TrackLabel(c.track) + " " + std::to_string((int)origin) + "s";
-    if (!AsrTranscribeChunk(asrPcm.data() + off, n, origin, asrLang, part, err)) {
+    if (n >= 1600 && !AsrTranscribeChunk(asrPcm.data() + a, n, origin, asrLang, part, err)) {
         asrOn = false;
         AsrClose();
         previewStatus = err;
         return;
     }
-    asrSegs.insert(asrSegs.end(), part.begin(), part.end());
-    float covered = 0.0f;
-    if (!part.empty()) covered = part.back().end - origin;
-    float span = n / 16000.0f;
-    int advance = n;
-    if (!part.empty() && covered + 0.8f < span) {
-        advance = (int)(covered * 16000.0f);
-        if (advance < 16000) advance = 16000;
-        if (advance > n) advance = n;
-    } else if (part.empty()) {
-        advance = energy / std::max(1, n) > 0.00002 ? std::min(n, 16000 * 5) : n;
+    std::string joined;
+    for (const AsrSeg& s : part) {
+        if (s.text.empty()) continue;
+        if (!joined.empty() && joined.back() != ' ') joined += " ";
+        joined += s.text;
     }
-    if (advance < 1) advance = 1;
-    asrOff += advance;
+    if (!joined.empty()) SplitTimedText(origin, origin + spanDur, joined, asrSegs);
+    asrSpanPos++;
 }
 
 void QueueAudioBlock(double timelineTime, int sampleCount) {
@@ -4227,7 +4312,7 @@ int main(int argc, char* argv[]) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
-    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 41",
+    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 42",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900,
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!window) { SDL_Quit(); return 1; }
