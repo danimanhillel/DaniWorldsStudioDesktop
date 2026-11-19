@@ -674,36 +674,58 @@ void PullSamples(AudioSrc& a, double mediaTime, int count, int16_t* dst) {
         int64_t ts = (int64_t)(mediaTime / av_q2d(a.fmt->streams[a.stream]->time_base));
         av_seek_frame(a.fmt, a.stream, ts, AVSEEK_FLAG_BACKWARD);
         avcodec_flush_buffers(a.codec);
+        if (a.swr) swr_close(a.swr);
+        if (a.swr) swr_init(a.swr);
         a.fifo.clear();
         a.nextTime = -1;
     }
-    int spins = 0;
-    while ((int)a.fifo.size() < count * 2 && spins < 48) {
-        spins++;
-        if (av_read_frame(a.fmt, a.packet) < 0) break;
-        if (a.packet->stream_index == a.stream && avcodec_send_packet(a.codec, a.packet) == 0) {
-            while (avcodec_receive_frame(a.codec, a.frame) == 0) {
-                int outCount = (int)av_rescale_rnd(swr_get_delay(a.swr, a.codec->sample_rate) + a.frame->nb_samples,
-                                                    48000, a.codec->sample_rate, AV_ROUND_UP);
-                if (outCount < 1) outCount = 1;
-                std::vector<int16_t> tmp((size_t)outCount * 2 + 8);
-                uint8_t* outPlanes[1] = { (uint8_t*)tmp.data() };
-                int got = swr_convert(a.swr, outPlanes, outCount, (const uint8_t**)a.frame->data, a.frame->nb_samples);
-                if (got <= 0) continue;
-                double pts = mediaTime;
-                if (a.frame->best_effort_timestamp != AV_NOPTS_VALUE)
-                    pts = a.frame->best_effort_timestamp * av_q2d(a.fmt->streams[a.stream]->time_base);
-                int start = 0;
-                if (a.nextTime < 0) {
-                    int drop = (int)((mediaTime - pts) * 48000.0);
-                    if (drop >= got) { a.nextTime = -1; continue; }
-                    if (drop > 0) start = drop;
-                    a.nextTime = mediaTime;
-                }
-                a.fifo.insert(a.fifo.end(), tmp.begin() + start * 2, tmp.begin() + got * 2);
+    auto takeFrames = [&]() {
+        while (avcodec_receive_frame(a.codec, a.frame) == 0) {
+            int outCount = (int)av_rescale_rnd(swr_get_delay(a.swr, a.codec->sample_rate) + a.frame->nb_samples,
+                                                48000, a.codec->sample_rate, AV_ROUND_UP);
+            if (outCount < 1) outCount = 1;
+            std::vector<int16_t> tmp((size_t)outCount * 2 + 8);
+            uint8_t* outPlanes[1] = { (uint8_t*)tmp.data() };
+            int got = swr_convert(a.swr, outPlanes, outCount, (const uint8_t**)a.frame->data, a.frame->nb_samples);
+            if (got <= 0) continue;
+            double pts = mediaTime;
+            if (a.frame->best_effort_timestamp != AV_NOPTS_VALUE)
+                pts = a.frame->best_effort_timestamp * av_q2d(a.fmt->streams[a.stream]->time_base);
+            int start = 0;
+            if (a.nextTime < 0) {
+                int drop = (int)((mediaTime - pts) * 48000.0);
+                if (drop >= got) continue;
+                if (drop > 0) start = drop;
+                a.nextTime = mediaTime;
             }
+            a.fifo.insert(a.fifo.end(), tmp.begin() + (size_t)start * 2, tmp.begin() + (size_t)got * 2);
+        }
+    };
+    int spins = 0;
+    bool eof = false;
+    while ((int)a.fifo.size() < count * 2 && spins < 20000) {
+        spins++;
+        takeFrames();
+        if ((int)a.fifo.size() >= count * 2) break;
+        if (av_read_frame(a.fmt, a.packet) < 0) { eof = true; break; }
+        if (a.packet->stream_index == a.stream) {
+            int send = avcodec_send_packet(a.codec, a.packet);
+            if (send == AVERROR(EAGAIN)) {
+                takeFrames();
+                send = avcodec_send_packet(a.codec, a.packet);
+            }
+            if (send == 0) takeFrames();
         }
         av_packet_unref(a.packet);
+    }
+    if (eof && (int)a.fifo.size() < count * 2) {
+        avcodec_send_packet(a.codec, nullptr);
+        takeFrames();
+        int outCount = 48000;
+        std::vector<int16_t> tmp((size_t)outCount * 2 + 8);
+        uint8_t* outPlanes[1] = { (uint8_t*)tmp.data() };
+        int got = swr_convert(a.swr, outPlanes, outCount, nullptr, 0);
+        if (got > 0) a.fifo.insert(a.fifo.end(), tmp.begin(), tmp.begin() + (size_t)got * 2);
     }
     int have = (int)a.fifo.size() / 2;
     int n = std::min(count, have);
@@ -4367,7 +4389,7 @@ int main(int argc, char* argv[]) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
-    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 43",
+    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 44",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900,
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!window) { SDL_Quit(); return 1; }
