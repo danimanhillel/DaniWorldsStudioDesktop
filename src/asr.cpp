@@ -446,7 +446,7 @@ bool AsrTranscribeChunk(const float* pcm, int samples, float timeOffset, int lan
     gApi->ReleaseValue(encOut);
 
     int lang = language == 1 ? kEn : kHe;
-    std::vector<int64_t> ids = {kSot, lang, kTranscribe, kNoTimestamps};
+    std::vector<int64_t> ids = {kSot, lang, kTranscribe};
     std::string text;
     float segStart = -1.0f;
     int lastStamp = kTimestamp;
