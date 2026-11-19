@@ -2536,6 +2536,7 @@ static void RenderFloatingOnTop() {
     for (int i = 0; i < ctx->Windows.Size; i++) {
         ImGuiWindow* w = ctx->Windows[i];
         if (!w || !w->Active || w->Hidden || w->DrawList->VtxBuffer.Size <= 0) continue;
+        if (w->Flags & ImGuiWindowFlags_ChildWindow) continue;
         if (strcmp(w->Name, "Editor") == 0) continue;
         data.CmdLists.push_back(w->DrawList);
         data.TotalVtxCount += w->DrawList->VtxBuffer.Size;
@@ -4716,7 +4717,7 @@ int main(int argc, char* argv[]) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
-    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 48",
+    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 49",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900,
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!window) { SDL_Quit(); return 1; }
