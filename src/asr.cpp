@@ -167,7 +167,7 @@ bool LoadPieces(const std::wstring& path) {
         if (sp == std::string::npos) continue;
         int id = atoi(line.c_str() + sp + 1);
         if (id < 0 || id >= (int)gPieces.size()) continue;
-        gPieces[id] = PieceToText(B64(line.substr(0, sp)));
+        gPieces[id] = B64(line.substr(0, sp));
     }
     fclose(f);
     return !gPieces[1].empty() || !gPieces[0].empty();
@@ -411,6 +411,20 @@ bool AsrTranscribeChunk(const float* pcm, int samples, float timeOffset, int lan
     float segStart = -1.0f;
     int lastStamp = kTimestamp;
     auto push = [&](float endAt) {
+        std::string clean;
+        const unsigned char* p = (const unsigned char*)text.data();
+        size_t n = text.size();
+        for (size_t i = 0; i < n;) {
+            unsigned char c = p[i];
+            int need = c < 0x80 ? 1 : ((c & 0xE0) == 0xC0 ? 2 : ((c & 0xF0) == 0xE0 ? 3 : ((c & 0xF8) == 0xF0 ? 4 : 0)));
+            if (need < 1 || i + (size_t)need > n) { if (need < 1) i++; else break; continue; }
+            bool ok = true;
+            for (int k = 1; k < need; k++) if ((p[i + k] & 0xC0) != 0x80) ok = false;
+            if (!ok) { i++; continue; }
+            clean.append(text, i, (size_t)need);
+            i += (size_t)need;
+        }
+        text.swap(clean);
         while (!text.empty() && (text.back() == ' ' || text.back() == '\n')) text.pop_back();
         size_t b = 0;
         while (b < text.size() && text[b] == ' ') b++;
@@ -514,7 +528,7 @@ bool AsrTranscribeChunk(const float* pcm, int samples, float timeOffset, int lan
         }
     }
     float chunkEnd = samples > 0 ? std::min(30.0f, samples / 16000.0f) : 30.0f;
-    push(chunkEnd);
+    if (segStart >= 0.0f && !text.empty()) push(std::min(chunkEnd, segStart + 3.0f));
     gApi->ReleaseMemoryInfo(mem);
     return true;
 }
