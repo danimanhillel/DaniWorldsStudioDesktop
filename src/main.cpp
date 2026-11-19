@@ -1019,6 +1019,7 @@ struct ExportSession {
     bool ReadOne(ExpDec& d);
     bool EnsureFrame(int mediaId, double mediaTime);
     bool HoldFrame(ExpDec& d, double want, std::vector<uint8_t>& dst, int& rw, int& rh);
+    bool HoldFrameView(ExpDec& d, double want, const uint8_t*& data, int& rw, int& rh);
     bool RifePair(int mediaId, double mediaT, float speed, std::vector<uint8_t>& out, int& rw, int& rh);
     void BlitToCanvas(int idx);
 };
@@ -1248,6 +1249,40 @@ bool ExportSession::HoldFrame(ExpDec& d, double want, std::vector<uint8_t>& dst,
     return true;
 }
 
+bool ExportSession::HoldFrameView(ExpDec& d, double want, const uint8_t*& data, int& rw, int& rh) {
+    double tol = 0.45 / std::max(1.0, d.srcFps);
+    int best = -1;
+    double bestd = 1e9;
+    for (int i = 0; i < 2; i++) {
+        if (d.holdPts[i] < 0 || d.hold[i].empty()) continue;
+        double dd = std::fabs(d.holdPts[i] - want);
+        if (dd < bestd) { bestd = dd; best = i; }
+    }
+    if (best >= 0 && bestd <= tol) {
+        data = d.hold[best].data();
+        rw = d.holdW;
+        rh = d.holdH;
+        return data && rw > 0;
+    }
+    if (d.lastPts >= 0 && want + 0.012 < d.lastPts && d.fmt && d.ctx && d.stream >= 0) {
+        int64_t ts = (int64_t)(want / av_q2d(d.fmt->streams[d.stream]->time_base));
+        av_seek_frame(d.fmt, d.stream, ts, AVSEEK_FLAG_BACKWARD);
+        avcodec_flush_buffers(d.ctx);
+        d.lastPts = -1;
+    }
+    if (!EnsureFrame(d.mediaId, want) || d.rgba.empty()) return false;
+    d.holdPts[d.holdSlot] = d.lastPts;
+    d.hold[d.holdSlot] = d.rgba;
+    d.holdW = d.rw;
+    d.holdH = d.rh;
+    int slot = d.holdSlot;
+    d.holdSlot ^= 1;
+    data = d.hold[slot].data();
+    rw = d.holdW;
+    rh = d.holdH;
+    return data != nullptr;
+}
+
 bool ExportSession::RifePair(int mediaId, double mediaT, float speed, std::vector<uint8_t>& out, int& rw, int& rh) {
     if (!rifeOn || mediaId < 0 || mediaId >= (int)media.size()) return false;
     if (media[mediaId].type == "image") return false;
@@ -1261,13 +1296,27 @@ bool ExportSession::RifePair(int mediaId, double mediaT, float speed, std::vecto
     double base = std::floor(pos);
     double frac = pos - base;
     if (frac < 0.04 || frac > 0.96) return false;
-    std::vector<uint8_t> a, b;
+    double t0 = base / d.srcFps;
+    double t1 = (base + 1.0) / d.srcFps;
+    const uint8_t* ap = nullptr;
+    const uint8_t* bp = nullptr;
     int aw = 0, ah = 0, bw = 0, bh = 0;
-    if (!HoldFrame(d, base / d.srcFps, a, aw, ah)) return false;
-    if (!HoldFrame(d, (base + 1.0) / d.srcFps, b, bw, bh)) return false;
-    if (aw != bw || ah != bh || aw < 2 || a.size() != b.size() || a.empty()) return false;
+    if (!HoldFrameView(d, t0, ap, aw, ah) || !ap) return false;
+    bool haveB = false;
+    double tol = 0.45 / d.srcFps;
+    for (int i = 0; i < 2; i++) {
+        if (d.holdPts[i] >= 0 && std::fabs(d.holdPts[i] - t1) <= tol && !d.hold[i].empty()) haveB = true;
+    }
+    std::vector<uint8_t> keepA;
+    const uint8_t* useA = ap;
+    if (!haveB) {
+        keepA.assign(ap, ap + (size_t)aw * (size_t)ah * 4);
+        useA = keepA.data();
+    }
+    if (!HoldFrameView(d, t1, bp, bw, bh) || !bp) return false;
+    if (aw != bw || ah != bh || aw < 2) return false;
     out.assign((size_t)aw * (size_t)ah * 4, 255);
-    if (!RifeRun(a.data(), b.data(), aw, ah, (float)frac, out.data())) {
+    if (!RifeRun(useA, bp, aw, ah, (float)frac, out.data())) {
         if (++rifeFails > 2) {
             rifeOn = false;
             previewStatus = "RIFE stopped. Export continues with the original frames.";
@@ -2058,7 +2107,8 @@ void ExportSession::Step() {
     frameIndex++;
     int pct = total ? (frameIndex * 100) / total : 0;
     char buf[160];
-    snprintf(buf, sizeof(buf), "Export %d%%  (%d/%d)  %dx%d%s", pct, frameIndex, total, w, h, rifeOn ? "  RIFE" : "");
+    snprintf(buf, sizeof(buf), "Export %d%%  (%d/%d)  %dx%d%s", pct, frameIndex, total, w, h,
+             rifeOn ? (RifeProbe().cuda ? "  RIFE GPU" : "  RIFE CPU") : "");
     status = buf;
     previewStatus = status;
 }
@@ -3671,7 +3721,7 @@ int main(int argc, char* argv[]) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
-    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 29",
+    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 30",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900,
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!window) { SDL_Quit(); return 1; }
@@ -4696,11 +4746,13 @@ int main(int argc, char* argv[]) {
             ImGui::TextUnformatted(gExport.status.c_str());
             if (ImGui::Button("Cancel export")) gExport.Cancel();
             ImGui::End();
-            int budget = 2;
-            long pix = (long)gExport.w * (long)gExport.h;
-            if (pix >= 3840L * 2160L) budget = 1;
-            else if (pix <= 1280L * 720L) budget = 4;
-            for (int s = 0; s < budget && gExport.active; s++) gExport.Step();
+            Uint32 slice = SDL_GetTicks();
+            int guard = 0;
+            int limit = gExport.rifeOn ? 8 : (gExport.w * gExport.h >= 3840 * 2160 ? 1 : (gExport.w * gExport.h <= 1280 * 720 ? 4 : 2));
+            do {
+                gExport.Step();
+                guard++;
+            } while (gExport.active && guard < limit && (!gExport.rifeOn || SDL_GetTicks() - slice < 70));
         } else {
             SyncPreview(topClip, io.DeltaTime);
             SyncGreen();
