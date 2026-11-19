@@ -201,6 +201,7 @@ std::vector<float> asrPcm;
 std::vector<AsrSeg> asrSegs;
 std::vector<int> asrList;
 int asrListPos = 0;
+int asrOff = 0;
 float asrBase = 0;
 bool requestExport = false;
 int mediaMenuIndex = -1;
@@ -1030,6 +1031,7 @@ static void AsrPump() {
         asrSegs.clear();
         asrCursor = 0;
         asrChunk = 0;
+        asrOff = 0;
         if (asrList.empty()) {
             asrOn = false;
             AsrClose();
@@ -1062,7 +1064,7 @@ static void AsrPump() {
         if (asrPcm.empty()) asrCursor = c.startTime;
         if (asrCursor >= c.startTime + c.duration) {
             asrPhase = 2;
-            asrChunk = 0;
+            asrOff = 0;
             asrBase = c.startTime;
             previewStatus = std::string("Transcribing ") + TrackLabel(c.track);
             return;
@@ -1082,33 +1084,46 @@ static void AsrPump() {
         previewStatus = std::string("Reading ") + TrackLabel(c.track) + " " + std::to_string(pct) + "%";
         return;
     }
-    const int chunk = 16000 * 30;
-    int off = asrChunk * chunk;
+    const int window = 16000 * 20;
+    int off = asrOff;
     if (off >= (int)asrPcm.size()) {
         asrListPos++;
         asrPcm.clear();
         asrPhase = 1;
-        asrChunk = 0;
+        asrOff = 0;
         return;
     }
-    int n = std::min(chunk, (int)asrPcm.size() - off);
+    int n = std::min(window, (int)asrPcm.size() - off);
     double energy = 0;
     for (int i = 0; i < n; i++) energy += (double)asrPcm[off + i] * asrPcm[off + i];
-    if (n > 0 && energy / n < 0.00002) {
-        asrChunk++;
+    if (n > 0 && energy / n < 0.000004) {
+        asrOff += n;
         return;
     }
     std::vector<AsrSeg> part;
     std::string err;
-    previewStatus = std::string("Transcribing ") + TrackLabel(c.track) + " " + std::to_string((int)(asrBase + off / 16000.0f)) + "s";
-    if (!AsrTranscribeChunk(asrPcm.data() + off, n, asrBase + off / 16000.0f, asrLang, part, err)) {
+    float origin = asrBase + off / 16000.0f;
+    previewStatus = std::string("Transcribing ") + TrackLabel(c.track) + " " + std::to_string((int)origin) + "s";
+    if (!AsrTranscribeChunk(asrPcm.data() + off, n, origin, asrLang, part, err)) {
         asrOn = false;
         AsrClose();
         previewStatus = err;
         return;
     }
     asrSegs.insert(asrSegs.end(), part.begin(), part.end());
-    asrChunk++;
+    float covered = 0.0f;
+    if (!part.empty()) covered = part.back().end - origin;
+    float span = n / 16000.0f;
+    int advance = n;
+    if (!part.empty() && covered + 0.8f < span) {
+        advance = (int)(covered * 16000.0f);
+        if (advance < 16000) advance = 16000;
+        if (advance > n) advance = n;
+    } else if (part.empty()) {
+        advance = energy / std::max(1, n) > 0.00002 ? std::min(n, 16000 * 5) : n;
+    }
+    if (advance < 1) advance = 1;
+    asrOff += advance;
 }
 
 void QueueAudioBlock(double timelineTime, int sampleCount) {
@@ -4212,7 +4227,7 @@ int main(int argc, char* argv[]) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
-    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 40",
+    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 41",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900,
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!window) { SDL_Quit(); return 1; }
