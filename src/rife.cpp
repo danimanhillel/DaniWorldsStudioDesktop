@@ -184,13 +184,19 @@ bool PreloadCuda(const std::wstring& dir, std::string& why) {
     std::sort(items.begin(), items.end(), [](const Item& a, const Item& c) { return a.rank < c.rank; });
     bool sawCublas = false;
     bool cublasFile = false;
+    HMODULE zlib = LoadLibraryW((dir + L"zlibwapi.dll").c_str());
+    if (zlib) {
+        gKeep.push_back(zlib);
+        Log(dir, "load zlibwapi.dll ok");
+    } else Log(dir, "missing zlibwapi.dll next to the program. cuDNN needs this file.");
     for (const auto& b : bins) {
         if (b.find(L"\\lib\\x64") != std::wstring::npos) { SetDllDirectoryW(b.c_str()); break; }
     }
     for (int pass = 0; pass < 2; pass++) {
         for (const auto& item : items) {
             if (pass == 0 && item.rank >= 6) continue;
-            HMODULE m = LoadLibraryW(item.path.c_str());
+            HMODULE m = LoadLibraryExW(item.path.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+            if (!m) m = LoadLibraryW(item.path.c_str());
             if (m) gKeep.push_back(m);
             std::wstring leaf = item.path.substr(item.path.find_last_of(L"\\/") + 1);
             if (_wcsicmp(leaf.c_str(), L"cublas64_13.dll") == 0 || _wcsicmp(leaf.c_str(), L"cudnn64_9.dll") == 0) {
@@ -220,7 +226,7 @@ bool PreloadCuda(const std::wstring& dir, std::string& why) {
         why = "CUDA provider did not load (Windows error " + std::to_string(e) + "). See rife.log. ";
         if (!cublasFile) why += "cublas64_13.dll was not found.";
         else if (!sawCublas) why += "cublas64_13.dll is missing a dependency.";
-        else why += "The CUDA provider failed to initialize. cuDNN 13.5 must load, not the 12.9 build.";
+        else why += "cudnn_cnn64_9.dll did not load. Copy zlibwapi.dll next to the program.";
         Log(dir, why);
         SetDllDirectoryW(dir.c_str());
         return false;
