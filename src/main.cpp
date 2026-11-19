@@ -1005,6 +1005,7 @@ struct ExportSession {
     std::vector<uint8_t> canvas;
     std::vector<int16_t> afifo;
     bool rifeOn = false;
+    int rifeFails = 0;
 
     void CloseAll();
     bool Begin(const std::string& outPath, int width, int height, int framesPerSec, bool useRife);
@@ -1071,6 +1072,7 @@ void ExportSession::CloseAll() {
     headerWritten = false;
     if (rifeOn) RifeShutdown();
     rifeOn = false;
+    rifeFails = 0;
 }
 
 void ExportSession::Fail(const char* msg) {
@@ -1265,7 +1267,14 @@ bool ExportSession::RifePair(int mediaId, double mediaT, float speed, std::vecto
     if (!HoldFrame(d, (base + 1.0) / d.srcFps, b, bw, bh)) return false;
     if (aw != bw || ah != bh || aw < 2 || a.size() != b.size() || a.empty()) return false;
     out.assign((size_t)aw * (size_t)ah * 4, 255);
-    if (!RifeRun(a.data(), b.data(), aw, ah, (float)frac, out.data())) return false;
+    if (!RifeRun(a.data(), b.data(), aw, ah, (float)frac, out.data())) {
+        if (++rifeFails > 2) {
+            rifeOn = false;
+            previewStatus = "RIFE stopped. Export continues with the original frames.";
+        }
+        return false;
+    }
+    rifeFails = 0;
     rw = aw;
     rh = ah;
     return true;
