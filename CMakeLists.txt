@@ -54,6 +54,7 @@ endif()
 add_executable(DaniWorldsStudioDesktop
     src/main.cpp
     src/effects.cpp
+    src/rife.cpp
     ${imgui_SOURCE_DIR}/imgui.cpp
     ${imgui_SOURCE_DIR}/imgui_demo.cpp
     ${imgui_SOURCE_DIR}/imgui_draw.cpp
