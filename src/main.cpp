@@ -3538,15 +3538,15 @@ void BlitVideo(ImVec2 p0, ImVec2 p1, GLuint tex, int vw, int vh, ImVec2 clip0, I
     float areaW = p1.x - p0.x;
     float areaH = p1.y - p0.y;
     if (areaW < 4 || areaH < 4) return;
-    float aspect = (float)vw / (float)vh;
+    float picAspect = (float)vw / (float)vh;
     float areaAspect = areaW / areaH;
     ImVec2 a = p0, b = p1;
-    if (aspect > areaAspect) {
-        float h = areaW / aspect;
+    if (picAspect > areaAspect) {
+        float h = areaW / picAspect;
         float off = (areaH - h) * 0.5f;
         a.y += off; b.y -= off;
     } else {
-        float w = areaH * aspect;
+        float w = areaH * picAspect;
         float off = (areaW - w) * 0.5f;
         a.x += off; b.x -= off;
     }
@@ -4906,7 +4906,7 @@ int main(int argc, char* argv[]) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
-    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 53",
+    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 54",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900,
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!window) { SDL_Quit(); return 1; }
