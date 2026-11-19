@@ -137,55 +137,86 @@ bool PreloadCuda(const std::wstring& dir, std::string& why) {
         FindClose(h);
     }
     bins.insert(bins.end(), nested.begin(), nested.end());
+    auto addDir = [](std::vector<std::wstring>& dest, const std::wstring& p) {
+        DWORD a = GetFileAttributesW(p.c_str());
+        if (a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY)) dest.push_back(p);
+    };
+    std::vector<std::wstring> extra;
+    for (const auto& b : bins) {
+        addDir(extra, b + L"\\x64");
+        if (b.size() > 4 && _wcsicmp(b.c_str() + b.size() - 4, L"\\bin") == 0)
+            addDir(extra, b.substr(0, b.size() - 4) + L"\\lib\\x64");
+    }
+    bins.insert(bins.end(), extra.begin(), extra.end());
     Log(dir, "search folders:");
     for (const auto& b : bins) Log(dir, "  " + Narrow(b));
-    Log(dir, "matching libraries:");
-    for (const auto& b : bins) LogMatchingDlls(dir, b);
-    if (const wchar_t* env = _wgetenv(L"PATH")) {
-        std::wstring path = env;
-        size_t start = 0;
-        while (start < path.size()) {
-            size_t semi = path.find(L';', start);
-            if (semi == std::wstring::npos) semi = path.size();
-            std::wstring one = path.substr(start, semi - start);
-            if (!one.empty()) bins.push_back(one);
-            start = semi + 1;
-        }
+    Log(dir, "libraries:");
+    for (const auto& b : bins) {
+        if (b == dir) { LogMatchingDlls(dir, b); continue; }
+        WIN32_FIND_DATAW fd{};
+        HANDLE h = FindFirstFileW((b + L"\\*.dll").c_str(), &fd);
+        if (h == INVALID_HANDLE_VALUE) continue;
+        do Log(dir, "  dll " + Narrow(b + L"\\" + fd.cFileName));
+        while (FindNextFileW(h, &fd));
+        FindClose(h);
     }
-    const wchar_t* names[] = {
-        L"cudart64_13.dll", L"cublas64_13.dll", L"cublasLt64_13.dll",
-        L"cufft64_12.dll", L"cufft64_13.dll", L"nvrtc64_130_0.dll", L"nvrtc64_131_0.dll",
-        L"cudnn64_9.dll", L"cudnn_ops64_9.dll", L"cudnn_cnn64_9.dll", L"cudnn_adv64_9.dll",
-        L"cudnn_graph64_9.dll", L"cudnn_engines_precompiled64_9.dll",
-        L"cudnn_engines_runtime_compiled64_9.dll", L"cudnn_heuristic64_9.dll",
-        L"zlibwapi.dll", L"onnxruntime_providers_shared.dll"
+    auto rankOf = [](std::wstring n) {
+        for (wchar_t& c : n) c = (wchar_t)towlower(c);
+        if (n.find(L"nvjit") != std::wstring::npos) return 0;
+        if (n.find(L"cudart") != std::wstring::npos) return 1;
+        if (n.find(L"cublaslt") != std::wstring::npos) return 2;
+        if (n.find(L"cudnn") != std::wstring::npos) return 3;
+        if (n.find(L"cublas") != std::wstring::npos) return 6;
+        return 4;
     };
-    bool sawCublas = false;
-    for (const wchar_t* name : names) {
-        bool found = false;
-        for (const auto& b : bins) {
-            std::wstring p = b + L"\\" + name;
-            if (!FileExists(p)) continue;
-            found = true;
-            HMODULE m = LoadLibraryW(p.c_str());
-            if (m) gKeep.push_back(m);
-            Log(dir, std::string("load ") + Narrow(p) + (m ? " ok" : " FAILED error " + std::to_string(GetLastError())));
-            if (wcscmp(name, L"cublas64_13.dll") == 0) sawCublas = m != nullptr;
-            break;
-        }
-        if (!found) Log(dir, std::string("missing ") + Narrow(name));
+    struct Item { std::wstring path; int rank; };
+    std::vector<Item> items;
+    for (const auto& b : bins) {
+        if (b == dir) continue;
+        WIN32_FIND_DATAW fd{};
+        HANDLE h = FindFirstFileW((b + L"\\*.dll").c_str(), &fd);
+        if (h == INVALID_HANDLE_VALUE) continue;
+        do items.push_back({b + L"\\" + fd.cFileName, rankOf(fd.cFileName)});
+        while (FindNextFileW(h, &fd));
+        FindClose(h);
     }
+    std::sort(items.begin(), items.end(), [](const Item& a, const Item& c) { return a.rank < c.rank; });
+    bool sawCublas = false;
+    bool cublasFile = false;
+    for (const auto& b : bins) {
+        if (b.find(L"\\lib\\x64") != std::wstring::npos) { SetDllDirectoryW(b.c_str()); break; }
+    }
+    for (int pass = 0; pass < 2; pass++) {
+        for (const auto& item : items) {
+            if (pass == 0 && item.rank >= 6) continue;
+            HMODULE m = LoadLibraryW(item.path.c_str());
+            if (m) gKeep.push_back(m);
+            std::wstring leaf = item.path.substr(item.path.find_last_of(L"\\/") + 1);
+            if (_wcsicmp(leaf.c_str(), L"cublas64_13.dll") == 0) {
+                cublasFile = true;
+                sawCublas = m != nullptr;
+                Log(dir, std::string("load ") + Narrow(item.path) + (m ? " ok" : " FAILED error " + std::to_string(GetLastError())));
+            } else if (!m && pass == 1) {
+                Log(dir, std::string("load ") + Narrow(item.path) + " FAILED error " + std::to_string(GetLastError()));
+            }
+        }
+    }
+    HMODULE shared = LoadLibraryW((dir + L"onnxruntime_providers_shared.dll").c_str());
+    if (shared) gKeep.push_back(shared);
     std::wstring provider = dir + L"onnxruntime_providers_cuda.dll";
     gCuda = LoadLibraryW(provider.c_str());
     if (!gCuda) {
         DWORD e = GetLastError();
         Log(dir, "load " + Narrow(provider) + " FAILED error " + std::to_string(e));
         why = "CUDA provider did not load (Windows error " + std::to_string(e) + "). See rife.log. ";
-        why += sawCublas ? "cuDNN 9 is probably missing." : "cublas64_13.dll was not found. Install CUDA Toolkit 13.";
+        if (!cublasFile) why += "cublas64_13.dll was not found.";
+        else if (!sawCublas) why += "cublas64_13.dll is missing a dependency. Install the CUDA 13.5 libraries.";
+        else why += "cuDNN 9 for CUDA 13 was not loaded.";
         Log(dir, why);
         return false;
     }
     Log(dir, "load " + Narrow(provider) + " ok");
+    SetDllDirectoryW(dir.c_str());
     return true;
 }
 #endif
