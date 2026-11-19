@@ -4906,7 +4906,7 @@ int main(int argc, char* argv[]) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
-    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 54",
+    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 55",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900,
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!window) { SDL_Quit(); return 1; }
@@ -5399,8 +5399,6 @@ int main(int argc, char* argv[]) {
                     SelectOnly(i);
                     gsPanelClip = i;
                     gsPanelOpen = true;
-                    contextClip = i;
-                    openClipMenu = true;
                     openedPanelThisFrame = true;
                 }
                 if (ImGui::IsMouseClicked(0)) {
@@ -5590,12 +5588,6 @@ int main(int argc, char* argv[]) {
                         contextClip = i;
                         EnsureEnvelope(clips[i]);
                         openClipMenu = true;
-                        int mid = clips[i].mediaId;
-                        if (mid >= 0 && mid < (int)media.size() && media[mid].type != "audio") {
-                            xformClip = i;
-                            xformOpen = true;
-                            openedPanelThisFrame = true;
-                        }
                         break;
                     }
                     if (ImGui::IsMouseDoubleClicked(0)) {
@@ -5832,20 +5824,8 @@ int main(int argc, char* argv[]) {
         if (ImGui::BeginPopup("clipctx")) {
             if (contextClip >= 0 && contextClip < (int)clips.size()) {
                 Clip& c = clips[contextClip];
-                bool picture = c.mediaId >= 0 && c.mediaId < (int)media.size() && media[c.mediaId].type != "audio";
-                ImGui::TextUnformatted(picture ? "Transform" : "Clip");
+                ImGui::TextUnformatted("Clip");
                 ImGui::Separator();
-                if (picture) {
-                    DrawPictureControls(c);
-                    if (c.track == kGsTrack) {
-                        ImGui::Separator();
-                        SliderTyped("Similarity", &c.keySim, 0.0f, 1.0f, "%.2f");
-                        SliderTyped("Softness", &c.keySoft, 0.0f, 1.0f, "%.2f");
-                        SliderTyped("Spill", &c.keySpill, 0.0f, 1.0f, "%.2f");
-                        SliderTyped("Opacity", &c.gsOpacity, 0.0f, 1.0f, "%.2f");
-                    }
-                    ImGui::Separator();
-                }
                 if (ImGui::MenuItem("Fade In", nullptr, &c.fadeIn)) {
                     shownLocal = -1000.0f;
 #ifdef HAVE_FFMPEG
