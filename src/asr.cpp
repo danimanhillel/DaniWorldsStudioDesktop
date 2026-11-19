@@ -369,6 +369,39 @@ void AsrClose() {
 #endif
 }
 
+#ifdef _WIN32
+static std::wstring AsrDir() {
+    wchar_t buf[MAX_PATH];
+    DWORD n = GetModuleFileNameW(nullptr, buf, MAX_PATH);
+    if (!n || n >= MAX_PATH) return L"";
+    std::wstring s(buf, buf + n);
+    size_t slash = s.find_last_of(L"\\/");
+    if (slash == std::wstring::npos) return L"";
+    return s.substr(0, slash + 1);
+}
+#endif
+
+static void AsrWrite(const std::string& line, bool truncate) {
+#ifdef _WIN32
+    FILE* f = _wfopen((AsrDir() + L"asr.log").c_str(), truncate ? L"wb" : L"ab");
+    if (!f) return;
+    fwrite(line.data(), 1, line.size(), f);
+    fputc('\n', f);
+    fclose(f);
+#else
+    (void)line;
+    (void)truncate;
+#endif
+}
+
+void AsrLogReset() {
+    AsrWrite("---- ASR decode ----", true);
+}
+
+void AsrLog(const std::string& line) {
+    AsrWrite(line, false);
+}
+
 bool AsrTranscribeChunk(const float* pcm, int samples, float timeOffset, int language, std::vector<AsrSeg>& out, std::string& err) {
     if (!gApi || !gEnc || !gDec) { err = "Whisper is not loaded"; return false; }
     std::vector<float> mel;
@@ -398,6 +431,12 @@ bool AsrTranscribeChunk(const float* pcm, int samples, float timeOffset, int lan
     if (rank >= 3) {
         gHiddenFrames = (int)dims[rank - 2];
         gHidden = (int)dims[rank - 1];
+    }
+    {
+        char shape[160];
+        snprintf(shape, sizeof(shape), "encoder samples=%d offset=%.2f rank=%d dims=%d,%d,%d,%d hidden=%dx%d",
+                 samples, timeOffset, (int)rank, (int)dims[0], (int)dims[1], (int)dims[2], (int)dims[3], gHiddenFrames, gHidden);
+        AsrLog(shape);
     }
     float* hidden = nullptr;
     gApi->GetTensorMutableData(encOut, (void**)&hidden);
@@ -516,7 +555,15 @@ bool AsrTranscribeChunk(const float* pcm, int samples, float timeOffset, int lan
             if (row[i] > bestV) { bestV = row[i]; best = i; }
         }
         gApi->ReleaseValue(logits);
-        if (best == kEot || best == kNoSpeech) break;
+        std::string piece;
+        if (best >= 0 && best < (int)gPieces.size() && best < kEot) piece = gPieces[best];
+        for (char& ch : piece) if (ch == '\n' || ch == '\r' || ch == '\t') ch = ' ';
+        const char* kind = best == kEot ? "EOT" : (best == kNoSpeech ? "NO_SPEECH" : (best >= kTimestamp ? "TIMESTAMP" : piece.c_str()));
+        AsrLog("token step=" + std::to_string(step) + " id=" + std::to_string(best) + " " + kind);
+        if (best == kEot || best == kNoSpeech) {
+            AsrLog("decoder stop at step " + std::to_string(step));
+            break;
+        }
         ids.push_back(best);
         if (best >= kTimestamp && best < kTimestamp + 1501) {
             lastStamp = best;
@@ -530,6 +577,14 @@ bool AsrTranscribeChunk(const float* pcm, int samples, float timeOffset, int lan
     }
     float chunkEnd = samples > 0 ? std::min(30.0f, samples / 16000.0f) : 30.0f;
     if (segStart >= 0.0f && !text.empty()) push(std::min(chunkEnd, segStart + 3.0f));
+    AsrLog("decoder segments=" + std::to_string(out.size()));
+    for (size_t i = 0; i < out.size(); i++) {
+        std::string one = out[i].text;
+        for (char& ch : one) if (ch == '\n' || ch == '\r') ch = ' ';
+        char head[80];
+        snprintf(head, sizeof(head), "seg %d %.2f-%.2f ", (int)i, out[i].start, out[i].end);
+        AsrLog(std::string(head) + one);
+    }
     gApi->ReleaseMemoryInfo(mem);
     return true;
 }
