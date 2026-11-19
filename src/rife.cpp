@@ -64,6 +64,67 @@ bool FileExists(const std::wstring& p) {
     DWORD a = GetFileAttributesW(p.c_str());
     return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY) == 0;
 }
+
+std::vector<HMODULE> gKeep;
+
+void AddBins(const std::wstring& pattern, const std::wstring& parent, std::vector<std::wstring>& out) {
+    WIN32_FIND_DATAW fd{};
+    HANDLE h = FindFirstFileW(pattern.c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && fd.cFileName[0] != L'.')
+            out.push_back(parent + fd.cFileName + L"\\bin");
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+}
+
+bool PreloadCuda(const std::wstring& dir, std::string& why) {
+    std::vector<std::wstring> bins{dir};
+    AddBins(L"C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v*",
+            L"C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\", bins);
+    AddBins(L"C:\\Program Files\\NVIDIA\\CUDNN\\v*",
+            L"C:\\Program Files\\NVIDIA\\CUDNN\\", bins);
+    std::vector<std::wstring> nested;
+    for (const auto& b : bins) {
+        WIN32_FIND_DATAW fd{};
+        HANDLE h = FindFirstFileW((b + L"\\*").c_str(), &fd);
+        if (h == INVALID_HANDLE_VALUE) continue;
+        do {
+            if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && fd.cFileName[0] != L'.')
+                nested.push_back(b + L"\\" + fd.cFileName);
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    bins.insert(bins.end(), nested.begin(), nested.end());
+    const wchar_t* names[] = {
+        L"cudart64_13.dll", L"cublas64_13.dll", L"cublasLt64_13.dll",
+        L"cufft64_12.dll", L"cufft64_13.dll", L"nvrtc64_130_0.dll", L"nvrtc64_131_0.dll",
+        L"cudnn64_9.dll", L"cudnn_ops64_9.dll", L"cudnn_cnn64_9.dll", L"cudnn_adv64_9.dll",
+        L"cudnn_graph64_9.dll", L"cudnn_engines_precompiled64_9.dll",
+        L"cudnn_engines_runtime_compiled64_9.dll", L"cudnn_heuristic64_9.dll",
+        L"zlibwapi.dll", L"onnxruntime_providers_shared.dll"
+    };
+    bool sawCublas = false;
+    for (const wchar_t* name : names) {
+        for (const auto& b : bins) {
+            std::wstring p = b + L"\\" + name;
+            if (!FileExists(p)) continue;
+            HMODULE m = LoadLibraryW(p.c_str());
+            if (m) gKeep.push_back(m);
+            if (wcscmp(name, L"cublas64_13.dll") == 0) sawCublas = m != nullptr;
+            break;
+        }
+    }
+    std::wstring provider = dir + L"onnxruntime_providers_cuda.dll";
+    gCuda = LoadLibraryW(provider.c_str());
+    if (!gCuda) {
+        DWORD e = GetLastError();
+        why = "CUDA provider did not load (Windows error " + std::to_string(e) + "). ";
+        why += sawCublas ? "cuDNN 9 is probably missing." : "Install CUDA Toolkit 13. cublas64_13.dll was not found.";
+        return false;
+    }
+    return true;
+}
 #endif
 
 void ClearSession() {
@@ -229,13 +290,14 @@ bool RifeStartup(std::string& err) {
     std::string cudaWhy;
 #ifdef _WIN32
     SetDllDirectoryW(dir.c_str());
+    bool cudaLoaded = PreloadCuda(dir, cudaWhy);
     auto note = [&](OrtStatus* st) {
         if (!st) return;
         const char* m = gApi->GetErrorMessage(st);
         if (m && *m) cudaWhy = m;
         gApi->ReleaseStatus(st);
     };
-    if (gApiVersion >= 14) {
+    if (cudaLoaded && gApiVersion >= 14) {
         const char* keys[] = {"device_id"};
         const char* vals[] = {"0"};
         OrtStatus* st = gApi->SessionOptionsAppendExecutionProvider(opt, "CUDAExecutionProvider", keys, vals, 1);
@@ -247,7 +309,7 @@ bool RifeStartup(std::string& err) {
             else note(st);
         }
     }
-    if (!gInfo.cuda && gApiVersion >= 22 && FileExists(dir + L"onnxruntime_providers_cuda.dll")) {
+    if (cudaLoaded && !gInfo.cuda && gApiVersion >= 22 && FileExists(dir + L"onnxruntime_providers_cuda.dll")) {
         std::wstring dll = dir + L"onnxruntime_providers_cuda.dll";
         OrtStatus* st = gApi->RegisterExecutionProviderLibrary(gEnv, "cuda_ep", dll.c_str());
         if (st) note(st);
@@ -271,7 +333,7 @@ bool RifeStartup(std::string& err) {
         }
     }
 #endif
-    if (!gInfo.cuda) {
+    if (cudaLoaded && !gInfo.cuda) {
         using AppendCuda = OrtStatus*(ORT_API_CALL*)(OrtSessionOptions*, int);
         auto appendCuda = (AppendCuda)GetProcAddress(gOrt, "OrtSessionOptionsAppendExecutionProvider_CUDA");
         if (appendCuda) {
