@@ -1099,11 +1099,26 @@ static void AsrPump() {
         }
         asrPhase = 1;
         asrList.clear();
-        for (int t = 0; t <= 6; t++) {
-            for (int i = 0; i < (int)clips.size(); i++) {
-                if (clips[i].track == t && ClipCanSpeak(i)) asrList.push_back(i);
-            }
+        AsrLog("---- timeline clips ----");
+        for (int i = 0; i < (int)clips.size(); i++) {
+            const Clip& c = clips[i];
+            const char* why = "queued";
+            if (c.muted) why = "skip muted";
+            else if (c.duration < 0.3f) why = "skip short";
+            else if (c.mediaId < 0 || c.mediaId >= (int)media.size()) why = "skip no media";
+            else if (media[c.mediaId].type == "image") why = "skip image";
+            else if (!ClipCanSpeak(i)) why = "skip no audio stream";
+            char line[768];
+            std::string path = (c.mediaId >= 0 && c.mediaId < (int)media.size()) ? media[c.mediaId].path : "";
+            snprintf(line, sizeof(line), "clip %d %s start=%.2f dur=%.2f %s %s",
+                     i, TrackLabel(c.track), c.startTime, c.duration, why, path.c_str());
+            AsrLog(line);
+            if (why[0] == 'q' && c.track >= 0 && c.track <= 6) asrList.push_back(i);
         }
+        std::sort(asrList.begin(), asrList.end(), [](int a, int b) {
+            if (clips[a].track != clips[b].track) return clips[a].track < clips[b].track;
+            return clips[a].startTime < clips[b].startTime;
+        });
         asrListPos = 0;
         asrPcm.clear();
         asrSegs.clear();
@@ -1136,12 +1151,28 @@ static void AsrPump() {
         asrPcm.shrink_to_fit();
         AsrClose();
         previewStatus = subs.empty() ? "No speech found" : ("Subtitles " + std::to_string(subs.size()));
+        AsrLog("result subtitles=" + std::to_string(subs.size()));
+        for (size_t i = 0; i < subs.size(); i++) {
+            std::string one = subs[i].text;
+            for (char& ch : one) if (ch == '\n' || ch == '\r') ch = ' ';
+            char head[80];
+            snprintf(head, sizeof(head), "sub %d %.2f+%.2f ", (int)i, subs[i].start, subs[i].duration);
+            AsrLog(std::string(head) + one);
+        }
         return;
     }
     int ci = asrList[asrListPos];
     const Clip& c = clips[ci];
     if (asrPhase == 1) {
-        if (asrPcm.empty()) asrCursor = c.startTime;
+        if (asrPcm.empty()) {
+            asrCursor = c.startTime;
+            int idx = EnsureAudio(c.mediaId);
+            audioSrcs[idx].nextTime = -1;
+            audioSrcs[idx].fifo.clear();
+            char line[256];
+            snprintf(line, sizeof(line), "read clip %d %s timeline %.2f-%.2f", ci, TrackLabel(c.track), c.startTime, c.startTime + c.duration);
+            AsrLog(line);
+        }
         if (asrCursor >= c.startTime + c.duration) {
             asrPhase = 2;
             asrSpans.clear();
@@ -1155,13 +1186,27 @@ static void AsrPump() {
         std::vector<int16_t> block((size_t)n48 * 2, 0);
         MixOneClip(ci, asrCursor, n48, block.data());
         asrPcm.reserve(asrPcm.size() + 16000);
+        double energy = 0;
+        float peak = 0;
+        for (int16_t s : block) {
+            float a = std::fabs((float)s) / 32768.0f;
+            peak = std::max(peak, a);
+        }
         for (int i = 0; i < 16000; i++) {
             int j = i * 3;
             float l = block[(size_t)j * 2] + block[(size_t)(j + 1) * 2] + block[(size_t)(j + 2) * 2];
             float r = block[(size_t)j * 2 + 1] + block[(size_t)(j + 1) * 2 + 1] + block[(size_t)(j + 2) * 2 + 1];
-            asrPcm.push_back((l + r) / 6.0f / 32768.0f);
+            float sample = (l + r) / 6.0f / 32768.0f;
+            energy += (double)sample * sample;
+            asrPcm.push_back(sample);
         }
         asrCursor += 1.0;
+        int sec = (int)(asrCursor - c.startTime);
+        if (sec <= 8 || sec % 5 == 0) {
+            char line[160];
+            snprintf(line, sizeof(line), "audio %s t=%.1f rms=%.4f peak=%.3f", TrackLabel(c.track), asrCursor - 1.0, std::sqrt(energy / 16000.0), peak);
+            AsrLog(line);
+        }
         int pct = c.duration > 0 ? (int)(100.0 * (asrCursor - c.startTime) / c.duration) : 100;
         previewStatus = std::string("Reading ") + TrackLabel(c.track) + " " + std::to_string(pct) + "%";
         return;
@@ -1170,6 +1215,15 @@ static void AsrPump() {
         BuildSpeechSpans(asrPcm, asrSpans);
         asrSpanPos = 0;
         asrSpansReady = true;
+        char head[128];
+        snprintf(head, sizeof(head), "speech spans=%d pcm=%.2fs %s", (int)asrSpans.size(), asrPcm.size() / 16000.0, TrackLabel(c.track));
+        AsrLog(head);
+        for (size_t i = 0; i < asrSpans.size(); i++) {
+            char line[128];
+            snprintf(line, sizeof(line), "span %d %.2f-%.2f", (int)i,
+                     asrSpans[i].first / 16000.0, asrSpans[i].second / 16000.0);
+            AsrLog(line);
+        }
         if (asrSpans.empty()) {
             asrListPos++;
             asrPcm.clear();
@@ -1208,6 +1262,7 @@ static void AsrPump() {
         joined += s.text;
     }
     if (!joined.empty()) SplitTimedText(origin, origin + spanDur, joined, asrSegs);
+    else AsrLog("span produced no words");
     asrSpanPos++;
 }
 
@@ -4312,7 +4367,7 @@ int main(int argc, char* argv[]) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
-    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 42",
+    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 43",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900,
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!window) { SDL_Quit(); return 1; }
@@ -4436,7 +4491,8 @@ int main(int argc, char* argv[]) {
                     asrChunk = 0;
                     asrPhase = 0;
                     asrOn = true;
-                    previewStatus = "Preparing subtitles";
+                    AsrLogReset();
+                    previewStatus = "Preparing subtitles. Log: asr.log";
                 }
             }
         }
