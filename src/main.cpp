@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include "effects.h"
 #include "rife.h"
+#include "asr.h"
 
 #ifdef HAVE_FFMPEG
 extern "C" {
@@ -189,6 +190,15 @@ int exAspect = 0;
 int exRes = 1;
 int exFpsIdx = 1;
 bool exRife = false;
+int exSubMode = 0;
+bool asrOn = false;
+int asrPhase = 0;
+int asrLang = 0;
+int asrChunk = 0;
+double asrCursor = 0;
+double asrEnd = 0;
+std::vector<float> asrPcm;
+std::vector<AsrSeg> asrSegs;
 bool requestExport = false;
 int mediaMenuIndex = -1;
 int mediaArm = -1;
@@ -934,6 +944,85 @@ void MixTimeline(double timelineTime, int sampleCount, int16_t* dst) {
     }
 }
 
+static double ProjectEnd() {
+    double end = 0;
+    for (const auto& c : clips) {
+        double e = (double)c.startTime + (double)c.duration;
+        if (c.reverbOn) e += std::min(5.0, (double)c.reverbTime);
+        if (c.delayOn) e += 180.0 / std::max(40.0f, c.delayTempo);
+        end = std::max(end, e);
+    }
+    for (const auto& s : subs) end = std::max(end, (double)s.start + (double)s.duration);
+    return end;
+}
+
+static void AsrPump() {
+    if (!asrOn) return;
+    if (asrPhase == 0) {
+        std::string err;
+        if (!AsrOpen(err)) {
+            asrOn = false;
+            previewStatus = err;
+            return;
+        }
+        asrPhase = 1;
+        previewStatus = "Reading audio for subtitles";
+        return;
+    }
+    if (asrPhase == 1) {
+        if (asrCursor >= asrEnd) {
+            asrPhase = 2;
+            asrChunk = 0;
+            previewStatus = "Transcribing";
+            return;
+        }
+        const int n48 = 48000;
+        std::vector<int16_t> block((size_t)n48 * 2, 0);
+        MixTimeline(asrCursor, n48, block.data());
+        asrPcm.reserve(asrPcm.size() + 16000);
+        for (int i = 0; i < 16000; i++) {
+            int j = i * 3;
+            int l = block[(size_t)j * 2] + block[(size_t)(j + 1) * 2] + block[(size_t)(j + 2) * 2];
+            int r = block[(size_t)j * 2 + 1] + block[(size_t)(j + 1) * 2 + 1] + block[(size_t)(j + 2) * 2 + 1];
+            asrPcm.push_back(((l + r) / 6) / 32768.0f);
+        }
+        asrCursor += 1.0;
+        int pct = asrEnd > 0 ? (int)(100.0 * asrCursor / asrEnd) : 0;
+        previewStatus = "Reading audio " + std::to_string(pct) + "%";
+        return;
+    }
+    const int chunk = 16000 * 30;
+    int off = asrChunk * chunk;
+    if (off >= (int)asrPcm.size()) {
+        subs.clear();
+        for (const AsrSeg& s : asrSegs) {
+            Subtitle sub;
+            sub.start = std::max(0.0f, s.start);
+            sub.duration = std::max(0.4f, s.end - s.start);
+            sub.text = s.text;
+            subs.push_back(sub);
+        }
+        asrOn = false;
+        asrPcm.clear();
+        asrPcm.shrink_to_fit();
+        AsrClose();
+        previewStatus = subs.empty() ? "No speech found" : ("Subtitles " + std::to_string(subs.size()));
+        return;
+    }
+    int n = std::min(chunk, (int)asrPcm.size() - off);
+    std::vector<AsrSeg> part;
+    std::string err;
+    previewStatus = "Transcribing " + std::to_string(off / 16000) + "s";
+    if (!AsrTranscribeChunk(asrPcm.data() + off, n, off / 16000.0f, asrLang, part, err)) {
+        asrOn = false;
+        AsrClose();
+        previewStatus = err;
+        return;
+    }
+    asrSegs.insert(asrSegs.end(), part.begin(), part.end());
+    asrChunk++;
+}
+
 void QueueAudioBlock(double timelineTime, int sampleCount) {
     if (!audioDev || sampleCount <= 0) return;
     std::vector<int16_t> out((size_t)sampleCount * 2);
@@ -1005,6 +1094,7 @@ struct ExportSession {
     std::vector<uint8_t> canvas;
     std::vector<int16_t> afifo;
     bool rifeOn = false;
+    bool burnSubs = true;
     int rifeFails = 0;
     int phase = 0;
     int outFps = 0;
@@ -1023,7 +1113,7 @@ struct ExportSession {
     bool emitMid = false;
 
     void CloseAll();
-    bool Begin(const std::string& outPath, int width, int height, int framesPerSec, bool useRife);
+    bool Begin(const std::string& outPath, int width, int height, int framesPerSec, bool useRife, bool burn);
     void Step();
     void StepRife();
     bool BeginRifePass();
@@ -1388,7 +1478,7 @@ void ExportSession::BlitToCanvas(int idx) {
     }
 }
 
-bool ExportSession::Begin(const std::string& outPath, int width, int height, int framesPerSec, bool useRife) {
+bool ExportSession::Begin(const std::string& outPath, int width, int height, int framesPerSec, bool useRife, bool burn) {
     CloseAll();
     path = outPath;
     w = width & ~1;
@@ -1420,6 +1510,7 @@ bool ExportSession::Begin(const std::string& outPath, int width, int height, int
         fps = baseFps;
         rifeOn = true;
     }
+    burnSubs = burn;
     total = (int)std::ceil(timelineEnd * (double)fps);
     if (total < 1) total = 1;
     frameIndex = 0;
@@ -2128,7 +2219,7 @@ void ExportSession::Step() {
             }
         }
     }
-    if (!rifeOn) BurnSubtitles(canvas.data(), w, h, (float)t);
+    if (burnSubs && !rifeOn) BurnSubtitles(canvas.data(), w, h, (float)t);
     if (!vframe || av_frame_make_writable(vframe) < 0) { Fail("Video frame failed"); return; }
     uint8_t* srcData[1] = { canvas.data() };
     int srcLines[1] = { w * 4 };
@@ -2348,7 +2439,7 @@ void ExportSession::StepRife() {
         emitMid = true;
     }
     if (src && canvas.size() == prevRGBA.size()) memcpy(canvas.data(), src, canvas.size());
-    BurnSubtitles(canvas.data(), w, h, (float)t);
+    if (burnSubs) BurnSubtitles(canvas.data(), w, h, (float)t);
     if (!vframe || av_frame_make_writable(vframe) < 0) { Fail("Video frame failed"); return; }
     uint8_t* data[1] = { canvas.data() };
     int lines[1] = { w * 4 };
@@ -3587,6 +3678,46 @@ void ExportDims(int aspect, int res, int& w, int& h) {
     if (h < 2) h = 2;
 }
 
+static std::string SrtClock(float t) {
+    if (t < 0) t = 0;
+    int ms = (int)std::lround(t * 1000.0f);
+    int s = ms / 1000;
+    ms %= 1000;
+    int m = s / 60;
+    s %= 60;
+    int h = m / 60;
+    m %= 60;
+    char b[32];
+    snprintf(b, sizeof(b), "%02d:%02d:%02d,%03d", h, m, s, ms);
+    return b;
+}
+
+static std::string SwapExt(const std::string& path, const char* ext) {
+    size_t slash = path.find_last_of("\\/");
+    size_t dot = path.find_last_of('.');
+    if (dot == std::string::npos || (slash != std::string::npos && dot < slash)) return path + ext;
+    return path.substr(0, dot) + ext;
+}
+
+static bool WriteSrt(const std::string& path) {
+    std::vector<int> order(subs.size());
+    for (int i = 0; i < (int)subs.size(); i++) order[i] = i;
+    std::sort(order.begin(), order.end(), [](int a, int b) { return subs[a].start < subs[b].start; });
+    FILE* f = fopen(path.c_str(), "wb");
+    if (!f) return false;
+    fwrite("\xEF\xBB\xBF", 1, 3, f);
+    int n = 1;
+    for (int idx : order) {
+        const Subtitle& s = subs[idx];
+        if (s.text.empty()) continue;
+        float a = std::max(0.0f, s.start);
+        float b = a + std::max(0.2f, s.duration);
+        fprintf(f, "%d\n%s --> %s\n%s\n\n", n++, SrtClock(a).c_str(), SrtClock(b).c_str(), s.text.c_str());
+    }
+    fclose(f);
+    return n > 1;
+}
+
 std::string SaveDialog(HWND owner, const char* filter, const char* defExt, const char* title) {
 #ifdef _WIN32
     char buf[4096] = {0};
@@ -3632,6 +3763,8 @@ void ClearProject() {
     clips.clear();
     bus.clear();
     subs.clear();
+    asrOn = false;
+    AsrClose();
     selectedClip = -1;
     selectedBus = -1;
     selectedSub = -1;
@@ -3972,7 +4105,7 @@ int main(int argc, char* argv[]) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
-    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 38",
+    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 39",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900,
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!window) { SDL_Quit(); return 1; }
@@ -4079,6 +4212,38 @@ int main(int argc, char* argv[]) {
         if (ImGui::Button("Import")) ImportFiles(hwnd);
         ImGui::SameLine();
         if (ImGui::Button("Export")) requestExport = true;
+        ImGui::SameLine();
+        if (ImGui::Button(asrOn ? "Stop subs" : "Auto subs")) {
+            if (asrOn) {
+                asrOn = false;
+                AsrClose();
+                previewStatus = "Subtitles cancelled";
+            } else {
+                asrEnd = ProjectEnd();
+                if (asrEnd < 0.3) previewStatus = "Nothing to transcribe";
+                else {
+                    SetPlaying(false);
+                    asrPcm.clear();
+                    asrSegs.clear();
+                    asrCursor = 0;
+                    asrChunk = 0;
+                    asrPhase = 0;
+                    asrOn = true;
+                    previewStatus = "Preparing subtitles";
+                }
+            }
+        }
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(92);
+        ImGui::Combo("##aslang", &asrLang, "Hebrew\0English\0");
+        ImGui::SameLine();
+        if (ImGui::Button("SRT")) {
+            if (subs.empty()) previewStatus = "No subtitles";
+            else {
+                std::string p = SaveDialog(hwnd, "Subtitles (*.srt)\0*.srt\0", "srt", "Export Subtitles");
+                previewStatus = (!p.empty() && WriteSrt(p)) ? "SRT saved" : (p.empty() ? "SRT cancelled" : "SRT failed");
+            }
+        }
         ImGui::SameLine();
         if (ImGui::Button("Save")) {
             std::string p = SaveDialog(hwnd, "DaniWorlds Project (*.dwp)\0*.dwp\0", "dwp", "Save Project");
@@ -4972,12 +5137,23 @@ int main(int argc, char* argv[]) {
             ImGui::Checkbox("Frame interpolation", &exRife);
             ImGui::TextDisabled("Renders the movie first, then fills frames on the GPU. 50 or 60 fps. Subtitles are added after.");
             ImGui::TextDisabled("%s", RifeProbe().detail.c_str());
+            ImGui::Spacing();
+            ImGui::TextUnformatted("Subtitles");
+            if (ImGui::RadioButton("Embedded", exSubMode == 0)) exSubMode = 0;
+            ImGui::SameLine();
+            if (ImGui::RadioButton("SRT file", exSubMode == 1)) exSubMode = 1;
+            ImGui::SameLine();
+            if (ImGui::RadioButton("Both", exSubMode == 2)) exSubMode = 2;
             if (ImGui::Button("Choose file and export")) {
                 ImGui::CloseCurrentPopup();
                 std::string out = SaveDialog(hwnd, "MP4 video (*.mp4)\0*.mp4\0", "mp4", "Export Video");
                 if (!out.empty()) {
+                    if (exSubMode != 0) {
+                        std::string srt = SwapExt(out, ".srt");
+                        previewStatus = WriteSrt(srt) ? "SRT written" : "No subtitles for SRT";
+                    }
 #ifdef HAVE_FFMPEG
-                    gExport.Begin(out, ew, eh, fps, exRife);
+                    gExport.Begin(out, ew, eh, fps, exRife, exSubMode != 1);
 #else
                     previewStatus = "FFmpeg not linked";
 #endif
@@ -5022,6 +5198,7 @@ int main(int argc, char* argv[]) {
                 ReleaseSidePlayer();
             }
             StopIfFinished();
+            if (asrOn) AsrPump();
         }
 #else
         if (isPlaying && !draggingPlayhead) currentTime += io.DeltaTime;
