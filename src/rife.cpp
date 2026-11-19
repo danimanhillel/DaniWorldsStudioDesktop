@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <vector>
 
@@ -65,6 +66,24 @@ bool FileExists(const std::wstring& p) {
     return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY) == 0;
 }
 
+std::string Narrow(const std::wstring& w) {
+    if (w.empty()) return {};
+    int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), nullptr, 0, nullptr, nullptr);
+    if (n <= 0) return {};
+    std::string s((size_t)n, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), s.data(), n, nullptr, nullptr);
+    return s;
+}
+
+void Log(const std::wstring& dir, const std::string& line) {
+    if (dir.empty()) return;
+    FILE* f = _wfopen((dir + L"rife.log").c_str(), L"ab");
+    if (!f) return;
+    fwrite(line.data(), 1, line.size(), f);
+    fputc('\n', f);
+    fclose(f);
+}
+
 std::vector<HMODULE> gKeep;
 
 void AddBins(const std::wstring& pattern, const std::wstring& parent, std::vector<std::wstring>& out) {
@@ -78,7 +97,29 @@ void AddBins(const std::wstring& pattern, const std::wstring& parent, std::vecto
     FindClose(h);
 }
 
+void LogMatchingDlls(const std::wstring& dir, const std::wstring& bin) {
+    WIN32_FIND_DATAW fd{};
+    HANDLE h = FindFirstFileW((bin + L"\\*.dll").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) {
+        Log(dir, "  no dlls in " + Narrow(bin));
+        return;
+    }
+    do {
+        std::wstring name = fd.cFileName;
+        std::wstring low = name;
+        for (wchar_t& c : low) c = (wchar_t)towlower(c);
+        if (low.find(L"cublas") != std::wstring::npos || low.find(L"cudart") != std::wstring::npos ||
+            low.find(L"cudnn") != std::wstring::npos || low.find(L"cufft") != std::wstring::npos ||
+            low.find(L"nvrtc") != std::wstring::npos || low.find(L"zlib") != std::wstring::npos ||
+            low.find(L"onnxruntime") != std::wstring::npos)
+            Log(dir, "  found " + Narrow(bin + L"\\" + name));
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+}
+
 bool PreloadCuda(const std::wstring& dir, std::string& why) {
+    Log(dir, "---- RIFE CUDA load ----");
+    Log(dir, "exe dir: " + Narrow(dir));
     std::vector<std::wstring> bins{dir};
     AddBins(L"C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v*",
             L"C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\", bins);
@@ -96,6 +137,21 @@ bool PreloadCuda(const std::wstring& dir, std::string& why) {
         FindClose(h);
     }
     bins.insert(bins.end(), nested.begin(), nested.end());
+    Log(dir, "search folders:");
+    for (const auto& b : bins) Log(dir, "  " + Narrow(b));
+    Log(dir, "matching libraries:");
+    for (const auto& b : bins) LogMatchingDlls(dir, b);
+    if (const wchar_t* env = _wgetenv(L"PATH")) {
+        std::wstring path = env;
+        size_t start = 0;
+        while (start < path.size()) {
+            size_t semi = path.find(L';', start);
+            if (semi == std::wstring::npos) semi = path.size();
+            std::wstring one = path.substr(start, semi - start);
+            if (!one.empty()) bins.push_back(one);
+            start = semi + 1;
+        }
+    }
     const wchar_t* names[] = {
         L"cudart64_13.dll", L"cublas64_13.dll", L"cublasLt64_13.dll",
         L"cufft64_12.dll", L"cufft64_13.dll", L"nvrtc64_130_0.dll", L"nvrtc64_131_0.dll",
@@ -106,23 +162,30 @@ bool PreloadCuda(const std::wstring& dir, std::string& why) {
     };
     bool sawCublas = false;
     for (const wchar_t* name : names) {
+        bool found = false;
         for (const auto& b : bins) {
             std::wstring p = b + L"\\" + name;
             if (!FileExists(p)) continue;
+            found = true;
             HMODULE m = LoadLibraryW(p.c_str());
             if (m) gKeep.push_back(m);
+            Log(dir, std::string("load ") + Narrow(p) + (m ? " ok" : " FAILED error " + std::to_string(GetLastError())));
             if (wcscmp(name, L"cublas64_13.dll") == 0) sawCublas = m != nullptr;
             break;
         }
+        if (!found) Log(dir, std::string("missing ") + Narrow(name));
     }
     std::wstring provider = dir + L"onnxruntime_providers_cuda.dll";
     gCuda = LoadLibraryW(provider.c_str());
     if (!gCuda) {
         DWORD e = GetLastError();
-        why = "CUDA provider did not load (Windows error " + std::to_string(e) + "). ";
-        why += sawCublas ? "cuDNN 9 is probably missing." : "Install CUDA Toolkit 13. cublas64_13.dll was not found.";
+        Log(dir, "load " + Narrow(provider) + " FAILED error " + std::to_string(e));
+        why = "CUDA provider did not load (Windows error " + std::to_string(e) + "). See rife.log. ";
+        why += sawCublas ? "cuDNN 9 is probably missing." : "cublas64_13.dll was not found. Install CUDA Toolkit 13.";
+        Log(dir, why);
         return false;
     }
+    Log(dir, "load " + Narrow(provider) + " ok");
     return true;
 }
 #endif
@@ -294,7 +357,7 @@ bool RifeStartup(std::string& err) {
     auto note = [&](OrtStatus* st) {
         if (!st) return;
         const char* m = gApi->GetErrorMessage(st);
-        if (m && *m) cudaWhy = m;
+        if (m && *m) { cudaWhy = m; Log(dir, std::string("CUDA provider error: ") + m); }
         gApi->ReleaseStatus(st);
     };
     if (cudaLoaded && gApiVersion >= 14) {
@@ -400,11 +463,9 @@ bool RifeStartup(std::string& err) {
     }
     gInfo.ready = true;
     gInfo.files = true;
-    gInfo.detail = std::string(gInfo.cuda ? "RIFE on GPU" : "RIFE on CPU") + " (ORT API " + std::to_string(gApiVersion) + ")";
-    if (!gInfo.cuda) {
-        gInfo.detail += ". CUDA was not used";
-        if (!cudaWhy.empty()) gInfo.detail += ": " + cudaWhy.substr(0, 180);
-    }
+    gInfo.detail = std::string(gInfo.cuda ? "RIFE on GPU" : "RIFE on CPU. See rife.log") + " (ORT API " + std::to_string(gApiVersion) + ")";
+    Log(dir, gInfo.detail);
+    if (!cudaWhy.empty()) Log(dir, "detail: " + cudaWhy);
     return true;
 #endif
 }
