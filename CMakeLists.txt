@@ -55,6 +55,7 @@ add_executable(DaniWorldsStudioDesktop
     src/main.cpp
     src/effects.cpp
     src/rife.cpp
+    src/asr.cpp
     ${imgui_SOURCE_DIR}/imgui.cpp
     ${imgui_SOURCE_DIR}/imgui_demo.cpp
     ${imgui_SOURCE_DIR}/imgui_draw.cpp
@@ -67,6 +68,15 @@ add_executable(DaniWorldsStudioDesktop
 target_include_directories(DaniWorldsStudioDesktop PRIVATE
     ${imgui_SOURCE_DIR}
     ${imgui_SOURCE_DIR}/backends
+)
+
+add_custom_command(TARGET DaniWorldsStudioDesktop POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_SOURCE_DIR}/models/mel80.bin"
+        "$<TARGET_FILE_DIR:DaniWorldsStudioDesktop>/mel80.bin"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_SOURCE_DIR}/models/multilingual.tiktoken"
+        "$<TARGET_FILE_DIR:DaniWorldsStudioDesktop>/multilingual.tiktoken"
 )
 
 if(HAVE_FFMPEG)
