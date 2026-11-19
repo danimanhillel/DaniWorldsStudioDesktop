@@ -409,6 +409,7 @@ bool AsrTranscribeChunk(const float* pcm, int samples, float timeOffset, int lan
     std::vector<int64_t> ids = {kSot, lang, kTranscribe};
     std::string text;
     float segStart = -1.0f;
+    int lastStamp = kTimestamp;
     auto push = [&](float endAt) {
         while (!text.empty() && (text.back() == ' ' || text.back() == '\n')) text.pop_back();
         size_t b = 0;
@@ -491,13 +492,19 @@ bool AsrTranscribeChunk(const float* pcm, int samples, float timeOffset, int lan
             return false;
         }
         const float* row = logit + (size_t)(seq - 1) * (size_t)vocab;
-        int best = 0;
-        float bestV = row[0];
-        for (int i = 1; i < vocab; i++) if (row[i] > bestV) { bestV = row[i]; best = i; }
+        int best = kEot;
+        float bestV = -1.0e30f;
+        int limit = std::min(vocab, kTimestamp + 1501);
+        for (int i = 0; i < limit; i++) {
+            if (i > kEot && i < kTimestamp) continue;
+            if (i >= kTimestamp && i < lastStamp) continue;
+            if (row[i] > bestV) { bestV = row[i]; best = i; }
+        }
         gApi->ReleaseValue(logits);
         if (best == kEot || best == kNoSpeech) break;
         ids.push_back(best);
         if (best >= kTimestamp && best < kTimestamp + 1501) {
+            lastStamp = best;
             float ts = (best - kTimestamp) * 0.02f;
             if (segStart < 0.0f) segStart = ts;
             else { push(ts); segStart = ts; }
