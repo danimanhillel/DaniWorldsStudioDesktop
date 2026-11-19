@@ -173,6 +173,7 @@ bool PreloadCuda(const std::wstring& dir, std::string& why) {
     std::vector<Item> items;
     for (const auto& b : bins) {
         if (b == dir) continue;
+        if (b.find(L"\\12.9") != std::wstring::npos || b.find(L"\\v12") != std::wstring::npos) continue;
         WIN32_FIND_DATAW fd{};
         HANDLE h = FindFirstFileW((b + L"\\*.dll").c_str(), &fd);
         if (h == INVALID_HANDLE_VALUE) continue;
@@ -192,9 +193,11 @@ bool PreloadCuda(const std::wstring& dir, std::string& why) {
             HMODULE m = LoadLibraryW(item.path.c_str());
             if (m) gKeep.push_back(m);
             std::wstring leaf = item.path.substr(item.path.find_last_of(L"\\/") + 1);
-            if (_wcsicmp(leaf.c_str(), L"cublas64_13.dll") == 0) {
-                cublasFile = true;
-                sawCublas = m != nullptr;
+            if (_wcsicmp(leaf.c_str(), L"cublas64_13.dll") == 0 || _wcsicmp(leaf.c_str(), L"cudnn64_9.dll") == 0) {
+                if (_wcsicmp(leaf.c_str(), L"cublas64_13.dll") == 0) {
+                    cublasFile = true;
+                    sawCublas = m != nullptr;
+                }
                 Log(dir, std::string("load ") + Narrow(item.path) + (m ? " ok" : " FAILED error " + std::to_string(GetLastError())));
             } else if (!m && pass == 1) {
                 Log(dir, std::string("load ") + Narrow(item.path) + " FAILED error " + std::to_string(GetLastError()));
@@ -203,6 +206,12 @@ bool PreloadCuda(const std::wstring& dir, std::string& why) {
     }
     HMODULE shared = LoadLibraryW((dir + L"onnxruntime_providers_shared.dll").c_str());
     if (shared) gKeep.push_back(shared);
+    for (const auto& b : bins) {
+        if (b.find(L"CUDNN") != std::wstring::npos && b.find(L"\\13.5\\x64") != std::wstring::npos) {
+            SetDllDirectoryW(b.c_str());
+            break;
+        }
+    }
     std::wstring provider = dir + L"onnxruntime_providers_cuda.dll";
     gCuda = LoadLibraryW(provider.c_str());
     if (!gCuda) {
@@ -210,8 +219,8 @@ bool PreloadCuda(const std::wstring& dir, std::string& why) {
         Log(dir, "load " + Narrow(provider) + " FAILED error " + std::to_string(e));
         why = "CUDA provider did not load (Windows error " + std::to_string(e) + "). See rife.log. ";
         if (!cublasFile) why += "cublas64_13.dll was not found.";
-        else if (!sawCublas) why += "cublas64_13.dll is missing a dependency. Install the CUDA 13.5 libraries.";
-        else why += "cuDNN 9 for CUDA 13 was not loaded.";
+        else if (!sawCublas) why += "cublas64_13.dll is missing a dependency.";
+        else why += "The CUDA provider failed to initialize. cuDNN 13.5 must load, not the 12.9 build.";
         Log(dir, why);
         SetDllDirectoryW(dir.c_str());
         return false;
