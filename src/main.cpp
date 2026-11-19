@@ -107,6 +107,8 @@ struct Clip {
     float gsX = 0.0f;
     float gsY = 0.0f;
     float gsScale = 1.0f;
+    float gsAspect = 1.0f;
+    float gsRot = 0.0f;
     float gsOpacity = 1.0f;
     bool muted = false;
     ClipFx fx;
@@ -235,10 +237,14 @@ bool subEditorOpen = false;
 bool subStyleOpen = false;
 int gsPanelClip = -1;
 bool gsPanelOpen = false;
+int xformClip = -1;
+bool xformOpen = false;
 bool openedPanelThisFrame = false;
 bool gsPanelHolds = false;
+bool xformHolds = false;
 bool subPanelHolds = false;
 ImVec4 gsPanelRect(0, 0, 0, 0);
+ImVec4 xformRect(0, 0, 0, 0);
 ImVec4 subPanelRect(0, 0, 0, 0);
 ImVec4 subStyleRect(0, 0, 0, 0);
 float gsOriginX = 0.0f;
@@ -1616,7 +1622,7 @@ struct ExportSession {
     bool HoldFrame(ExpDec& d, double want, std::vector<uint8_t>& dst, int& rw, int& rh);
     bool HoldFrameView(ExpDec& d, double want, const uint8_t*& data, int& rw, int& rh);
     bool RifePair(int mediaId, double mediaT, float speed, std::vector<uint8_t>& out, int& rw, int& rh);
-    void BlitToCanvas(int idx);
+    void BlitToCanvas(int idx, const Clip* place = nullptr);
 };
 
 void FitInside(int sw, int sh, int dw, int dh, int& ox, int& oy, int& fw, int& fh) {
@@ -1936,7 +1942,7 @@ bool ExportSession::RifePair(int mediaId, double mediaT, float speed, std::vecto
     return true;
 }
 
-void ExportSession::BlitToCanvas(int idx) {
+void ExportSession::BlitToCanvas(int idx, const Clip* place) {
     if (idx < 0 || idx >= (int)decs.size()) return;
     ExpDec& d = decs[idx];
     if (d.rw < 1 || d.rh < 1 || d.rgba.empty()) return;
@@ -1957,10 +1963,48 @@ void ExportSession::BlitToCanvas(int idx) {
     uint8_t* dData[1] = { d.fitted.data() };
     int dLines[1] = { fw * 4 };
     sws_scale(d.fit, sData, sLines, 0, d.rh, dData, dLines);
-    for (int y = 0; y < fh; y++) {
-        size_t dst = ((size_t)(oy + y) * (size_t)w + (size_t)ox) * 4;
-        if (dst + (size_t)fw * 4 > canvas.size()) break;
-        memcpy(canvas.data() + dst, d.fitted.data() + (size_t)y * (size_t)fw * 4, (size_t)fw * 4);
+    bool plain = !place
+        || (std::fabs(place->gsX) < 0.0005f && std::fabs(place->gsY) < 0.0005f
+            && std::fabs(place->gsScale - 1.0f) < 0.0005f && std::fabs(place->gsAspect - 1.0f) < 0.0005f
+            && std::fabs(place->gsRot) < 0.05f);
+    if (plain) {
+        for (int y = 0; y < fh; y++) {
+            size_t dst = ((size_t)(oy + y) * (size_t)w + (size_t)ox) * 4;
+            if (dst + (size_t)fw * 4 > canvas.size()) break;
+            memcpy(canvas.data() + dst, d.fitted.data() + (size_t)y * (size_t)fw * 4, (size_t)fw * 4);
+        }
+        return;
+    }
+    float aspect = place->gsAspect < 0.05f ? 1.0f : place->gsAspect;
+    float cx = ox + fw * 0.5f + place->gsX * w * 0.5f;
+    float cy = oy + fh * 0.5f + place->gsY * h * 0.5f;
+    float hw = fw * 0.5f * place->gsScale * aspect;
+    float hh = fh * 0.5f * place->gsScale;
+    float rad = place->gsRot * 0.01745329252f;
+    float cs = std::cos(rad), sn = std::sin(rad);
+    float ext = std::sqrt(hw * hw + hh * hh) + 2.0f;
+    int x0 = std::max(0, (int)std::floor(cx - ext));
+    int y0 = std::max(0, (int)std::floor(cy - ext));
+    int x1 = std::min(w, (int)std::ceil(cx + ext));
+    int y1 = std::min(h, (int)std::ceil(cy + ext));
+    const uint8_t* src = d.fitted.data();
+    for (int y = y0; y < y1; y++) {
+        for (int x = x0; x < x1; x++) {
+            float dx = (x + 0.5f) - cx;
+            float dy = (y + 0.5f) - cy;
+            float lx = dx * cs + dy * sn;
+            float ly = -dx * sn + dy * cs;
+            if (lx < -hw || lx > hw || ly < -hh || ly > hh) continue;
+            int sx = (int)((lx / (hw * 2.0f) + 0.5f) * fw);
+            int sy = (int)((ly / (hh * 2.0f) + 0.5f) * fh);
+            if (sx < 0 || sy < 0 || sx >= fw || sy >= fh) continue;
+            const uint8_t* s = src + ((size_t)sy * fw + sx) * 4;
+            uint8_t* dst = canvas.data() + ((size_t)y * w + x) * 4;
+            dst[0] = s[0];
+            dst[1] = s[1];
+            dst[2] = s[2];
+            dst[3] = 255;
+        }
     }
 }
 
@@ -2274,25 +2318,33 @@ static void ChromaKey(float r, float g, float b, float sim, float soft, float sp
 }
 
 static void BlendChromaPlaced(uint8_t* dst, int dw, int dh, const uint8_t* src, int sw, int sh,
-                              float sim, float soft, float spill, float ox, float oy, float scale, float opacity) {
-    if (!dst || !src || sw < 1 || sh < 1 || scale < 0.05f) return;
+                              float sim, float soft, float spill, float ox, float oy, float scale, float opacity,
+                              float aspect, float rotDeg) {
+    if (!dst || !src || sw < 1 || sh < 1 || scale < 0.05f || dw < 1 || dh < 1) return;
+    if (aspect < 0.05f) aspect = 0.05f;
     float cx = dw * 0.5f + ox * dw * 0.5f;
     float cy = dh * 0.5f + oy * dh * 0.5f;
-    float hw = dw * 0.5f * scale;
+    float hw = dw * 0.5f * scale * aspect;
     float hh = dh * 0.5f * scale;
     if (hw < 1.0f || hh < 1.0f) return;
-    int x0 = (int)std::floor(cx - hw);
-    int y0 = (int)std::floor(cy - hh);
-    int x1 = (int)std::ceil(cx + hw);
-    int y1 = (int)std::ceil(cy + hh);
+    float rad = rotDeg * 0.01745329252f;
+    float cs = std::cos(rad);
+    float sn = std::sin(rad);
+    float ext = std::sqrt(hw * hw + hh * hh) + 2.0f;
+    int x0 = std::max(0, (int)std::floor(cx - ext));
+    int y0 = std::max(0, (int)std::floor(cy - ext));
+    int x1 = std::min(dw, (int)std::ceil(cx + ext));
+    int y1 = std::min(dh, (int)std::ceil(cy + ext));
     for (int y = y0; y < y1; y++) {
-        if (y < 0 || y >= dh) continue;
-        int sy = (int)(((y + 0.5f) - (cy - hh)) / (hh * 2.0f) * sh);
-        if (sy < 0 || sy >= sh) continue;
         for (int x = x0; x < x1; x++) {
-            if (x < 0 || x >= dw) continue;
-            int sx = (int)(((x + 0.5f) - (cx - hw)) / (hw * 2.0f) * sw);
-            if (sx < 0 || sx >= sw) continue;
+            float dx = (x + 0.5f) - cx;
+            float dy = (y + 0.5f) - cy;
+            float lx = dx * cs + dy * sn;
+            float ly = -dx * sn + dy * cs;
+            if (lx < -hw || lx > hw || ly < -hh || ly > hh) continue;
+            int sx = (int)((lx / (hw * 2.0f) + 0.5f) * sw);
+            int sy = (int)((ly / (hh * 2.0f) + 0.5f) * sh);
+            if (sx < 0 || sy < 0 || sx >= sw || sy >= sh) continue;
             const uint8_t* s = src + ((size_t)sy * sw + sx) * 4;
             float r, g, b, a;
             ChromaKey(s[0] / 255.0f, s[1] / 255.0f, s[2] / 255.0f, sim, soft, spill, r, g, b, a);
@@ -2412,12 +2464,37 @@ static bool ClickOutsidePanels() {
     ImVec2 m = ImGui::GetMousePos();
     if (busGradeOpen && RectHit(busPanelRect, m)) return false;
     if (gsPanelOpen && RectHit(gsPanelRect, m)) return false;
+    if (xformOpen && RectHit(xformRect, m)) return false;
     if (subEditorOpen && RectHit(subPanelRect, m)) return false;
     if (subStyleOpen && RectHit(subStyleRect, m)) return false;
     if (mediaPanelOpen && RectHit(mediaPanelRect, m)) return false;
     if (audioPanelOpen && RectHit(audioPanelRect, m)) return false;
     if (floatMediaOpen && RectHit(floatMediaRect, m)) return false;
     return true;
+}
+
+static bool SliderTyped(const char* label, float* v, float mn, float mx, const char* fmt) {
+    ImGui::PushID(label);
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted(label);
+    ImGui::SameLine(78.0f);
+    ImGui::SetNextItemWidth(150.0f);
+    bool changed = ImGui::SliderFloat("##s", v, mn, mx, fmt);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(72.0f);
+    changed |= ImGui::InputFloat("##n", v, 0.0f, 0.0f, fmt);
+    if (*v < mn) *v = mn;
+    if (*v > mx) *v = mx;
+    ImGui::PopID();
+    return changed;
+}
+
+static void DrawPictureControls(Clip& c) {
+    SliderTyped("X", &c.gsX, -1.0f, 1.0f, "%.2f");
+    SliderTyped("Y", &c.gsY, -1.0f, 1.0f, "%.2f");
+    SliderTyped("Size", &c.gsScale, 0.05f, 4.0f, "%.2f");
+    SliderTyped("Aspect", &c.gsAspect, 0.25f, 4.0f, "%.2f");
+    SliderTyped("Rotate", &c.gsRot, -180.0f, 180.0f, "%.1f");
 }
 
 static void PlacePanel(float) {
@@ -2797,7 +2874,7 @@ void ExportSession::Step() {
                 d.rgba = std::move(mid);
                 d.rw = mw;
                 d.rh = mh;
-                BlitToCanvas(idx);
+                BlitToCanvas(idx, &c);
                 d.rgba = std::move(saved);
                 d.rw = srw;
                 d.rh = srh;
@@ -2805,7 +2882,7 @@ void ExportSession::Step() {
             }
             int idx = OpenDec(c.mediaId);
             if (!EnsureFrame(c.mediaId, mediaT)) return false;
-            BlitToCanvas(idx);
+            BlitToCanvas(idx, &c);
             return true;
         };
         if (useFx) {
@@ -2833,14 +2910,14 @@ void ExportSession::Step() {
         int mw = 0, mh = 0;
         if (RifePair(c.mediaId, mediaT, speed, mid, mw, mh)) {
             BlendChromaPlaced(base.data(), w, h, mid.data(), mw, mh,
-                              c.keySim, c.keySoft, c.keySpill, c.gsX, c.gsY, c.gsScale, c.gsOpacity);
+                              c.keySim, c.keySoft, c.keySpill, c.gsX, c.gsY, c.gsScale, c.gsOpacity, c.gsAspect, c.gsRot);
             canvas.swap(base);
         } else {
             int idx = OpenDec(c.mediaId);
             if (idx >= 0 && EnsureFrame(c.mediaId, mediaT) && idx < (int)decs.size() && !decs[idx].rgba.empty()) {
                 ExpDec& d = decs[idx];
                 BlendChromaPlaced(base.data(), w, h, d.rgba.data(), d.rw, d.rh,
-                                  c.keySim, c.keySoft, c.keySpill, c.gsX, c.gsY, c.gsScale, c.gsOpacity);
+                                  c.keySim, c.keySoft, c.keySpill, c.gsX, c.gsY, c.gsScale, c.gsOpacity, c.gsAspect, c.gsRot);
                 canvas.swap(base);
             }
         }
@@ -3423,7 +3500,28 @@ static bool BindKey(float sim, float soft, float spill, float opacity) {
     return true;
 }
 
-void BlitVideo(ImVec2 p0, ImVec2 p1, GLuint tex, int vw, int vh, ImVec2 clip0, ImVec2 clip1) {
+static void PictureCorners(ImVec2 a, ImVec2 b, float ox, float oy, float scale, float aspect, float rot, ImVec2 q[4]) {
+    float pw = std::max(1.0f, b.x - a.x);
+    float ph = std::max(1.0f, b.y - a.y);
+    if (aspect < 0.05f) aspect = 1.0f;
+    if (scale < 0.05f) scale = 0.05f;
+    float cx = (a.x + b.x) * 0.5f + ox * pw * 0.5f;
+    float cy = (a.y + b.y) * 0.5f + oy * ph * 0.5f;
+    float hw = pw * 0.5f * scale * aspect;
+    float hh = ph * 0.5f * scale;
+    float rad = rot * 0.01745329252f;
+    float cs = std::cos(rad);
+    float sn = std::sin(rad);
+    float xs[4] = {-hw, hw, hw, -hw};
+    float ys[4] = {-hh, -hh, hh, hh};
+    for (int i = 0; i < 4; i++) {
+        q[i].x = cx + xs[i] * cs - ys[i] * sn;
+        q[i].y = cy + xs[i] * sn + ys[i] * cs;
+    }
+}
+
+void BlitVideo(ImVec2 p0, ImVec2 p1, GLuint tex, int vw, int vh, ImVec2 clip0, ImVec2 clip1,
+               float ox = 0.0f, float oy = 0.0f, float scale = 1.0f, float aspect = 1.0f, float rot = 0.0f) {
     if (!tex || vw <= 0 || vh <= 0) return;
     float areaW = p1.x - p0.x;
     float areaH = p1.y - p0.y;
@@ -3441,11 +3539,15 @@ void BlitVideo(ImVec2 p0, ImVec2 p1, GLuint tex, int vw, int vh, ImVec2 clip0, I
         a.x += off; b.x -= off;
     }
     if (recordFit) { fitA = a; fitB = b; fitValid = true; }
+    bool moved = std::fabs(ox) > 0.0005f || std::fabs(oy) > 0.0005f || std::fabs(scale - 1.0f) > 0.0005f
+        || std::fabs(aspect - 1.0f) > 0.0005f || std::fabs(rot) > 0.05f;
+    ImVec2 quad[4];
+    if (moved) PictureCorners(a, b, ox, oy, scale, aspect, rot, quad);
     ImGuiIO& io = ImGui::GetIO();
-    float sx0 = std::max(a.x, std::max(0.0f, clip0.x));
-    float sy0 = std::max(a.y, std::max(0.0f, clip0.y));
-    float sx1 = std::min(b.x, std::min(io.DisplaySize.x, clip1.x));
-    float sy1 = std::min(b.y, std::min(io.DisplaySize.y, clip1.y));
+    float sx0 = std::max(moved ? clip0.x : a.x, std::max(0.0f, clip0.x));
+    float sy0 = std::max(moved ? clip0.y : a.y, std::max(0.0f, clip0.y));
+    float sx1 = std::min(moved ? clip1.x : b.x, std::min(io.DisplaySize.x, clip1.x));
+    float sy1 = std::min(moved ? clip1.y : b.y, std::min(io.DisplaySize.y, clip1.y));
     if (sx1 - sx0 < 1.0f || sy1 - sy0 < 1.0f) return;
 
     bool graded = activeGrade && BindGrade(*activeGrade, vw, vh, 1.0f);
@@ -3465,10 +3567,17 @@ void BlitVideo(ImVec2 p0, ImVec2 p1, GLuint tex, int vw, int vh, ImVec2 clip0, I
     glPushMatrix();
     glLoadIdentity();
     glBegin(GL_QUADS);
-    glTexCoord2f(0, 0); glVertex2f(a.x, a.y);
-    glTexCoord2f(1, 0); glVertex2f(b.x, a.y);
-    glTexCoord2f(1, 1); glVertex2f(b.x, b.y);
-    glTexCoord2f(0, 1); glVertex2f(a.x, b.y);
+    if (moved) {
+        glTexCoord2f(0, 0); glVertex2f(quad[0].x, quad[0].y);
+        glTexCoord2f(1, 0); glVertex2f(quad[1].x, quad[1].y);
+        glTexCoord2f(1, 1); glVertex2f(quad[2].x, quad[2].y);
+        glTexCoord2f(0, 1); glVertex2f(quad[3].x, quad[3].y);
+    } else {
+        glTexCoord2f(0, 0); glVertex2f(a.x, a.y);
+        glTexCoord2f(1, 0); glVertex2f(b.x, a.y);
+        glTexCoord2f(1, 1); glVertex2f(b.x, b.y);
+        glTexCoord2f(0, 1); glVertex2f(a.x, b.y);
+    }
     glEnd();
     glPopMatrix();
     glMatrixMode(GL_PROJECTION);
@@ -3479,7 +3588,7 @@ void BlitVideo(ImVec2 p0, ImVec2 p1, GLuint tex, int vw, int vh, ImVec2 clip0, I
     if (graded && pglUseProgram) pglUseProgram(0);
 }
 
-void BlitFxPair(ImVec2 p0, ImVec2 p1, GLuint texA, int aw, int ah, GLuint texB, int bw, int bh, const FxLook& look) {
+void BlitFxPair(ImVec2 p0, ImVec2 p1, GLuint texA, int aw, int ah, GLuint texB, int bw, int bh, const FxLook& look, const Clip* ca = nullptr, const Clip* cb = nullptr) {
     if (!texA || aw <= 0 || ah <= 0) return;
     ImGuiIO& io = ImGui::GetIO();
     float areaW = p1.x - p0.x;
@@ -3498,24 +3607,28 @@ void BlitFxPair(ImVec2 p0, ImVec2 p1, GLuint texA, int aw, int ah, GLuint texB, 
         a.x += off; b.x -= off;
     }
     if (recordFit) { fitA = a; fitB = b; fitValid = true; }
-    float sx0 = std::max(a.x, std::max(0.0f, p0.x));
-    float sy0 = std::max(a.y, std::max(0.0f, p0.y));
-    float sx1 = std::min(b.x, std::min(io.DisplaySize.x, p1.x));
-    float sy1 = std::min(b.y, std::min(io.DisplaySize.y, p1.y));
+    float sx0 = std::max(p0.x, 0.0f);
+    float sy0 = std::max(p0.y, 0.0f);
+    float sx1 = std::min(p1.x, io.DisplaySize.x);
+    float sy1 = std::min(p1.y, io.DisplaySize.y);
     if (sx1 - sx0 < 1.0f || sy1 - sy0 < 1.0f) return;
-    auto quad = [&](GLuint tex, int tw, int th, float alpha, float scale) {
-        ImVec2 c((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f);
-        ImVec2 q0(c.x + (a.x - c.x) * scale, c.y + (a.y - c.y) * scale);
-        ImVec2 q1(c.x + (b.x - c.x) * scale, c.y + (b.y - c.y) * scale);
+    auto quad = [&](GLuint tex, int tw, int th, float alpha, float effectScale, const Clip* clip) {
+        float sc = effectScale * (clip ? clip->gsScale : 1.0f);
+        float asp = clip ? clip->gsAspect : 1.0f;
+        float ox = clip ? clip->gsX : 0.0f;
+        float oy = clip ? clip->gsY : 0.0f;
+        float rot = clip ? clip->gsRot : 0.0f;
+        ImVec2 q[4];
+        PictureCorners(a, b, ox, oy, sc, asp, rot, q);
         bool graded = activeGrade && BindGrade(*activeGrade, tw, th, alpha);
         if (!graded && pglUseProgram) pglUseProgram(0);
         glBindTexture(GL_TEXTURE_2D, tex);
         glColor4f(1.f, 1.f, 1.f, alpha);
         glBegin(GL_QUADS);
-        glTexCoord2f(0, 0); glVertex2f(q0.x, q0.y);
-        glTexCoord2f(1, 0); glVertex2f(q1.x, q0.y);
-        glTexCoord2f(1, 1); glVertex2f(q1.x, q1.y);
-        glTexCoord2f(0, 1); glVertex2f(q0.x, q1.y);
+        glTexCoord2f(0, 0); glVertex2f(q[0].x, q[0].y);
+        glTexCoord2f(1, 0); glVertex2f(q[1].x, q[1].y);
+        glTexCoord2f(1, 1); glVertex2f(q[2].x, q[2].y);
+        glTexCoord2f(0, 1); glVertex2f(q[3].x, q[3].y);
         glEnd();
         if (graded && pglUseProgram) pglUseProgram(0);
     };
@@ -3532,11 +3645,11 @@ void BlitFxPair(ImVec2 p0, ImVec2 p1, GLuint texA, int aw, int ah, GLuint texB, 
     glPushMatrix();
     glLoadIdentity();
     glDisable(GL_BLEND);
-    quad(texA, aw, ah, 1.0f, look.scaleA);
+    quad(texA, aw, ah, 1.0f, look.scaleA, ca);
     if (texB && bw > 0 && bh > 0 && look.alphaB > 0.001f) {
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        quad(texB, bw, bh, look.alphaB, look.scaleB);
+        quad(texB, bw, bh, look.alphaB, look.scaleB, cb);
     }
     glPopMatrix();
     glMatrixMode(GL_PROJECTION);
@@ -3548,22 +3661,26 @@ void BlitFxPair(ImVec2 p0, ImVec2 p1, GLuint texA, int aw, int ah, GLuint texB, 
     glDisable(GL_SCISSOR_TEST);
 }
 
-void BlitKeyed(ImVec2 a, ImVec2 b, GLuint tex, float sim, float soft, float spill, float ox, float oy, float scale, float opacity) {
+void BlitKeyed(ImVec2 a, ImVec2 b, GLuint tex, float sim, float soft, float spill, float ox, float oy, float scale, float opacity, float aspect, float rot) {
     if (!tex || b.x - a.x < 2 || b.y - a.y < 2 || scale < 0.05f) return;
-    ImGuiIO& io = ImGui::GetIO();
-    float pw = b.x - a.x;
-    float ph = b.y - a.y;
-    float cx = (a.x + b.x) * 0.5f + ox * pw * 0.5f;
-    float cy = (a.y + b.y) * 0.5f + oy * ph * 0.5f;
-    float hw = pw * 0.5f * scale;
-    float hh = ph * 0.5f * scale;
-    a = ImVec2(cx - hw, cy - hh);
-    b = ImVec2(cx + hw, cy + hh);
+    ImVec2 q[4];
+    PictureCorners(a, b, ox, oy, scale, aspect, rot, q);
     bool keyed = BindKey(sim, soft, spill, opacity);
     if (!keyed && pglUseProgram) pglUseProgram(0);
+    ImGuiIO& io = ImGui::GetIO();
     glDisable(GL_DEPTH_TEST);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    if (previewFrameValid) {
+        float sx0 = std::max(0.0f, previewFrameMin.x);
+        float sy0 = std::max(0.0f, previewFrameMin.y);
+        float sx1 = std::min(io.DisplaySize.x, previewFrameMax.x);
+        float sy1 = std::min(io.DisplaySize.y, previewFrameMax.y);
+        if (sx1 > sx0 && sy1 > sy0) {
+            glEnable(GL_SCISSOR_TEST);
+            glScissor((int)sx0, (int)(io.DisplaySize.y - sy1), std::max(1, (int)(sx1 - sx0)), std::max(1, (int)(sy1 - sy0)));
+        }
+    }
     glEnable(GL_TEXTURE_2D);
     glBindTexture(GL_TEXTURE_2D, tex);
     glColor4f(1, 1, 1, opacity);
@@ -3575,10 +3692,10 @@ void BlitKeyed(ImVec2 a, ImVec2 b, GLuint tex, float sim, float soft, float spil
     glPushMatrix();
     glLoadIdentity();
     glBegin(GL_QUADS);
-    glTexCoord2f(0, 0); glVertex2f(a.x, a.y);
-    glTexCoord2f(1, 0); glVertex2f(b.x, a.y);
-    glTexCoord2f(1, 1); glVertex2f(b.x, b.y);
-    glTexCoord2f(0, 1); glVertex2f(a.x, b.y);
+    glTexCoord2f(0, 0); glVertex2f(q[0].x, q[0].y);
+    glTexCoord2f(1, 0); glVertex2f(q[1].x, q[1].y);
+    glTexCoord2f(1, 1); glVertex2f(q[2].x, q[2].y);
+    glTexCoord2f(0, 1); glVertex2f(q[3].x, q[3].y);
     glEnd();
     glPopMatrix();
     glMatrixMode(GL_PROJECTION);
@@ -3587,6 +3704,7 @@ void BlitKeyed(ImVec2 a, ImVec2 b, GLuint tex, float sim, float soft, float spil
     if (pglUseProgram) pglUseProgram(0);
     glDisable(GL_BLEND);
     glDisable(GL_TEXTURE_2D);
+    glDisable(GL_SCISSOR_TEST);
 }
 
 static void DrawGlyphQuad(const ImFontGlyph* g, float x0, float y0, float x1, float y1) {
@@ -3796,6 +3914,7 @@ bool TimelinePointerBusy() {
     };
     if (busPanelHoldsMouse || (busGradeOpen && inside(busPanelRect))) return true;
     if (gsPanelHolds || (gsPanelOpen && inside(gsPanelRect))) return true;
+    if (xformHolds || (xformOpen && inside(xformRect))) return true;
     if (subPanelHolds || (subEditorOpen && inside(subPanelRect)) || (subStyleOpen && inside(subStyleRect))) return true;
     if (mediaPanelOpen && inside(mediaPanelRect)) return true;
     if (audioPanelOpen && inside(audioPanelRect)) return true;
@@ -4554,8 +4673,8 @@ bool SaveProject(const std::string& path) {
                 c.eqGain[0], c.eqGain[1], c.eqGain[2], c.eqGain[3],
                 c.eqGain[4], c.eqGain[5], c.eqGain[6], c.eqGain[7]);
         fprintf(f, "E %s %.4f\n", c.fxOut.empty() ? "-" : c.fxOut.c_str(), c.fxDur);
-        fprintf(f, "K %.3f %.3f %.3f %.3f %.3f %.3f %d %.3f\n",
-                c.keySim, c.keySoft, c.keySpill, c.gsX, c.gsY, c.gsScale, c.muted ? 1 : 0, c.gsOpacity);
+        fprintf(f, "K %.3f %.3f %.3f %.3f %.3f %.3f %d %.3f %.3f %.2f\n",
+                c.keySim, c.keySoft, c.keySpill, c.gsX, c.gsY, c.gsScale, c.muted ? 1 : 0, c.gsOpacity, c.gsAspect, c.gsRot);
     }
     for (const auto& b : bus) {
         fprintf(f, "B %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f\n",
@@ -4679,9 +4798,9 @@ bool LoadProject(const std::string& path) {
                 bus.push_back(b);
             }
         } else if (line[0] == 'K' && line[1] == ' ' && !clips.empty()) {
-            float a = 0.35f, b = 0.22f, ck = 0.8f, x = 0, y = 0, sc = 1, op = 1;
+            float a = 0.35f, b = 0.22f, ck = 0.8f, x = 0, y = 0, sc = 1, op = 1, aspect = 1, rot = 0;
             int mute = 0;
-            int n = sscanf(line, "K %f %f %f %f %f %f %d %f", &a, &b, &ck, &x, &y, &sc, &mute, &op);
+            int n = sscanf(line, "K %f %f %f %f %f %f %d %f %f %f", &a, &b, &ck, &x, &y, &sc, &mute, &op, &aspect, &rot);
             if (n >= 3) {
                 clips.back().keySim = Clamp01(a);
                 clips.back().keySoft = Clamp01(b);
@@ -4690,10 +4809,12 @@ bool LoadProject(const std::string& path) {
             if (n >= 6) {
                 clips.back().gsX = x < -1 ? -1 : (x > 1 ? 1 : x);
                 clips.back().gsY = y < -1 ? -1 : (y > 1 ? 1 : y);
-                clips.back().gsScale = sc < 0.15f ? 0.15f : (sc > 3.0f ? 3.0f : sc);
+                clips.back().gsScale = sc < 0.05f ? 0.05f : (sc > 4.0f ? 4.0f : sc);
             }
             if (n >= 7) clips.back().muted = mute != 0;
             if (n >= 8) clips.back().gsOpacity = Clamp01(op);
+            if (n >= 9) clips.back().gsAspect = aspect < 0.2f ? 0.2f : (aspect > 4.0f ? 4.0f : aspect);
+            if (n >= 10) clips.back().gsRot = rot < -360.0f ? -360.0f : (rot > 360.0f ? 360.0f : rot);
         } else if (line[0] == 'Y' && line[1] == ' ') {
             float tr, tg, tb, bp, br, bg, bb, gr, gg, gb;
             int border = 1, back = 0;
@@ -4773,7 +4894,7 @@ int main(int argc, char* argv[]) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
-    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 51",
+    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 52",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900,
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!window) { SDL_Quit(); return 1; }
@@ -5692,6 +5813,13 @@ int main(int argc, char* argv[]) {
                     ResetAudioSync();
 #endif
                 }
+                if (c.mediaId >= 0 && c.mediaId < (int)media.size() && media[c.mediaId].type != "audio") {
+                    if (ImGui::MenuItem("Transform")) {
+                        xformClip = contextClip;
+                        xformOpen = true;
+                        openedPanelThisFrame = true;
+                    }
+                }
                 if (ImGui::BeginMenu("Speed")) {
                     const float speeds[] = {1.0f, 1.1f, 1.25f, 1.5f, 1.75f, 2.0f};
                     const char* labels[] = {"1.0x", "1.1x", "1.25x", "1.5x", "1.75x", "2x"};
@@ -5905,14 +6033,12 @@ int main(int argc, char* argv[]) {
                 Clip& c = clips[gsPanelClip];
                 ImGui::TextUnformatted("Green screen");
                 ImGui::Separator();
-                ImGui::SliderFloat("Position X", &c.gsX, -1.0f, 1.0f, "%.2f");
-                ImGui::SliderFloat("Position Y", &c.gsY, -1.0f, 1.0f, "%.2f");
-                ImGui::SliderFloat("Scale", &c.gsScale, 0.15f, 3.0f, "%.2f");
+                DrawPictureControls(c);
                 ImGui::Separator();
-                ImGui::SliderFloat("Similarity", &c.keySim, 0.0f, 1.0f, "%.2f");
-                ImGui::SliderFloat("Softness", &c.keySoft, 0.0f, 1.0f, "%.2f");
-                ImGui::SliderFloat("Spill", &c.keySpill, 0.0f, 1.0f, "%.2f");
-                ImGui::SliderFloat("Opacity", &c.gsOpacity, 0.0f, 1.0f, "%.2f");
+                SliderTyped("Similarity", &c.keySim, 0.0f, 1.0f, "%.2f");
+                SliderTyped("Softness", &c.keySoft, 0.0f, 1.0f, "%.2f");
+                SliderTyped("Spill", &c.keySpill, 0.0f, 1.0f, "%.2f");
+                SliderTyped("Opacity", &c.gsOpacity, 0.0f, 1.0f, "%.2f");
                 ImGui::Separator();
                 if (ImGui::Checkbox("Mute", &c.muted)) {
 #ifdef HAVE_FFMPEG
@@ -5926,6 +6052,31 @@ int main(int argc, char* argv[]) {
             }
             ImGui::End();
             if (!open) gsPanelOpen = false;
+        }
+        xformHolds = false;
+        if (xformOpen) {
+            if (xformClip < 0 || xformClip >= (int)clips.size()) xformOpen = false;
+            else {
+                int mid = clips[xformClip].mediaId;
+                bool picture = mid >= 0 && mid < (int)media.size() && media[mid].type != "audio";
+                if (!picture) xformOpen = false;
+                else {
+                    PlacePanel(0.0f);
+                    bool open = true;
+                    if (ClickOutsidePanels()) open = false;
+                    if (ImGui::Begin("Transform", &open, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse)) {
+                        ImGui::TextUnformatted("Transform");
+                        ImGui::Separator();
+                        DrawPictureControls(clips[xformClip]);
+                        ImVec2 w0 = ImGui::GetWindowPos();
+                        xformRect = ImVec4(w0.x, w0.y, w0.x + ImGui::GetWindowSize().x, w0.y + ImGui::GetWindowSize().y);
+                        xformHolds = ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem)
+                            || (ImGui::IsWindowFocused() && ImGui::IsAnyItemActive());
+                    }
+                    ImGui::End();
+                    if (!open) xformOpen = false;
+                }
+            }
         }
         subPanelHolds = false;
         if (subEditorOpen && editingSub >= 0 && editingSub < (int)subs.size()) {
@@ -6086,12 +6237,19 @@ int main(int argc, char* argv[]) {
                 int ah = aIsMain ? player->height : playerB->height;
                 int bw = aIsMain ? playerB->width : player->width;
                 int bh = aIsMain ? playerB->height : player->height;
-                BlitFxPair(view0, view1, texA, aw, ah, texB, bw, bh, look);
+                BlitFxPair(view0, view1, texA, aw, ah, texB, bw, bh, look,
+                           (drawA >= 0 && drawA < (int)clips.size()) ? &clips[drawA] : nullptr,
+                           (drawB >= 0 && drawB < (int)clips.size()) ? &clips[drawB] : nullptr);
             } else if (player && player->hasFrame && player->texture) {
-                BlitVideo(view0, view1, player->texture, player->width, player->height, view0, view1);
+                const Clip* pc = (topClip >= 0 && topClip < (int)clips.size()) ? &clips[topClip] : nullptr;
+                BlitVideo(view0, view1, player->texture, player->width, player->height, view0, view1,
+                          pc ? pc->gsX : 0, pc ? pc->gsY : 0, pc ? pc->gsScale : 1, pc ? pc->gsAspect : 1, pc ? pc->gsRot : 0);
             }
-        } else if (player && player->hasFrame && player->texture)
-            BlitVideo(view0, view1, player->texture, player->width, player->height, view0, view1);
+        } else if (player && player->hasFrame && player->texture) {
+            const Clip* pc = (topClip >= 0 && topClip < (int)clips.size()) ? &clips[topClip] : nullptr;
+            BlitVideo(view0, view1, player->texture, player->width, player->height, view0, view1,
+                      pc ? pc->gsX : 0, pc ? pc->gsY : 0, pc ? pc->gsScale : 1, pc ? pc->gsAspect : 1, pc ? pc->gsRot : 0);
+        }
         activeGrade = nullptr;
         recordFit = false;
         if (gsDrawClip >= 0) {
@@ -6113,7 +6271,7 @@ int main(int argc, char* argv[]) {
                 ImVec2 a = fitValid ? fitA : view0;
                 ImVec2 b = fitValid ? fitB : view1;
                 const Clip& gc = clips[gsDrawClip];
-                BlitKeyed(a, b, tex, gc.keySim, gc.keySoft, gc.keySpill, gc.gsX, gc.gsY, gc.gsScale, gc.gsOpacity);
+                BlitKeyed(a, b, tex, gc.keySim, gc.keySoft, gc.keySpill, gc.gsX, gc.gsY, gc.gsScale, gc.gsOpacity, gc.gsAspect, gc.gsRot);
                 if (!fitValid) { fitA = a; fitB = b; fitValid = true; }
             }
         }
