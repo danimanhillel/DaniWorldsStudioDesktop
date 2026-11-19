@@ -2,6 +2,7 @@
 #include <SDL2/SDL_opengl.h>
 #include <SDL2/SDL_syswm.h>
 #include "imgui.h"
+#include "imgui_internal.h"
 #include "imgui_impl_sdl2.h"
 #include "imgui_impl_opengl3.h"
 #include <vector>
@@ -175,6 +176,7 @@ int draggingClip = -1;
 float dragOffsetX = 0.0f;
 ImVec2 previewMin(0, 0), previewMax(0, 0);
 ImVec2 previewFrameMin(0, 0), previewFrameMax(0, 0);
+ImVec2 previewPanelMin(0, 0), previewPanelMax(0, 0);
 bool previewFrameValid = false;
 float shownLocal = -1000.0f;
 int trimmingClip = -1;
@@ -2393,9 +2395,12 @@ static bool ClickOutsidePanels() {
     return true;
 }
 
-static void PlacePanel(float xShift) {
-    ImGuiIO& pio = ImGui::GetIO();
-    ImGui::SetNextWindowPos(ImVec2(18.0f + xShift, pio.DisplaySize.y - 18.0f), ImGuiCond_Appearing, ImVec2(0.0f, 1.0f));
+static void PlacePanel(float) {
+    float x = previewPanelMax.x - 16.0f;
+    float y = previewPanelMin.y + 36.0f;
+    if (x < 280.0f) x = 280.0f;
+    if (y < 36.0f) y = 36.0f;
+    ImGui::SetNextWindowPos(ImVec2(x, y), ImGuiCond_Always, ImVec2(1.0f, 0.0f));
     ImGui::SetNextWindowFocus();
     ImGui::SetNextWindowBgAlpha(0.98f);
 }
@@ -2424,6 +2429,7 @@ static bool TransportButton(const char* id, int kind) {
 static int WordsPerCue() {
     if (exAspect == 1) return 6;
     if (exAspect == 2) return 8;
+    if (exAspect == 4) return 7;
     if (exAspect == 3) return 10;
     return 14;
 }
@@ -2471,6 +2477,7 @@ static float AspectValue(int aspect) {
     if (aspect == 1) return 9.0f / 16.0f;
     if (aspect == 2) return 1.0f;
     if (aspect == 3) return 4.0f / 3.0f;
+    if (aspect == 4) return 3.0f / 4.0f;
     return 16.0f / 9.0f;
 }
 
@@ -2491,6 +2498,51 @@ static void FitAspectBox(ImVec2 p0, ImVec2 p1, float aspect, ImVec2& a, ImVec2& 
         a.x += off;
         b.x -= off;
     }
+}
+
+static void DrawThumb(ImDrawList* dl, ImVec2 p0, ImVec2 p1, ImVec2 c0, ImVec2 c1, GLuint tex, int tw, int th) {
+    if (!dl || !tex || tw < 1 || th < 1) return;
+    float aw = p1.x - p0.x;
+    float ah = p1.y - p0.y;
+    if (aw < 2.0f || ah < 2.0f) return;
+    float aspect = (float)tw / (float)th;
+    ImVec2 a = p0, b = p1;
+    if (aspect > aw / ah) {
+        float h = aw / aspect;
+        float off = (ah - h) * 0.5f;
+        a.y += off;
+        b.y -= off;
+    } else {
+        float w = ah * aspect;
+        float off = (aw - w) * 0.5f;
+        a.x += off;
+        b.x -= off;
+    }
+    dl->PushClipRect(c0, c1, true);
+    dl->AddImage((ImTextureID)(intptr_t)tex, a, b);
+    dl->PopClipRect();
+}
+
+static void RenderFloatingOnTop() {
+    ImGuiContext* ctx = ImGui::GetCurrentContext();
+    ImDrawData* src = ImGui::GetDrawData();
+    if (!ctx || !src) return;
+    ImDrawData data;
+    data.Valid = true;
+    data.DisplayPos = src->DisplayPos;
+    data.DisplaySize = src->DisplaySize;
+    data.FramebufferScale = src->FramebufferScale;
+    data.OwnerViewport = src->OwnerViewport;
+    for (int i = 0; i < ctx->Windows.Size; i++) {
+        ImGuiWindow* w = ctx->Windows[i];
+        if (!w || !w->Active || w->Hidden || w->DrawList->VtxBuffer.Size <= 0) continue;
+        if (strcmp(w->Name, "Editor") == 0) continue;
+        data.CmdLists.push_back(w->DrawList);
+        data.TotalVtxCount += w->DrawList->VtxBuffer.Size;
+        data.TotalIdxCount += w->DrawList->IdxBuffer.Size;
+    }
+    data.CmdListsCount = data.CmdLists.Size;
+    if (data.CmdListsCount > 0) ImGui_ImplOpenGL3_RenderDrawData(&data);
 }
 
 static float GlyphWidth(ImFont* font, float size, unsigned cp) {
@@ -4219,12 +4271,13 @@ void ExportDims(int aspect, int res, int& w, int& h) {
     if (res < 0) res = 0;
     if (res > 4) res = 4;
     if (aspect < 0) aspect = 0;
-    if (aspect > 3) aspect = 3;
+    if (aspect > 4) aspect = 4;
     int H = heights[res];
     int W = widths169[res];
     if (aspect == 0) { w = W; h = H; }
     else if (aspect == 1) { w = H; h = W; }
     else if (aspect == 2) { w = H; h = H; }
+    else if (aspect == 4) { h = W; w = (W * 3 / 4) & ~1; }
     else { h = H; w = (H * 4 / 3) & ~1; }
     w &= ~1;
     h &= ~1;
@@ -4489,7 +4542,7 @@ bool LoadProject(const std::string& path) {
             if (p > 5.0f && p < 400.0f) pixelsPerSecond = p;
         } else if (strncmp(line, "aspect ", 7) == 0) {
             int a = atoi(line + 7);
-            if (a >= 0 && a <= 3) exAspect = a;
+            if (a >= 0 && a <= 4) exAspect = a;
         } else if (line[0] == 'M') {
             char type[32] = {0};
             float dur = 5.0f, aspect = 16.0f / 9.0f;
@@ -4663,7 +4716,7 @@ int main(int argc, char* argv[]) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
-    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 47",
+    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 48",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900,
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!window) { SDL_Quit(); return 1; }
@@ -4824,7 +4877,11 @@ int main(int argc, char* argv[]) {
 #endif
 
         ImGui::Separator();
-        float topH = io.DisplaySize.y * 0.38f;
+        float availY = ImGui::GetContentRegionAvail().y;
+        float tlH = 26.0f + 58.0f + 42.0f * 8.0f + 8.0f * 6.0f + 28.0f;
+        if (tlH > availY * 0.50f) tlH = availY * 0.50f;
+        float topH = availY - tlH - 4.0f;
+        if (topH < 220.0f) topH = 220.0f;
 
         ImGui::BeginChild("Media", ImVec2(io.DisplaySize.x * 0.26f, topH), true);
         ImGui::Text("Media Library");
@@ -4845,7 +4902,7 @@ int main(int argc, char* argv[]) {
             ImVec2 p1 = ImGui::GetItemRectMax();
             bool vis = p1.y > mediaClip0.y && p0.y < mediaClip1.y && p1.x > mediaClip0.x && p0.x < mediaClip1.x;
             if (m.thumb && vis)
-                thumbBlits.push_back({p0, p1, mediaClip0, mediaClip1, m.thumb, m.thumbW, m.thumbH});
+                DrawThumb(dl, p0, p1, mediaClip0, mediaClip1, m.thumb, m.thumbW, m.thumbH);
             else if (vis)
                 DrawPlaceholder(dl, p0, p1, m);
             ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + cellW);
@@ -4853,49 +4910,19 @@ int main(int argc, char* argv[]) {
             ImGui::Text("%.1fs %s", m.duration, m.type.c_str());
             ImGui::PopTextWrapPos();
             ImGui::EndGroup();
-            ImVec2 g0 = ImGui::GetItemRectMin();
-            ImVec2 g1 = ImGui::GetItemRectMax();
             if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID | ImGuiDragDropFlags_SourceNoPreviewTooltip)) {
                 ImGui::SetDragDropPayload("MEDIA", &i, sizeof(int));
                 ImGui::EndDragDropSource();
             }
-            if (ImGui::IsMouseHoveringRect(g0, g1) && ImGui::IsMouseClicked(1)) {
-                mediaMenuIndex = i;
-                mediaMenuPos = ImGui::GetMousePos();
-                mediaPanelOpen = true;
-                openedPanelThisFrame = true;
-            }
-            if (ImGui::IsMouseHoveringRect(g0, g1) && ImGui::IsMouseClicked(0)) {
-                mediaArm = i;
-                mediaArmTravel = 0.0f;
-            }
             ImGui::PopID();
-        }
-        if (mediaArm >= 0 && ImGui::IsMouseDown(0)) {
-            ImVec2 d = ImGui::GetMouseDragDelta(0);
-            mediaArmTravel = std::max(mediaArmTravel, d.x * d.x + d.y * d.y);
-        }
-        if (mediaArm >= 0 && ImGui::IsMouseReleased(0)) {
-            if (mediaArmTravel < 36.0f) {
-                mediaMenuIndex = mediaArm;
-                mediaMenuPos = ImGui::GetMousePos();
-                mediaPanelOpen = true;
-                openedPanelThisFrame = true;
-            }
-            mediaArm = -1;
-            mediaArmTravel = 0.0f;
-        }
-        if (ImGui::IsWindowHovered() && ImGui::IsMouseClicked(1) && !mediaPanelOpen) {
-            mediaMenuIndex = -1;
-            mediaMenuPos = ImGui::GetMousePos();
-            mediaPanelOpen = true;
-            openedPanelThisFrame = true;
         }
         ImGui::EndChild();
 
         ImGui::SameLine();
         ImGui::BeginGroup();
         ImGui::BeginChild("Preview", ImVec2(0, topH - 46), true);
+        previewPanelMin = ImGui::GetWindowPos();
+        previewPanelMax = ImVec2(previewPanelMin.x + ImGui::GetWindowSize().x, previewPanelMin.y + ImGui::GetWindowSize().y);
         ImGui::Text("Preview | %s", previewStatus.c_str());
         ImVec2 avail = ImGui::GetContentRegionAvail();
         ImGui::InvisibleButton("prev", ImVec2(avail.x, std::max(10.0f, avail.y - 8)));
@@ -4968,19 +4995,24 @@ int main(int argc, char* argv[]) {
             float avail = ImGui::GetContentRegionAvail().x;
             if (avail > comboW) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + avail - comboW);
             ImGui::SetNextItemWidth(comboW);
-            int before = exAspect;
-            if (ImGui::Combo("##previewaspect", &exAspect, "16:9\09:16\01:1\04:3\0") && exAspect != before) SplitLongSubs();
+            const char* aspectLabel = "16:9";
+            if (exAspect == 1) aspectLabel = "9:16";
+            else if (exAspect == 2) aspectLabel = "1:1";
+            else if (exAspect == 3) aspectLabel = "4:3";
+            else if (exAspect == 4) aspectLabel = "3:4";
+            if (ImGui::BeginCombo("##previewaspect", aspectLabel)) {
+                const char* names[] = {"16:9", "9:16", "1:1", "4:3", "3:4"};
+                for (int i = 0; i < 5; i++) {
+                    if (ImGui::Selectable(names[i], exAspect == i) && exAspect != i) {
+                        exAspect = i;
+                        SplitLongSubs();
+                    }
+                }
+                ImGui::EndCombo();
+            }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Preview and export aspect");
         }
         ImGui::EndGroup();
-
-        ImGui::Separator();
-        ImGui::Text("Tools:"); ImGui::SameLine();
-        if (ImGui::RadioButton("Select", activeTool == 0)) activeTool = 0; ImGui::SameLine();
-        if (ImGui::RadioButton("Trim", activeTool == 1)) activeTool = 1; ImGui::SameLine();
-        if (ImGui::RadioButton("Split", activeTool == 2)) activeTool = 2; ImGui::SameLine();
-        ImGui::Text("| C = split | S on BUS = segment | Shift+click | Right click: Effects");
-        ImGui::Separator();
 
         float tlSeconds = 600.0f;
         for (const auto& c : clips)
@@ -4990,7 +5022,7 @@ int main(int argc, char* argv[]) {
         for (const auto& s : subs)
             tlSeconds = std::max(tlSeconds, s.start + s.duration + 30.0f);
         float timeW = tlSeconds * pixelsPerSecond;
-        ImGui::BeginChild("Timeline", ImVec2(0, 0), true, ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_AlwaysHorizontalScrollbar);
+        ImGui::BeginChild("Timeline", ImVec2(0, tlH), true, ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_AlwaysHorizontalScrollbar);
         const char* trackNames[] = {"V1", "V2", "V3", "A1", "A2", "A3"};
         float trackH = 42.0f;
         ImVec2 trackPositions[6];
@@ -5257,7 +5289,7 @@ int main(int argc, char* argv[]) {
                 if (mid >= 0 && mid < (int)media.size() && media[mid].thumb) {
                     float tw = std::min(40.0f, w - 8.0f);
                     if (tw > 10.0f)
-                        thumbBlits.push_back({cp0, ImVec2(cp0.x + tw, cp1.y), trackClip0, trackClip1, media[mid].thumb, media[mid].thumbW, media[mid].thumbH});
+                        DrawThumb(tdl, cp0, ImVec2(cp0.x + tw, cp1.y), trackClip0, trackClip1, media[mid].thumb, media[mid].thumbW, media[mid].thumbH);
                 }
                 if (i == selectedClip || IsSelected(i)) {
                     if (i == selectedClip) EnsureEnvelope(clips[i]);
@@ -5682,6 +5714,8 @@ int main(int argc, char* argv[]) {
             if (ImGui::RadioButton("1:1", exAspect == 2)) exAspect = 2;
             ImGui::SameLine();
             if (ImGui::RadioButton("4:3", exAspect == 3)) exAspect = 3;
+            ImGui::SameLine();
+            if (ImGui::RadioButton("3:4", exAspect == 4)) exAspect = 4;
             ImGui::Spacing();
             ImGui::TextUnformatted("Resolution");
             if (ImGui::RadioButton("720p", exRes == 0)) exRes = 0;
@@ -5893,36 +5927,6 @@ int main(int argc, char* argv[]) {
                 if (!open) audioPanelOpen = false;
             }
         }
-        if (mediaPanelOpen) {
-            ImVec2 pos = mediaMenuPos;
-            ImGuiIO& mio = ImGui::GetIO();
-            if (pos.x > mio.DisplaySize.x - 220.0f) pos.x = mio.DisplaySize.x - 220.0f;
-            if (pos.y > mio.DisplaySize.y - 120.0f) pos.y = mio.DisplaySize.y - 120.0f;
-            if (pos.x < 8.0f) pos.x = 8.0f;
-            if (pos.y < 8.0f) pos.y = 8.0f;
-            ImGui::SetNextWindowPos(pos, openedPanelThisFrame ? ImGuiCond_Always : ImGuiCond_Appearing);
-            ImGui::SetNextWindowFocus();
-            ImGui::SetNextWindowBgAlpha(0.98f);
-            bool open = true;
-            if (ClickOutsidePanels()) open = false;
-            if (ImGui::Begin("Import", &open, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse)) {
-                ImGui::TextUnformatted("Import");
-                ImGui::Separator();
-                if (mediaMenuIndex >= 0 && mediaMenuIndex < (int)media.size()) {
-                    ImGui::TextUnformatted(media[mediaMenuIndex].name.c_str());
-                    if (ImGui::Button("Delete")) {
-                        RemoveMedia(mediaMenuIndex);
-                        mediaMenuIndex = -1;
-                        open = false;
-                    }
-                }
-                if (ImGui::Button("Import")) ImportFiles(hwnd);
-                ImVec2 w0 = ImGui::GetWindowPos();
-                mediaPanelRect = ImVec4(w0.x, w0.y, w0.x + ImGui::GetWindowSize().x, w0.y + ImGui::GetWindowSize().y);
-            }
-            ImGui::End();
-            if (!open) mediaPanelOpen = false;
-        }
         if (fontAtlas.empty()) {
             ImGuiIO& fio = ImGui::GetIO();
             unsigned char* px = fio.Fonts->TexPixelsAlpha8;
@@ -5978,6 +5982,7 @@ int main(int argc, char* argv[]) {
         if (pglUseProgram) pglUseProgram(0);
         DrawPreviewSubs(view0, view1);
 #endif
+        RenderFloatingOnTop();
         SDL_GL_SwapWindow(window);
     }
 
