@@ -2328,7 +2328,7 @@ bool ExportSession::BeginRifePass() {
     if (total < 1) total = 1;
     phase = 1;
     fps = outFps;
-    status = RifeProbe().cuda ? "RIFE GPU" : "RIFE CPU";
+    status = RifeProbe().cuda ? "RIFE GPU" : RifeProbe().detail;
     previewStatus = status;
     return true;
 }
@@ -2359,7 +2359,10 @@ void ExportSession::StepRife() {
     frameIndex++;
     int pct = total ? (frameIndex * 100) / total : 0;
     char buf[160];
-    snprintf(buf, sizeof(buf), "%s %d%%  (%d/%d)", RifeProbe().cuda ? "RIFE GPU" : "RIFE CPU", pct, frameIndex, total);
+    if (RifeProbe().cuda)
+        snprintf(buf, sizeof(buf), "RIFE GPU %d%%  (%d/%d)", pct, frameIndex, total);
+    else
+        snprintf(buf, sizeof(buf), "RIFE CPU %d%%  (%d/%d)  %s", pct, frameIndex, total, RifeProbe().detail.c_str());
     status = buf;
     previewStatus = status;
 }
@@ -3969,7 +3972,7 @@ int main(int argc, char* argv[]) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
-    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 31",
+    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 32",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900,
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!window) { SDL_Quit(); return 1; }
