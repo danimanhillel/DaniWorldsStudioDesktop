@@ -174,6 +174,8 @@ bool draggingPlayhead = false;
 int draggingClip = -1;
 float dragOffsetX = 0.0f;
 ImVec2 previewMin(0, 0), previewMax(0, 0);
+ImVec2 previewFrameMin(0, 0), previewFrameMax(0, 0);
+bool previewFrameValid = false;
 float shownLocal = -1000.0f;
 int trimmingClip = -1;
 int trimSide = 0;
@@ -187,6 +189,7 @@ int dragVolPt = -1;
 float frameDebt = 0.0f;
 float timeOriginX = 0.0f;
 int exAspect = 0;
+static void SplitLongSubs();
 int exRes = 1;
 int exFpsIdx = 1;
 bool exRife = false;
@@ -1330,6 +1333,7 @@ static void AsrPump() {
             sub.text = s.text;
             subs.push_back(sub);
         }
+        SplitLongSubs();
         asrOn = false;
         asrPcm.clear();
         asrPcm.shrink_to_fit();
@@ -2415,6 +2419,78 @@ static bool TransportButton(const char* id, int kind) {
     }
     ImGui::PopID();
     return pressed;
+}
+
+static int WordsPerCue() {
+    if (exAspect == 1) return 6;
+    if (exAspect == 2) return 8;
+    if (exAspect == 3) return 10;
+    return 14;
+}
+
+static void SplitLongSubs() {
+    int budget = WordsPerCue();
+    if (budget < 1) budget = 1;
+    std::vector<Subtitle> out;
+    out.reserve(subs.size());
+    for (const Subtitle& s : subs) {
+        std::vector<std::string> words;
+        std::string word;
+        for (char ch : s.text) {
+            if (ch == ' ' || ch == '\n' || ch == '\r' || ch == '\t') {
+                if (!word.empty()) { words.push_back(word); word.clear(); }
+            } else word.push_back(ch);
+        }
+        if (!word.empty()) words.push_back(word);
+        if ((int)words.size() <= budget) { out.push_back(s); continue; }
+        float t = s.start;
+        float total = std::max(0.25f, s.duration);
+        int used = 0;
+        while (used < (int)words.size()) {
+            int n = std::min(budget, (int)words.size() - used);
+            std::string text;
+            for (int i = 0; i < n; i++) {
+                if (!text.empty()) text += " ";
+                text += words[used + i];
+            }
+            float d = total * (float)n / (float)words.size();
+            if (used + n >= (int)words.size()) d = std::max(0.2f, s.start + s.duration - t);
+            Subtitle bit = s;
+            bit.start = t;
+            bit.duration = std::max(0.2f, d);
+            bit.text = text;
+            out.push_back(bit);
+            t += bit.duration;
+            used += n;
+        }
+    }
+    subs.swap(out);
+}
+
+static float AspectValue(int aspect) {
+    if (aspect == 1) return 9.0f / 16.0f;
+    if (aspect == 2) return 1.0f;
+    if (aspect == 3) return 4.0f / 3.0f;
+    return 16.0f / 9.0f;
+}
+
+static void FitAspectBox(ImVec2 p0, ImVec2 p1, float aspect, ImVec2& a, ImVec2& b) {
+    float areaW = std::max(1.0f, p1.x - p0.x);
+    float areaH = std::max(1.0f, p1.y - p0.y);
+    float areaAspect = areaW / areaH;
+    a = p0;
+    b = p1;
+    if (aspect > areaAspect) {
+        float h = areaW / aspect;
+        float off = (areaH - h) * 0.5f;
+        a.y += off;
+        b.y -= off;
+    } else {
+        float w = areaH * aspect;
+        float off = (areaW - w) * 0.5f;
+        a.x += off;
+        b.x -= off;
+    }
 }
 
 static float GlyphWidth(ImFont* font, float size, unsigned cp) {
@@ -4351,6 +4427,7 @@ bool SaveProject(const std::string& path) {
     fprintf(f, "time %.6f\n", currentTime);
     fprintf(f, "snap %d\n", snapEnabled ? 1 : 0);
     fprintf(f, "pps %.3f\n", pixelsPerSecond);
+    fprintf(f, "aspect %d\n", exAspect);
     for (const auto& m : media) {
         std::string p = m.path;
         for (char& ch : p) if (ch == '\n' || ch == '\r') ch = ' ';
@@ -4410,6 +4487,9 @@ bool LoadProject(const std::string& path) {
         } else if (strncmp(line, "pps ", 4) == 0) {
             float p = (float)atof(line + 4);
             if (p > 5.0f && p < 400.0f) pixelsPerSecond = p;
+        } else if (strncmp(line, "aspect ", 7) == 0) {
+            int a = atoi(line + 7);
+            if (a >= 0 && a <= 3) exAspect = a;
         } else if (line[0] == 'M') {
             char type[32] = {0};
             float dur = 5.0f, aspect = 16.0f / 9.0f;
@@ -4583,7 +4663,7 @@ int main(int argc, char* argv[]) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
-    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 46",
+    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 47",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900,
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!window) { SDL_Quit(); return 1; }
@@ -4825,6 +4905,9 @@ int main(int argc, char* argv[]) {
         dl->AddRectFilled(p0, p1, IM_COL32(0, 0, 0, 255));
         previewMin = p0;
         previewMax = p1;
+        FitAspectBox(p0, p1, AspectValue(exAspect), previewFrameMin, previewFrameMax);
+        previewFrameValid = true;
+        dl->AddRect(previewFrameMin, previewFrameMax, IM_COL32(70, 70, 70, 255));
 
         topClip = -1;
         int bestTrack = 99;
@@ -4844,9 +4927,12 @@ int main(int argc, char* argv[]) {
         ImGui::EndChild();
 
         {
-            float row = 40.0f * 3.0f + ImGui::GetStyle().ItemSpacing.x * 2.0f;
-            float spare = ImGui::GetContentRegionAvail().x - row;
-            if (spare > 0.0f) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + spare * 0.5f);
+            float buttonsW = 40.0f * 3.0f + ImGui::GetStyle().ItemSpacing.x * 2.0f;
+            float comboW = 92.0f;
+            float avail = ImGui::GetContentRegionAvail().x;
+            float origin = ImGui::GetCursorPosX();
+            float left = std::max(0.0f, (avail - comboW - 12.0f - buttonsW) * 0.5f);
+            ImGui::SetCursorPosX(origin + left);
         }
         if (TransportButton("play", 0)) {
 #ifdef HAVE_FFMPEG
@@ -4876,6 +4962,16 @@ int main(int argc, char* argv[]) {
             shownLocal = -1000.0f;
         }
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Stop");
+        ImGui::SameLine();
+        {
+            float comboW = 92.0f;
+            float avail = ImGui::GetContentRegionAvail().x;
+            if (avail > comboW) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + avail - comboW);
+            ImGui::SetNextItemWidth(comboW);
+            int before = exAspect;
+            if (ImGui::Combo("##previewaspect", &exAspect, "16:9\09:16\01:1\04:3\0") && exAspect != before) SplitLongSubs();
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Preview and export aspect");
+        }
         ImGui::EndGroup();
 
         ImGui::Separator();
@@ -5734,7 +5830,10 @@ int main(int argc, char* argv[]) {
                     || (ImGui::IsWindowFocused() && ImGui::IsAnyItemActive());
             }
             ImGui::End();
-            if (!open) subEditorOpen = false;
+            if (!open) {
+                subEditorOpen = false;
+                SplitLongSubs();
+            }
         }
         if (subStyleOpen) {
             PlacePanel(390.0f);
@@ -5840,6 +5939,8 @@ int main(int argc, char* argv[]) {
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
 #ifdef HAVE_FFMPEG
+        ImVec2 view0 = previewFrameValid ? previewFrameMin : previewMin;
+        ImVec2 view1 = previewFrameValid ? previewFrameMax : previewMax;
         fitValid = false;
         recordFit = true;
         activeGrade = BusAt(currentTime);
@@ -5857,17 +5958,17 @@ int main(int argc, char* argv[]) {
                 int ah = aIsMain ? player->height : playerB->height;
                 int bw = aIsMain ? playerB->width : player->width;
                 int bh = aIsMain ? playerB->height : player->height;
-                BlitFxPair(previewMin, previewMax, texA, aw, ah, texB, bw, bh, look);
+                BlitFxPair(view0, view1, texA, aw, ah, texB, bw, bh, look);
             } else if (player && player->hasFrame && player->texture) {
-                BlitVideo(previewMin, previewMax, player->texture, player->width, player->height, previewMin, previewMax);
+                BlitVideo(view0, view1, player->texture, player->width, player->height, view0, view1);
             }
         } else if (player && player->hasFrame && player->texture)
-            BlitVideo(previewMin, previewMax, player->texture, player->width, player->height, previewMin, previewMax);
+            BlitVideo(view0, view1, player->texture, player->width, player->height, view0, view1);
         activeGrade = nullptr;
         recordFit = false;
         if (gsDrawClip >= 0 && playerGS && playerGS->hasFrame && playerGS->texture) {
-            ImVec2 a = fitValid ? fitA : previewMin;
-            ImVec2 b = fitValid ? fitB : previewMax;
+            ImVec2 a = fitValid ? fitA : view0;
+            ImVec2 b = fitValid ? fitB : view1;
             const Clip& gc = clips[gsDrawClip];
             BlitKeyed(a, b, playerGS->texture, gc.keySim, gc.keySoft, gc.keySpill, gc.gsX, gc.gsY, gc.gsScale, gc.gsOpacity);
             if (!fitValid) { fitA = a; fitB = b; fitValid = true; }
@@ -5875,8 +5976,7 @@ int main(int argc, char* argv[]) {
         for (const auto& tb : thumbBlits)
             BlitVideo(tb.a, tb.b, tb.tex, tb.w, tb.h, tb.c0, tb.c1);
         if (pglUseProgram) pglUseProgram(0);
-        if (fitValid) DrawPreviewSubs(fitA, fitB);
-        else DrawPreviewSubs(previewMin, previewMax);
+        DrawPreviewSubs(view0, view1);
 #endif
         SDL_GL_SwapWindow(window);
     }
