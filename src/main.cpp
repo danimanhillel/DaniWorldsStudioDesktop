@@ -17,6 +17,8 @@
 #include <atomic>
 #include <condition_variable>
 #include <map>
+#include <deque>
+#include <sstream>
 #include "effects.h"
 #include "overlay_fx.h"
 #include "rife.h"
@@ -5561,6 +5563,286 @@ bool SaveProject(const std::string& path) {
     return true;
 }
 
+struct EditSnap {
+    struct M {
+        std::string path, name, type;
+        float duration = 5.0f;
+        float aspect = 16.0f / 9.0f;
+    };
+    std::vector<M> media;
+    std::vector<Clip> clips;
+    std::vector<BusSegment> bus;
+    std::vector<Subtitle> subs;
+    SubStyle style;
+    std::vector<OverlayFx> overlays;
+    int aspect = 0;
+};
+
+static Clip ClipWithoutFx(const Clip& s) {
+    Clip d;
+    d.mediaId = s.mediaId;
+    d.startTime = s.startTime;
+    d.duration = s.duration;
+    d.sourceOffset = s.sourceOffset;
+    d.speed = s.speed;
+    d.fadeIn = s.fadeIn;
+    d.fadeOut = s.fadeOut;
+    d.track = s.track;
+    d.volume = s.volume;
+    d.eqOn = s.eqOn;
+    memcpy(d.eqGain, s.eqGain, sizeof(d.eqGain));
+    d.reverbOn = s.reverbOn;
+    d.reverbTime = s.reverbTime;
+    d.delayOn = s.delayOn;
+    d.delayTempo = s.delayTempo;
+    d.fxOut = s.fxOut;
+    d.fxDur = s.fxDur;
+    d.keySim = s.keySim;
+    d.keySoft = s.keySoft;
+    d.keySpill = s.keySpill;
+    d.gsX = s.gsX;
+    d.gsY = s.gsY;
+    d.gsScale = s.gsScale;
+    d.gsAspect = s.gsAspect;
+    d.gsRot = s.gsRot;
+    d.gsOpacity = s.gsOpacity;
+    d.muted = s.muted;
+    d.gradeLight = s.gradeLight;
+    d.gradeContrast = s.gradeContrast;
+    d.gradeWarm = s.gradeWarm;
+    d.gradeTint = s.gradeTint;
+    d.gradeSat = s.gradeSat;
+    d.gradeShadow = s.gradeShadow;
+    d.gradeGrain = s.gradeGrain;
+    d.gradeSharp = s.gradeSharp;
+    return d;
+}
+
+static EditSnap CaptureEdit() {
+    EditSnap e;
+    e.aspect = exAspect;
+    e.style = subStyle;
+    e.bus = bus;
+    e.subs = subs;
+    e.overlays = gOverlays;
+    for (const auto& m : media) {
+        EditSnap::M x;
+        x.path = m.path;
+        x.name = m.name;
+        x.type = m.type;
+        x.duration = m.duration;
+        x.aspect = m.aspect;
+        e.media.push_back(x);
+    }
+    for (const auto& c : clips) e.clips.push_back(ClipWithoutFx(c));
+    return e;
+}
+
+static std::string EditSignature(const EditSnap& e) {
+    std::ostringstream o;
+    o.setf(std::ios::fixed);
+    o.precision(4);
+    o << e.aspect << '\n' << e.media.size() << '\n';
+    for (const auto& m : e.media)
+        o << m.type << '\t' << m.duration << '\t' << m.aspect << '\t' << m.path << '\n';
+    o << e.clips.size() << '\n';
+    for (const auto& c : e.clips) {
+        o << c.mediaId << '\t' << c.startTime << '\t' << c.duration << '\t' << c.sourceOffset << '\t'
+          << c.speed << '\t' << c.fadeIn << c.fadeOut << '\t' << c.track << '\t' << c.muted << '\t'
+          << c.fxOut << '\t' << c.fxDur << '\t'
+          << c.keySim << '\t' << c.keySoft << '\t' << c.keySpill << '\t'
+          << c.gsX << '\t' << c.gsY << '\t' << c.gsScale << '\t' << c.gsAspect << '\t' << c.gsRot << '\t' << c.gsOpacity << '\t'
+          << c.gradeLight << '\t' << c.gradeContrast << '\t' << c.gradeWarm << '\t' << c.gradeTint << '\t'
+          << c.gradeSat << '\t' << c.gradeShadow << '\t' << c.gradeGrain << '\t' << c.gradeSharp << '\t'
+          << c.eqOn << c.reverbOn << c.delayOn << '\t' << c.reverbTime << '\t' << c.delayTempo;
+        for (float g : c.eqGain) o << '\t' << g;
+        o << '\t' << c.volume.size();
+        for (const auto& v : c.volume) o << '\t' << v.norm << '\t' << v.gain;
+        o << '\n';
+    }
+    o << e.bus.size() << '\n';
+    for (const auto& b : e.bus)
+        o << b.start << '\t' << b.duration << '\t' << b.lightness << '\t' << b.contrast << '\t' << b.warmth << '\t'
+          << b.tint << '\t' << b.saturation << '\t' << b.shadow << '\t' << b.grain << '\t' << b.sharpen << '\n';
+    o << e.style.text[0] << '\t' << e.style.text[1] << '\t' << e.style.text[2] << '\t' << e.style.border << '\t'
+      << e.style.borderPx << '\t' << e.style.edge[0] << '\t' << e.style.edge[1] << '\t' << e.style.edge[2] << '\t'
+      << e.style.background << '\t' << e.style.bg[0] << '\t' << e.style.bg[1] << '\t' << e.style.bg[2] << '\t'
+      << e.style.bgAlpha << '\t' << e.style.fontScale << '\n';
+    o << e.subs.size() << '\n';
+    for (const auto& s : e.subs) o << s.start << '\t' << s.duration << '\t' << s.text << '\n';
+    o << e.overlays.size() << '\n';
+    for (const auto& fx : e.overlays) {
+        o << fx.kind << '\t' << fx.start << '\t' << fx.duration << '\t' << fx.x << '\t' << fx.y << '\t'
+          << fx.scale << '\t' << fx.rot << '\t' << fx.opacity << '\t' << fx.amount << '\t' << fx.dir << '\t' << fx.rec;
+        for (int ch = 0; ch < 7; ch++) {
+            o << '\t' << fx.holdOn[ch] << '\t' << fx.hold[ch] << '\t' << fx.anim[ch].size();
+            for (const auto& k : fx.anim[ch]) o << '\t' << k.t << '\t' << k.v;
+        }
+        o << '\n';
+    }
+    return o.str();
+}
+
+static std::deque<EditSnap> undoStack;
+static EditSnap undoBaseline;
+static std::string undoBaselineSig;
+static bool undoReady = false;
+static bool undoGesture = false;
+static int undoRequest = 0;
+
+static void ApplyEdit(const EditSnap& e) {
+    bool sameMedia = e.media.size() == media.size();
+    if (sameMedia) {
+        for (size_t i = 0; i < e.media.size(); i++) {
+            if (e.media[i].path != media[i].path || e.media[i].type != media[i].type) sameMedia = false;
+        }
+    }
+    if (!sameMedia) {
+        std::vector<int> steal(e.media.size(), -1);
+        std::vector<char> used(media.size(), 0);
+        for (size_t i = 0; i < e.media.size(); i++) {
+            for (size_t j = 0; j < media.size(); j++) {
+                if (!used[j] && media[j].path == e.media[i].path) {
+                    steal[i] = (int)j;
+                    used[j] = 1;
+                    break;
+                }
+            }
+        }
+        std::vector<MediaItem> next;
+        next.reserve(e.media.size());
+        for (size_t i = 0; i < e.media.size(); i++) {
+            MediaItem m;
+            if (steal[i] >= 0) {
+                m = media[steal[i]];
+                media[steal[i]].thumb = 0;
+            }
+            m.path = e.media[i].path;
+            m.name = e.media[i].name;
+            m.type = e.media[i].type;
+            m.duration = e.media[i].duration;
+            m.aspect = e.media[i].aspect;
+            if (!m.thumb) MakeThumbnail(m);
+            next.push_back(m);
+        }
+        for (auto& m : media) {
+            if (m.thumb) glDeleteTextures(1, &m.thumb);
+        }
+        media.swap(next);
+        mediaSel.clear();
+        floatMedia = -1;
+        floatMediaOpen = false;
+#ifdef HAVE_FFMPEG
+        for (auto& a : audioSrcs) CloseAudioSrc(a);
+        audioSrcs.clear();
+        if (player) player->Close();
+        if (playerB) playerB->Close();
+        if (playerNext) playerNext->Close();
+        if (playerGS) playerGS->Close();
+        if (playerLib) playerLib->Close();
+        gRam.Clear();
+        libPlayId = -1;
+        playingMediaId = -1;
+        playingClip = -1;
+        playingMediaIdB = -1;
+        playingClipB = -1;
+        playingGsClip = -1;
+        playingGsMedia = -1;
+        nextMediaId = -1;
+        nextClipIdx = -1;
+        ResetAudioSync();
+#endif
+    }
+    clips.clear();
+    for (const auto& c : e.clips) clips.push_back(ClipWithoutFx(c));
+    bus = e.bus;
+    subs = e.subs;
+    subStyle = e.style;
+    gOverlays = e.overlays;
+    exAspect = e.aspect;
+    if (selectedClip >= (int)clips.size()) selectedClip = -1;
+    selection.erase(std::remove_if(selection.begin(), selection.end(), [](int i) { return i < 0 || i >= (int)clips.size(); }), selection.end());
+    if (selectedBus >= (int)bus.size()) selectedBus = -1;
+    if (contextBus >= (int)bus.size()) contextBus = -1;
+    if (selectedSub >= (int)subs.size()) selectedSub = -1;
+    if (editingSub < 0 || editingSub >= (int)subs.size()) {
+        editingSub = -1;
+        subEditorOpen = false;
+    } else if (subEditorOpen) {
+        LoadSubEditor(subs[editingSub].text);
+    }
+    if (gOverlaySel >= (int)gOverlays.size()) gOverlaySel = -1;
+    if (ovPanel < 0 || ovPanel >= (int)gOverlays.size()) {
+        ovPanel = -1;
+        ovPanelOpen = false;
+    }
+    draggingClip = -1;
+    trimmingClip = -1;
+    dragVolClip = -1;
+    draggingOv = -1;
+    trimmingOv = -1;
+    contextClip = -1;
+    shownLocal = -1000.0f;
+    ImGui::ClearActiveID();
+}
+
+static void NoteUndoBaseline() {
+    undoBaseline = CaptureEdit();
+    undoBaselineSig = EditSignature(undoBaseline);
+    undoReady = true;
+    undoGesture = false;
+}
+
+static void UndoTick() {
+    if (asrOn || gExport.active) return;
+    EditSnap now = CaptureEdit();
+    std::string sig = EditSignature(now);
+    if (!undoReady) {
+        undoBaseline = std::move(now);
+        undoBaselineSig = std::move(sig);
+        undoReady = true;
+        return;
+    }
+    bool hot = ImGui::IsAnyItemActive() || ImGui::IsMouseDown(0) || ImGui::IsMouseDown(1);
+    if (hot) {
+        if (!undoGesture && sig != undoBaselineSig) undoGesture = true;
+        return;
+    }
+    if (sig != undoBaselineSig) {
+        undoStack.push_back(std::move(undoBaseline));
+        while (undoStack.size() > 20) undoStack.pop_front();
+        undoBaseline = std::move(now);
+        undoBaselineSig = std::move(sig);
+    }
+    undoGesture = false;
+}
+
+static void PerformUndo() {
+    if (undoGesture) {
+        EditSnap now = CaptureEdit();
+        if (EditSignature(now) != undoBaselineSig) {
+            ApplyEdit(undoBaseline);
+            NoteUndoBaseline();
+            previewStatus = "Undo";
+            if (undoRequest > 0) undoRequest--;
+            if (undoRequest <= 0) return;
+        }
+    }
+    if (undoStack.empty()) {
+        undoRequest = 0;
+        return;
+    }
+    while (undoRequest > 0 && !undoStack.empty()) {
+        EditSnap snap = std::move(undoStack.back());
+        undoStack.pop_back();
+        ApplyEdit(snap);
+        undoRequest--;
+    }
+    undoRequest = 0;
+    NoteUndoBaseline();
+    previewStatus = "Undo";
+}
+
 static void TrimLine(std::string& s) {
     while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
 }
@@ -5862,6 +6144,8 @@ int main(int argc, char* argv[]) {
                 }
                 if ((event.key.keysym.sym == SDLK_i) && !event.key.repeat && !io.WantTextInput && !subEditorOpen && !(SDL_GetModState() & KMOD_CTRL))
                     ImportFiles(hwnd);
+                if (event.key.keysym.sym == SDLK_z && (event.key.keysym.mod & KMOD_CTRL) && !(event.key.keysym.mod & KMOD_SHIFT) && !io.WantTextInput)
+                    undoRequest++;
                 if (event.key.keysym.sym == SDLK_DELETE && !event.key.repeat && fxHover >= 0 && fxHover < (int)gOverlays.size() && !io.WantTextInput) {
                     gOverlays.erase(gOverlays.begin() + fxHover);
                     if (gOverlaySel == fxHover) gOverlaySel = -1;
@@ -5947,6 +6231,7 @@ int main(int argc, char* argv[]) {
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("Edit")) {
+            if (ImGui::MenuItem("Undo", "Ctrl+Z", false, !undoStack.empty() || undoGesture)) undoRequest++;
             if (ImGui::MenuItem("Import")) ImportFiles(hwnd);
             if (ImGui::MenuItem(asrOn ? "Stop subs" : "Auto subs")) {
                 if (asrOn) {
@@ -7554,6 +7839,8 @@ int main(int argc, char* argv[]) {
         DrawPreviewSubs(view0, view1);
 #endif
         RenderFloatingOnTop();
+        if (undoRequest > 0) PerformUndo();
+        else UndoTick();
         SDL_GL_SwapWindow(window);
     }
 
