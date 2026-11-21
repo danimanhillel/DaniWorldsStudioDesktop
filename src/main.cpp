@@ -478,8 +478,8 @@ public:
         int dw = src->width;
         int dh = src->height;
         int edge = std::max(dw, dh);
-        if (edge > 1280) {
-            double s = 1280.0 / (double)edge;
+        if (edge > 960) {
+            double s = 960.0 / (double)edge;
             dw = std::max(2, (int)std::lround(src->width * s) & ~1);
             dh = std::max(2, (int)std::lround(src->height * s) & ~1);
         }
@@ -634,6 +634,8 @@ struct PreviewRam {
     std::atomic<int> pct{0};
     std::atomic<int> decoding{-1};
     std::atomic<uint64_t> usedBytes{0};
+    float activeFrom = 0;
+    float activeTo = 0;
     Task pending;
     bool hasTask = false;
     bool busy = false;
@@ -655,9 +657,13 @@ struct PreviewRam {
     }
 
     bool MakeRoom(int keep, size_t need) {
-        if (RoomFor(need)) return true;
+        const uint64_t cap = 768ull << 20;
+        auto tooBig = [&]() {
+            return usedBytes.load() + (uint64_t)need > cap || !RoomFor(need);
+        };
+        if (!tooBig()) return true;
         std::lock_guard<std::mutex> lk(mu);
-        while (!RoomFor(need)) {
+        while (usedBytes.load() + (uint64_t)need > cap || !RoomFor(need)) {
             int victim = -1;
             uint64_t biggest = 0;
             for (auto& kv : slots) {
@@ -665,15 +671,18 @@ struct PreviewRam {
                 if (kv.second.bytes > biggest) { biggest = kv.second.bytes; victim = kv.first; }
             }
             if (victim < 0) return false;
-            usedBytes -= slots[victim].bytes;
+            uint64_t n = slots[victim].bytes;
+            uint64_t cur = usedBytes.load();
+            usedBytes = cur > n ? cur - n : 0;
             slots.erase(victim);
             done.erase(victim);
         }
         return true;
     }
 
-    void Push(int media, float pts, int w, int h, std::vector<uint8_t>& rgba) {
+    void Push(int media, float pts, int w, int h, std::vector<uint8_t>& rgba, int taskGen) {
         std::lock_guard<std::mutex> lk(mu);
+        if (taskGen != gen.load()) return;
         Slot& s = slots[media];
         if ((s.w && s.w != w) || (s.h && s.h != h)) {
             usedBytes -= s.bytes;
@@ -775,8 +784,8 @@ struct PreviewRam {
                     int edge = std::max(src->width, src->height);
                     dw = src->width;
                     dh = src->height;
-                    if (edge > 1280) {
-                        double s = 1280.0 / (double)edge;
+                    if (edge > 960) {
+                        double s = 960.0 / (double)edge;
                         dw = std::max(2, (int)std::lround(src->width * s) & ~1);
                         dh = std::max(2, (int)std::lround(src->height * s) & ~1);
                     }
@@ -802,7 +811,7 @@ struct PreviewRam {
                 if (!MakeRoom(task.media, rgba.size())) { stalled = true; return; }
                 stalled = false;
                 std::vector<uint8_t> owned = rgba;
-                Push(task.media, pts, dw, dh, owned);
+                Push(task.media, pts, dw, dh, owned, task.gen);
                 lastKeep = pts;
                 if (task.image) {
                     MarkDone(task.media, task.from, task.to);
@@ -827,8 +836,10 @@ struct PreviewRam {
                 task = pending;
                 hasTask = false;
                 busy = true;
+                activeFrom = task.from;
+                activeTo = task.to;
+                decoding.store(task.media);
             }
-            decoding.store(task.media);
             if (!pause.load() && task.gen == gen.load()) Decode(task);
             decoding.store(-1);
             std::lock_guard<std::mutex> lk(mu);
@@ -856,6 +867,44 @@ struct PreviewRam {
         hasTask = false;
         pct = 0;
         stalled = false;
+    }
+
+    void Forget(int id) {
+        gen.fetch_add(1);
+        std::lock_guard<std::mutex> lk(mu);
+        auto it = slots.find(id);
+        if (it != slots.end()) {
+            uint64_t n = it->second.bytes;
+            uint64_t cur = usedBytes.load();
+            usedBytes = cur > n ? cur - n : 0;
+            std::vector<Frame>().swap(it->second.frames);
+            slots.erase(it);
+        }
+        std::map<int, Slot> shifted;
+        for (auto& kv : slots) {
+            int k = kv.first > id ? kv.first - 1 : kv.first;
+            shifted.emplace(k, std::move(kv.second));
+        }
+        slots.swap(shifted);
+        std::map<int, std::vector<Span>> kept;
+        for (auto& kv : done) {
+            if (kv.first == id) continue;
+            int k = kv.first > id ? kv.first - 1 : kv.first;
+            kept.emplace(k, std::move(kv.second));
+        }
+        done.swap(kept);
+        if (hasTask) {
+            if (pending.media == id) hasTask = false;
+            else if (pending.media > id) pending.media--;
+        }
+        stalled = false;
+        uint64_t sum = 0;
+        for (auto& kv : slots) {
+            kv.second.bytes = 0;
+            for (const Frame& f : kv.second.frames) kv.second.bytes += f.rgba.size();
+            sum += kv.second.bytes;
+        }
+        usedBytes = sum;
     }
 
     void Stop() {
@@ -902,21 +951,35 @@ struct PreviewRam {
     void Tick(float time) {
         struct R { int media; std::string path; float a, b, rank; bool image; };
         std::vector<R> ranges;
+        const float behind = 0.45f;
+        const float ahead = 3.5f;
         for (const Clip& c : clips) {
             if (c.track >= 3 && c.track != kGsTrack) continue;
             if (c.mediaId < 0 || c.mediaId >= (int)media.size()) continue;
             if (media[c.mediaId].type == "audio") continue;
+            float clipEnd = c.startTime + c.duration;
+            if (clipEnd < time - behind || c.startTime > time + ahead) continue;
             R r;
             r.media = c.mediaId;
             r.path = media[c.mediaId].path;
             r.image = media[c.mediaId].type == "image";
-            r.a = r.image ? 0.0f : std::max(0.0f, c.sourceOffset);
-            r.b = r.a + (r.image ? 0.05f : c.duration * std::max(0.05f, c.speed));
-            if (!r.image && media[c.mediaId].duration > 0.2f && r.b > media[c.mediaId].duration + 0.05f)
-                r.b = media[c.mediaId].duration + 0.05f;
-            if (r.b < r.a + 0.04f) r.b = r.a + 0.04f;
-            float mid = c.startTime + c.duration * 0.5f;
-            r.rank = std::fabs(mid - time);
+            if (r.image) {
+                r.a = 0.0f;
+                r.b = 0.05f;
+            } else {
+                float visA = std::max(c.startTime, time - behind);
+                float visB = std::min(clipEnd, time + ahead);
+                float speed = std::max(0.05f, c.speed);
+                r.a = std::max(0.0f, c.sourceOffset + (visA - c.startTime) * speed);
+                r.b = c.sourceOffset + (visB - c.startTime) * speed;
+                if (r.b > r.a + 5.0f) r.b = r.a + 5.0f;
+                if (media[c.mediaId].duration > 0.2f && r.b > media[c.mediaId].duration + 0.05f)
+                    r.b = media[c.mediaId].duration + 0.05f;
+                if (r.b < r.a + 0.04f) r.b = r.a + 0.04f;
+            }
+            if (time < c.startTime) r.rank = c.startTime - time;
+            else if (time > clipEnd) r.rank = time - clipEnd;
+            else r.rank = 0;
             ranges.push_back(r);
         }
         std::sort(ranges.begin(), ranges.end(), [](const R& a, const R& b) {
@@ -933,6 +996,55 @@ struct PreviewRam {
         std::sort(merged.begin(), merged.end(), [](const R& a, const R& b) {
             return a.rank < b.rank || (a.rank == b.rank && a.media < b.media);
         });
+        {
+            std::lock_guard<std::mutex> lk(mu);
+            std::map<int, std::pair<float, float>> bounds;
+            for (const R& r : merged) {
+                auto it = bounds.find(r.media);
+                if (it == bounds.end()) bounds[r.media] = {r.a, r.b};
+                else {
+                    it->second.first = std::min(it->second.first, r.a);
+                    it->second.second = std::max(it->second.second, r.b);
+                }
+            }
+            for (auto it = slots.begin(); it != slots.end();) {
+                auto w = bounds.find(it->first);
+                if (w == bounds.end()) {
+                    it = slots.erase(it);
+                    continue;
+                }
+                Slot& s = it->second;
+                float a = w->second.first;
+                float b = w->second.second;
+                auto fr = s.frames.begin();
+                while (fr != s.frames.end()) {
+                    if (fr->pts < a - 0.08f || fr->pts > b + 0.40f) fr = s.frames.erase(fr);
+                    else ++fr;
+                }
+                if (s.frames.empty()) it = slots.erase(it);
+                else ++it;
+            }
+            for (auto it = done.begin(); it != done.end();) {
+                auto w = bounds.find(it->first);
+                if (w == bounds.end()) { it = done.erase(it); continue; }
+                float a = w->second.first;
+                float b = w->second.second;
+                auto sp = it->second.begin();
+                while (sp != it->second.end()) {
+                    if (sp->b < a - 0.2f || sp->a > b + 0.2f) sp = it->second.erase(sp);
+                    else ++sp;
+                }
+                if (it->second.empty()) it = done.erase(it);
+                else ++it;
+            }
+            uint64_t sum = 0;
+            for (auto& kv : slots) {
+                kv.second.bytes = 0;
+                for (const Frame& f : kv.second.frames) kv.second.bytes += f.rgba.size();
+                sum += kv.second.bytes;
+            }
+            usedBytes = sum;
+        }
         double want = 0, got = 0;
         {
             std::lock_guard<std::mutex> lk(mu);
@@ -957,12 +1069,22 @@ struct PreviewRam {
         if (best < 0) { pct = merged.empty() ? 0 : 100; return; }
         EnsureThread();
         bool isBusy = false;
+        int activeMedia = -1;
+        float af = 0, at = 0;
         {
             std::lock_guard<std::mutex> lk(mu);
             isBusy = busy;
+            activeMedia = decoding.load();
+            af = activeFrom;
+            at = activeTo;
         }
         if (isBusy) {
-            if (decoding.load() != merged[best].media) gen.fetch_add(1);
+            bool useful = false;
+            for (const R& r : merged) {
+                if (r.media != activeMedia) continue;
+                if (r.b >= af - 0.25f && r.a <= at + 0.25f) useful = true;
+            }
+            if (!useful) gen.fetch_add(1);
             return;
         }
         Task task;
@@ -3856,8 +3978,9 @@ void SyncPreview(int topClip, float dt) {
         shownLocal = mediaT;
         char buf[128];
         int cachePct = gRam.Percent();
+        int cacheMb = (int)(gRam.usedBytes.load() >> 20);
         const char* tag = gRam.MemoryFull() ? "mem full" : (cachePct >= 99 ? "cached" : "loading");
-        snprintf(buf, sizeof(buf), "RAM %dx%d  %s %d%%", player->width, player->height, tag, cachePct);
+        snprintf(buf, sizeof(buf), "RAM %dMB %dx%d  %s %d%%", cacheMb, player->width, player->height, tag, cachePct);
         previewStatus = buf;
         PumpAudio();
         return;
@@ -3893,8 +4016,8 @@ void SyncPreview(int topClip, float dt) {
     }
     shownLocal = mediaT;
     if (player->hasFrame) {
-        char buf[80];
-        snprintf(buf, sizeof(buf), "%s %dx%d  x%.2g  cache %d%%", player->decName, player->width, player->height, speed, gRam.Percent());
+        char buf[128];
+        snprintf(buf, sizeof(buf), "%s %dx%d  x%.2g  cache %dMB", player->decName, player->width, player->height, speed, (int)(gRam.usedBytes.load() >> 20));
         previewStatus = buf;
     }
     PumpAudio();
@@ -5279,7 +5402,7 @@ void RemoveMedia(int id) {
     if (playerNext) playerNext->Close();
     if (playerGS) playerGS->Close();
     if (playerLib) playerLib->Close();
-    gRam.Clear();
+    gRam.Forget(id);
     libPlayId = -1;
     playingMediaId = -1;
     playingClip = -1;
