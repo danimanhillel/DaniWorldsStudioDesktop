@@ -657,7 +657,7 @@ struct PreviewRam {
     }
 
     bool MakeRoom(int keep, size_t need) {
-        const uint64_t cap = 768ull << 20;
+        const uint64_t cap = 1024ull << 20;
         auto tooBig = [&]() {
             return usedBytes.load() + (uint64_t)need > cap || !RoomFor(need);
         };
@@ -951,28 +951,53 @@ struct PreviewRam {
     void Tick(float time) {
         struct R { int media; std::string path; float a, b, rank; bool image; };
         std::vector<R> ranges;
-        const float behind = 0.45f;
-        const float ahead = 3.5f;
+        const float nearBehind = 1.5f;
+        const float nearAhead = 8.0f;
+        const uint64_t fullBudget = 200ull << 20;
+        auto proxyBytes = [](float aspect) -> int {
+            if (!(aspect > 0.05f)) aspect = 16.0f / 9.0f;
+            int w, h;
+            if (aspect >= 1.0f) {
+                w = 960;
+                h = std::max(2, ((int)std::lround(960.0 / aspect)) & ~1);
+            } else {
+                h = 960;
+                w = std::max(2, ((int)std::lround(960.0 * aspect)) & ~1);
+            }
+            return w * h * 4;
+        };
         for (const Clip& c : clips) {
             if (c.track >= 3 && c.track != kGsTrack) continue;
             if (c.mediaId < 0 || c.mediaId >= (int)media.size()) continue;
             if (media[c.mediaId].type == "audio") continue;
             float clipEnd = c.startTime + c.duration;
-            if (clipEnd < time - behind || c.startTime > time + ahead) continue;
+            bool image = media[c.mediaId].type == "image";
+            float speed = std::max(0.05f, c.speed);
+            float srcA = std::max(0.0f, c.sourceOffset);
+            float srcB = c.sourceOffset + (image ? 0.05f : c.duration * speed);
+            if (!image && media[c.mediaId].duration > 0.2f && srcB > media[c.mediaId].duration + 0.05f)
+                srcB = media[c.mediaId].duration + 0.05f;
+            if (srcB < srcA + 0.04f) srcB = srcA + 0.04f;
+            uint64_t est = (uint64_t)(std::max(0.04f, srcB - srcA) * 30.0 * proxyBytes(media[c.mediaId].aspect));
+            bool full = image || est <= fullBudget;
+            if (full) {
+                if (clipEnd < time - nearBehind || c.startTime > time + nearAhead) continue;
+            } else if (clipEnd < time - 0.5f || c.startTime > time + 4.5f) {
+                continue;
+            }
             R r;
             r.media = c.mediaId;
             r.path = media[c.mediaId].path;
-            r.image = media[c.mediaId].type == "image";
-            if (r.image) {
-                r.a = 0.0f;
-                r.b = 0.05f;
+            r.image = image;
+            if (full) {
+                r.a = image ? 0.0f : srcA;
+                r.b = image ? 0.05f : srcB;
             } else {
-                float visA = std::max(c.startTime, time - behind);
-                float visB = std::min(clipEnd, time + ahead);
-                float speed = std::max(0.05f, c.speed);
+                float visA = std::max(c.startTime, time - 0.5f);
+                float visB = std::min(clipEnd, time + 4.5f);
                 r.a = std::max(0.0f, c.sourceOffset + (visA - c.startTime) * speed);
                 r.b = c.sourceOffset + (visB - c.startTime) * speed;
-                if (r.b > r.a + 5.0f) r.b = r.a + 5.0f;
+                if (r.b > r.a + 6.0f) r.b = r.a + 6.0f;
                 if (media[c.mediaId].duration > 0.2f && r.b > media[c.mediaId].duration + 0.05f)
                     r.b = media[c.mediaId].duration + 0.05f;
                 if (r.b < r.a + 0.04f) r.b = r.a + 0.04f;
