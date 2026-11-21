@@ -2706,6 +2706,84 @@ static void DrawThumb(ImDrawList* dl, ImVec2 p0, ImVec2 p1, ImVec2 c0, ImVec2 c1
     dl->PopClipRect();
 }
 
+static ImU32 FxLaneColor(int kind) {
+    switch (kind) {
+    case 0: return IM_COL32(176, 122, 48, 235);
+    case 1: return IM_COL32(70, 110, 180, 235);
+    case 2: return IM_COL32(110, 70, 160, 235);
+    case 3:
+    case 4: return IM_COL32(46, 130, 96, 235);
+    case 5:
+    case 6:
+    case 7: return IM_COL32(70, 90, 120, 235);
+    default: return IM_COL32(140, 70, 110, 235);
+    }
+}
+
+static void DrawFxIcon(ImDrawList* dl, ImVec2 a, ImVec2 b, int kind) {
+    dl->AddRectFilled(a, b, IM_COL32(16, 16, 20, 255), 4.0f);
+    dl->AddRect(a, b, IM_COL32(70, 70, 80, 255), 4.0f);
+    float t = (float)ImGui::GetTime();
+    ImVec2 c((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f);
+    float w = (b.x - a.x) * 0.62f;
+    float h = (b.y - a.y) * 0.56f;
+    auto quad = [&](ImVec2 c0, float rw, float rh, float rot, ImU32 col) {
+        float hw = rw * 0.5f, hh = rh * 0.5f;
+        float cs = std::cos(rot), sn = std::sin(rot);
+        ImVec2 q[4];
+        float xs[4] = {-hw, hw, hw, -hw};
+        float ys[4] = {-hh, -hh, hh, hh};
+        for (int i = 0; i < 4; i++) {
+            q[i].x = c0.x + xs[i] * cs - ys[i] * sn;
+            q[i].y = c0.y + xs[i] * sn + ys[i] * cs;
+        }
+        dl->AddQuadFilled(q[0], q[1], q[2], q[3], col);
+        dl->AddQuad(q[0], q[1], q[2], q[3], IM_COL32(235, 235, 235, 200), 1.4f);
+    };
+    if (kind == 0) {
+        float bucket = std::floor(t * 8.0f);
+        float jx = (std::sin(bucket * 1.7f) * 0.5f) * (b.x - a.x) * 0.12f;
+        float jy = (std::cos(bucket * 2.1f) * 0.5f) * (b.y - a.y) * 0.10f;
+        quad(ImVec2(c.x + jx, c.y + jy), w, h, std::sin(bucket) * 0.08f, IM_COL32(196, 146, 64, 255));
+    } else if (kind == 1) {
+        quad(c, w * 0.72f, h * 0.72f, t * 1.3f, IM_COL32(86, 132, 210, 255));
+    } else if (kind == 2) {
+        float cw = w / 3.0f, ch = h / 3.0f;
+        ImVec2 o(c.x - w * 0.5f, c.y - h * 0.5f);
+        for (int y = 0; y < 3; y++) for (int x = 0; x < 3; x++) {
+            ImVec2 p(o.x + x * cw + 1.5f, o.y + y * ch + 1.5f);
+            dl->AddRectFilled(p, ImVec2(p.x + cw - 3.0f, p.y + ch - 3.0f), IM_COL32(120, 86, 176, 255), 1.0f);
+        }
+    } else if (kind == 3 || kind == 4) {
+        float k = 0.5f + 0.5f * std::sin(t * 2.0f);
+        float z = kind == 3 ? (0.42f + 0.58f * k) : (1.0f - 0.55f * k);
+        quad(c, w * z, h * z, 0, IM_COL32(64, 156, 114, 255));
+    } else if (kind >= 5 && kind <= 7) {
+        float k = 0.5f + 0.5f * std::sin(t * 1.6f);
+        float blur = kind == 6 ? k : (kind == 7 ? 1.0f - k : 0.75f);
+        for (int i = 4; i >= 0; i--) {
+            float grow = i * 3.2f * blur;
+            int alpha = 28 + i * 10;
+            dl->AddRectFilled(ImVec2(c.x - w * 0.42f - grow, c.y - h * 0.42f - grow),
+                              ImVec2(c.x + w * 0.42f + grow, c.y + h * 0.42f + grow),
+                              IM_COL32(150, 170, 190, alpha), 3.0f);
+        }
+        dl->AddRectFilled(ImVec2(c.x - w * 0.36f, c.y - h * 0.36f), ImVec2(c.x + w * 0.36f, c.y + h * 0.36f), IM_COL32(96, 118, 146, 230), 2.0f);
+    } else {
+        ImVec2 p0(c.x - w * 0.5f, c.y - h * 0.5f);
+        ImVec2 p1(c.x + w * 0.5f, c.y + h * 0.5f);
+        dl->AddRectFilled(p0, p1, IM_COL32(42, 24, 48, 255), 2.0f);
+        for (int i = 0; i < 7; i++) {
+            float y = p0.y + (i + 0.5f) * ((p1.y - p0.y) / 7.0f);
+            dl->AddLine(ImVec2(p0.x, y), ImVec2(p1.x, y), IM_COL32(255, 255, 255, 36));
+        }
+        float n = std::fmod(std::fabs(std::sin(std::floor(t * 6.0f) * 12.9f)) * 17.0f, 1.0f);
+        dl->AddCircleFilled(ImVec2(p0.x + 6.0f + n * (w - 12.0f), c.y - h * 0.12f), 2.2f, IM_COL32(245, 245, 240, 230));
+        float bar = p0.y + std::fmod(t * 0.35f, 1.0f) * (p1.y - p0.y);
+        dl->AddRectFilled(ImVec2(p0.x, bar), ImVec2(p1.x, bar + 2.0f), IM_COL32(255, 230, 210, 120));
+    }
+}
+
 static void RenderFloatingOnTop() {
     ImGuiContext* ctx = ImGui::GetCurrentContext();
     ImDrawData* src = ImGui::GetDrawData();
@@ -4777,8 +4855,8 @@ bool SaveProject(const std::string& path) {
                 b.saturation, b.shadow, b.grain, b.sharpen);
     }
     for (const auto& o : gOverlays) {
-        fprintf(f, "O %d %.4f %.4f %.3f %.3f %.3f %.2f %.3f %.3f\n",
-                o.kind, o.start, o.duration, o.x, o.y, o.scale, o.rot, o.opacity, o.amount);
+        fprintf(f, "O %d %.4f %.4f %.3f %.3f %.3f %.2f %.3f %.3f %d\n",
+                o.kind, o.start, o.duration, o.x, o.y, o.scale, o.rot, o.opacity, o.amount, o.dir < 0 ? -1 : 1);
     }
     fprintf(f, "Y %.3f %.3f %.3f %d %.2f %.3f %.3f %.3f %.3f %.3f %.3f %d\n",
             subStyle.text[0], subStyle.text[1], subStyle.text[2], subStyle.border ? 1 : 0, subStyle.borderPx,
@@ -4898,13 +4976,15 @@ bool LoadProject(const std::string& path) {
             }
         } else if (line[0] == 'O' && line[1] == ' ') {
             OverlayFx o;
-            if (sscanf(line, "O %d %f %f %f %f %f %f %f %f", &o.kind, &o.start, &o.duration, &o.x, &o.y, &o.scale, &o.rot, &o.opacity, &o.amount) == 9
-                && o.duration > 0.05f) {
-                if (o.kind < 0 || o.kind > 2) o.kind = 0;
+            int dir = 1;
+            int n = sscanf(line, "O %d %f %f %f %f %f %f %f %f %d", &o.kind, &o.start, &o.duration, &o.x, &o.y, &o.scale, &o.rot, &o.opacity, &o.amount, &dir);
+            if ((n == 9 || n == 10) && o.duration > 0.05f) {
+                if (o.kind < 0 || o.kind > 8) o.kind = 0;
                 if (o.start < 0) o.start = 0;
                 o.scale = o.scale < 0.15f ? 0.15f : (o.scale > 4.0f ? 4.0f : o.scale);
                 o.opacity = Clamp01(o.opacity);
                 o.amount = Clamp01(o.amount);
+                o.dir = (n == 10 && dir < 0) ? -1 : 1;
                 gOverlays.push_back(o);
             }
         } else if (line[0] == 'G' && line[1] == ' ' && !clips.empty()) {
@@ -5190,14 +5270,14 @@ int main(int argc, char* argv[]) {
         }
 
         float availY = ImGui::GetContentRegionAvail().y;
-        float tlH = 26.0f + 58.0f + 62.0f + 42.0f * 8.0f + 8.0f * 6.0f + 28.0f;
+        float tlH = 26.0f + 58.0f + 42.0f * 9.0f + 8.0f * 6.0f + 28.0f;
         if (tlH > availY * 0.50f) tlH = availY * 0.50f;
         float topH = availY - tlH - 4.0f;
         if (topH < 220.0f) topH = 220.0f;
 
         ImGui::BeginChild("Media", ImVec2(io.DisplaySize.x * 0.26f, topH), true);
-        ImGui::Text("Media Library");
-        ImGui::Separator();
+        if (ImGui::BeginTabBar("LibraryTabs")) {
+        if (ImGui::BeginTabItem("Media")) {
         ImVec2 mediaClip0 = ImGui::GetWindowPos();
         ImVec2 mediaClip1(mediaClip0.x + ImGui::GetWindowSize().x, mediaClip0.y + ImGui::GetWindowSize().y);
         float gap = 6.0f;
@@ -5249,6 +5329,41 @@ int main(int argc, char* argv[]) {
             }
             ImGui::PopID();
         }
+        ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Effects")) {
+            ImGui::TextDisabled("Drag onto the FX lane");
+            ImVec2 mediaClip0 = ImGui::GetWindowPos();
+            ImVec2 mediaClip1(mediaClip0.x + ImGui::GetWindowSize().x, mediaClip0.y + ImGui::GetWindowSize().y);
+            float gap = 6.0f;
+            float cellW = std::max(70.0f, (ImGui::GetContentRegionAvail().x - gap * 2.0f) / 3.0f);
+            float thumbH = cellW * 9.0f / 16.0f;
+            for (int i = 0; i < OverlayKindCount(); i++) {
+                if (i % 3 != 0) ImGui::SameLine(0, gap);
+                ImGui::PushID(1000 + i);
+                ImGui::BeginGroup();
+                ImGui::InvisibleButton("##fxcard", ImVec2(cellW, thumbH));
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                ImVec2 p0 = ImGui::GetItemRectMin();
+                ImVec2 p1 = ImGui::GetItemRectMax();
+                bool vis = p1.y > mediaClip0.y && p0.y < mediaClip1.y && p1.x > mediaClip0.x && p0.x < mediaClip1.x;
+                if (vis) DrawFxIcon(dl, p0, p1, i);
+                ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + cellW);
+                ImGui::TextUnformatted(OverlayKindName(i));
+                ImGui::PopTextWrapPos();
+                ImGui::EndGroup();
+                if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
+                    int kind = i;
+                    ImGui::SetDragDropPayload("FXKIND", &kind, sizeof(int));
+                    ImGui::TextUnformatted(OverlayKindName(kind));
+                    ImGui::EndDragDropSource();
+                }
+                ImGui::PopID();
+            }
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
+        }
         ImGui::EndChild();
 
         ImGui::SameLine();
@@ -5280,7 +5395,7 @@ int main(int argc, char* argv[]) {
                     float ax, ay, bx, by;
                     OverlayBox(o, previewFrameMin.x, previewFrameMin.y, previewFrameMax.x, previewFrameMax.y, ax, ay, bx, by);
                     float hx = (ax + bx) * 0.5f;
-                    float hy = ay - 16.0f;
+                    float hy = ay + 16.0f;
                     if (std::fabs(m.x - hx) < 10.0f && std::fabs(m.y - hy) < 10.0f) { gOverlaySel = i; ovDragMode = 3; ovDragIndex = i; break; }
                     if (std::fabs(m.x - bx) < 12.0f && std::fabs(m.y - by) < 12.0f) { gOverlaySel = i; ovDragMode = 2; ovDragIndex = i; break; }
                     if (m.x >= ax && m.x <= bx && m.y >= ay && m.y <= by) { gOverlaySel = i; ovDragMode = 1; ovDragIndex = i; break; }
@@ -5506,29 +5621,35 @@ int main(int argc, char* argv[]) {
         }
         ImGui::EndChild();
 
-        ImGui::BeginChild("fxlane", ImVec2(timeW + 90.0f, 62.0f), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-        ImVec2 fxLane0 = ImGui::GetCursorScreenPos();
-        ImGui::BeginGroup();
+        ImGui::BeginChild("fxlane", ImVec2(timeW + 90.0f, trackH), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
         ImGui::TextUnformatted("FX");
-        if (ImGui::SmallButton("Dirt")) OverlayAdd(0, std::max(0.0f, currentTime));
-        ImGui::SameLine();
-        if (ImGui::SmallButton("Fog")) OverlayAdd(1, std::max(0.0f, currentTime));
-        ImGui::SameLine();
-        if (ImGui::SmallButton("Fire")) OverlayAdd(2, std::max(0.0f, currentTime));
-        ImGui::EndGroup();
-        ImGui::SetCursorScreenPos(ImVec2(fxLane0.x + 168.0f, fxLane0.y));
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Effects");
+        ImGui::SameLine(46.0f);
         ImVec2 fxStart = ImGui::GetCursorScreenPos();
         ovOriginX = fxStart.x;
-        ImGui::InvisibleButton("fxzone", ImVec2(std::max(8.0f, ImGui::GetContentRegionAvail().x), 44.0f));
+        ImGui::InvisibleButton("fxzone", ImVec2(std::max(8.0f, ImGui::GetContentRegionAvail().x), trackH - 4));
+        if (ImGui::BeginDragDropTarget()) {
+            if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("FXKIND")) {
+                int kind = *(const int*)payload->Data;
+                float localX = ImGui::GetMousePos().x - fxStart.x;
+                float st = localX / pixelsPerSecond;
+                if (st < 0) st = 0;
+                OverlayAdd(kind, SnapTime(-1, st));
+                ovPanel = gOverlaySel;
+                ovPanelOpen = true;
+                openedPanelThisFrame = true;
+                selectedClip = -1;
+            }
+            ImGui::EndDragDropTarget();
+        }
         ImDrawList* fxl = ImGui::GetWindowDrawList();
         for (int i = 0; i < (int)gOverlays.size(); i++) {
             const OverlayFx& o = gOverlays[i];
             float x = fxStart.x + o.start * pixelsPerSecond;
             float w = std::max(24.0f, o.duration * pixelsPerSecond);
             ImVec2 cp0(x, fxStart.y);
-            ImVec2 cp1(x + w, fxStart.y + 40.0f);
-            ImU32 col = o.kind == 2 ? IM_COL32(180, 70, 30, 230) : (o.kind == 1 ? IM_COL32(90, 110, 130, 230) : IM_COL32(120, 110, 80, 230));
-            fxl->AddRectFilled(cp0, cp1, col, 3.0f);
+            ImVec2 cp1(x + w, fxStart.y + trackH - 8);
+            fxl->AddRectFilled(cp0, cp1, FxLaneColor(o.kind), 3.0f);
             if (i == gOverlaySel) fxl->AddRect(cp0, cp1, IM_COL32(255, 230, 160, 255), 3.0f, 0, 2.0f);
             fxl->AddText(ImVec2(cp0.x + 6, cp0.y + 4), IM_COL32(255, 245, 230, 240), OverlayKindName(o.kind));
             if (!ImGui::IsMouseHoveringRect(cp0, cp1) || TimelinePointerBusy()) continue;
@@ -6459,10 +6580,17 @@ int main(int argc, char* argv[]) {
                     OverlayFx& o = gOverlays[ovPanel];
                     ImGui::TextUnformatted(OverlayKindName(o.kind));
                     ImGui::Separator();
-                    SliderTyped("Opacity", &o.opacity, 0.0f, 1.0f, "%.2f");
-                    SliderTyped("Amount", &o.amount, 0.05f, 1.0f, "%.2f");
-                    SliderTyped("Rotate", &o.rot, -180.0f, 180.0f, "%.1f");
+                    SliderTyped("X", &o.x, -1.0f, 1.0f, "%.2f");
+                    SliderTyped("Y", &o.y, -1.0f, 1.0f, "%.2f");
                     SliderTyped("Size", &o.scale, 0.15f, 4.0f, "%.2f");
+                    SliderTyped("Rotate", &o.rot, -180.0f, 180.0f, "%.1f");
+                    SliderTyped("Amount", &o.amount, 0.0f, 1.0f, "%.2f");
+                    SliderTyped("Opacity", &o.opacity, 0.0f, 1.0f, "%.2f");
+                    if (o.kind == 1) {
+                        int cw = o.dir < 0 ? 1 : 0;
+                        if (ImGui::Combo("Direction", &cw, "Clockwise\0Counter-clockwise\0"))
+                            o.dir = cw == 0 ? 1 : -1;
+                    }
                     ImGui::TextUnformatted("Drag in the preview. Corner scales, top handle rotates.");
                     if (ImGui::Button("Delete")) {
                         gOverlays.erase(gOverlays.begin() + ovPanel);

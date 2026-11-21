@@ -9,14 +9,16 @@ struct OverlayFx {
     float y = 0.0f;
     float scale = 1.0f;
     float rot = 0.0f;
-    float opacity = 0.85f;
-    float amount = 0.75f;
+    float opacity = 1.0f;
+    float amount = 0.7f;
+    int dir = 1;
 };
 
 extern std::vector<OverlayFx> gOverlays;
 extern int gOverlaySel;
 
 void OverlayClear();
+int OverlayKindCount();
 const char* OverlayKindName(int kind);
 void OverlayAdd(int kind, float start);
 void OverlayBox(const OverlayFx& o, float x0, float y0, float x1, float y1, float& ax, float& ay, float& bx, float& by);
