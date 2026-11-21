@@ -3015,8 +3015,20 @@ static bool TransportButton(const char* id, int kind) {
     } else if (kind == 1) {
         dl->AddRectFilled(ImVec2(cx - 7.0f, cy - 8.0f), ImVec2(cx - 2.5f, cy + 8.0f), col);
         dl->AddRectFilled(ImVec2(cx + 2.5f, cy - 8.0f), ImVec2(cx + 7.0f, cy + 8.0f), col);
-    } else {
+    } else if (kind == 2) {
         dl->AddRectFilled(ImVec2(cx - 7.0f, cy - 7.0f), ImVec2(cx + 7.0f, cy + 7.0f), col);
+    } else if (kind == 3) {
+        dl->AddRectFilled(ImVec2(cx - 12.0f, cy - 8.0f), ImVec2(cx - 8.2f, cy + 8.0f), col);
+        dl->AddTriangleFilled(ImVec2(cx - 7.2f, cy), ImVec2(cx + 0.4f, cy - 7.4f), ImVec2(cx + 0.4f, cy + 7.4f), col);
+        dl->AddTriangleFilled(ImVec2(cx + 1.6f, cy), ImVec2(cx + 11.0f, cy - 7.4f), ImVec2(cx + 11.0f, cy + 7.4f), col);
+    } else {
+        ImVec2 c(cx + 0.4f, cy + 1.2f);
+        const float rad = 7.4f;
+        dl->PathArcTo(c, rad, 0.85f, 5.45f, 24);
+        dl->PathStroke(col, 0, 2.7f);
+        float tipx = c.x + std::cos(0.85f) * rad;
+        float tipy = c.y + std::sin(0.85f) * rad;
+        dl->AddTriangleFilled(ImVec2(tipx - 7.2f, tipy + 0.4f), ImVec2(tipx + 1.4f, tipy - 5.2f), ImVec2(tipx + 2.2f, tipy + 4.6f), col);
     }
     ImGui::PopID();
     return pressed;
@@ -5954,13 +5966,26 @@ int main(int argc, char* argv[]) {
         ImGui::EndChild();
 
         {
-            float buttonsW = 40.0f * 3.0f + ImGui::GetStyle().ItemSpacing.x * 2.0f;
+            float buttonsW = 40.0f * 5.0f + ImGui::GetStyle().ItemSpacing.x * 4.0f;
             float comboW = 92.0f;
             float avail = ImGui::GetContentRegionAvail().x;
             float origin = ImGui::GetCursorPosX();
             float left = std::max(0.0f, (avail - comboW - 12.0f - buttonsW) * 0.5f);
             ImGui::SetCursorPosX(origin + left);
         }
+        if (TransportButton("tostart", 3)) {
+#ifdef HAVE_FFMPEG
+            SetPlaying(false);
+            ResetAudioSync();
+            if (player) player->lastPts = -1;
+#else
+            isPlaying = false;
+#endif
+            currentTime = 0;
+            shownLocal = -1000.0f;
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("To start");
+        ImGui::SameLine();
         if (TransportButton("play", 0)) {
 #ifdef HAVE_FFMPEG
             SetPlaying(true);
@@ -5989,6 +6014,19 @@ int main(int argc, char* argv[]) {
             shownLocal = -1000.0f;
         }
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Stop");
+        ImGui::SameLine();
+        if (TransportButton("repeat", 4)) {
+            currentTime = 0;
+            shownLocal = -1000.0f;
+#ifdef HAVE_FFMPEG
+            ResetAudioSync();
+            if (player) player->lastPts = -1;
+            SetPlaying(true);
+#else
+            isPlaying = true;
+#endif
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Repeat");
         ImGui::SameLine();
         {
             int total = (int)currentTime;
