@@ -13,6 +13,7 @@
 #include <cstring>
 #include <cstdlib>
 #include "effects.h"
+#include "overlay_fx.h"
 #include "rife.h"
 #include "asr.h"
 
@@ -111,6 +112,14 @@ struct Clip {
     float gsRot = 0.0f;
     float gsOpacity = 1.0f;
     bool muted = false;
+    float gradeLight = 0.0f;
+    float gradeContrast = 0.0f;
+    float gradeWarm = 0.0f;
+    float gradeTint = 0.0f;
+    float gradeSat = 0.0f;
+    float gradeShadow = 0.0f;
+    float gradeGrain = 0.0f;
+    float gradeSharp = 0.0f;
     ClipFx fx;
 };
 
@@ -259,6 +268,25 @@ bool recordFit = false;
 bool fitValid = false;
 ImVec2 fitA(0, 0), fitB(0, 0);
 int gsDrawClip = -1;
+ImFont* subtitleFont = nullptr;
+BusSegment previewGrade;
+bool previewGradeOn = false;
+int colorClip = -1;
+bool colorOpen = false;
+bool colorHolds = false;
+ImVec4 colorRect(0, 0, 0, 0);
+int draggingOv = -1;
+int trimmingOv = -1;
+int trimOvSide = 0;
+float ovDragOffset = 0.0f;
+float ovOriginX = 0.0f;
+int ovDragMode = 0;
+int ovDragIndex = -1;
+bool ovPanelOpen = false;
+int ovPanel = -1;
+bool ovPanelHolds = false;
+ImVec4 ovPanelRect(0, 0, 0, 0);
+double libClock = 0.0;
 std::vector<unsigned char> fontAtlas;
 int fontAtlasW = 0;
 int fontAtlasH = 0;
@@ -2217,6 +2245,45 @@ bool BusActive(const BusSegment& s) {
         || s.grain > 0.001f || s.sharpen > 0.001f;
 }
 
+static float Lim11(float v) { return v < -1.0f ? -1.0f : (v > 1.0f ? 1.0f : v); }
+
+static BusSegment ClipGradeOf(const Clip& c) {
+    BusSegment s;
+    s.lightness = c.gradeLight;
+    s.contrast = c.gradeContrast;
+    s.warmth = c.gradeWarm;
+    s.tint = c.gradeTint;
+    s.saturation = c.gradeSat;
+    s.shadow = c.gradeShadow;
+    s.grain = c.gradeGrain;
+    s.sharpen = c.gradeSharp;
+    return s;
+}
+
+static void AddGrade(BusSegment& d, const BusSegment& s) {
+    d.lightness = Lim11(d.lightness + s.lightness);
+    d.contrast = Lim11(d.contrast + s.contrast);
+    d.warmth = Lim11(d.warmth + s.warmth);
+    d.tint = Lim11(d.tint + s.tint);
+    d.saturation = Lim11(d.saturation + s.saturation);
+    d.shadow = Lim11(d.shadow + s.shadow);
+    d.grain = Clamp01(d.grain + s.grain);
+    d.sharpen = Clamp01(d.sharpen + s.sharpen);
+}
+
+static bool SliderTyped(const char* label, float* v, float mn, float mx, const char* fmt);
+
+static void DrawGradeSliders(float& light, float& contrast, float& warm, float& tint, float& sat, float& shadow, float& grain, float& sharp) {
+    SliderTyped("Lightness", &light, -1.0f, 1.0f, "%.2f");
+    SliderTyped("Contrast", &contrast, -1.0f, 1.0f, "%.2f");
+    SliderTyped("Warmth", &warm, -1.0f, 1.0f, "%.2f");
+    SliderTyped("Tint", &tint, -1.0f, 1.0f, "%.2f");
+    SliderTyped("Saturation", &sat, -1.0f, 1.0f, "%.2f");
+    SliderTyped("Shadow", &shadow, -1.0f, 1.0f, "%.2f");
+    SliderTyped("Film grain", &grain, 0.0f, 1.0f, "%.2f");
+    SliderTyped("Sharpen", &sharp, 0.0f, 1.0f, "%.2f");
+}
+
 const BusSegment* BusAt(float t) {
     const BusSegment* hit = nullptr;
     for (const auto& s : bus) {
@@ -2470,6 +2537,8 @@ static bool ClickOutsidePanels() {
     if (mediaPanelOpen && RectHit(mediaPanelRect, m)) return false;
     if (audioPanelOpen && RectHit(audioPanelRect, m)) return false;
     if (floatMediaOpen && RectHit(floatMediaRect, m)) return false;
+    if (colorOpen && RectHit(colorRect, m)) return false;
+    if (ovPanelOpen && RectHit(ovPanelRect, m)) return false;
     return true;
 }
 
@@ -2791,7 +2860,7 @@ static void BurnSubtitles(uint8_t* canvas, int cw, int ch, float t) {
     std::vector<int> ids;
     ActiveSubs(t, ids);
     if (ids.empty() || fontAtlas.empty()) return;
-    ImFont* font = ImGui::GetFont();
+    ImFont* font = subtitleFont ? subtitleFont : ImGui::GetFont();
     if (!font) return;
     float size = std::max(18.0f, ch * 0.048f) * std::max(0.3f, subStyle.fontScale);
     float maxW = cw * 0.82f;
@@ -2910,7 +2979,10 @@ void ExportSession::Step() {
         } else {
             blitClip(top, t);
         }
-        if (const BusSegment* bs = BusAt((float)t)) GradeCanvas(canvas.data(), w, h, *bs, frameIndex);
+        if (top >= 0 && top < (int)clips.size()) {
+            BusSegment cg = ClipGradeOf(clips[top]);
+            if (BusActive(cg)) GradeCanvas(canvas.data(), w, h, cg, frameIndex);
+        }
     }
     int gs = FindGsClip((float)t);
     if (gs >= 0) {
@@ -2934,6 +3006,8 @@ void ExportSession::Step() {
             }
         }
     }
+    OverlayStamp(canvas.data(), w, h, (float)t);
+    if (const BusSegment* bs = BusAt((float)t)) GradeCanvas(canvas.data(), w, h, *bs, frameIndex);
     if (burnSubs && !rifeOn) BurnSubtitles(canvas.data(), w, h, (float)t);
     if (!vframe || av_frame_make_writable(vframe) < 0) { Fail("Video frame failed"); return; }
     uint8_t* srcData[1] = { canvas.data() };
@@ -3742,7 +3816,7 @@ void DrawPreviewSubs(ImVec2 pic0, ImVec2 pic1) {
     std::vector<int> ids;
     ActiveSubs(currentTime, ids);
     if (ids.empty()) return;
-    ImFont* font = ImGui::GetFont();
+    ImFont* font = subtitleFont ? subtitleFont : ImGui::GetFont();
     if (!font || pic1.x - pic0.x < 20) return;
     float size = std::max(16.0f, (pic1.y - pic0.y) * 0.055f) * std::max(0.3f, subStyle.fontScale);
     float maxW = (pic1.x - pic0.x) * 0.82f;
@@ -3931,6 +4005,8 @@ bool TimelinePointerBusy() {
     if (mediaPanelOpen && inside(mediaPanelRect)) return true;
     if (audioPanelOpen && inside(audioPanelRect)) return true;
     if (floatMediaOpen && inside(floatMediaRect)) return true;
+    if (colorHolds || (colorOpen && inside(colorRect))) return true;
+    if (ovPanelHolds || (ovPanelOpen && inside(ovPanelRect))) return true;
     return false;
 }
 
@@ -4557,6 +4633,11 @@ void ClearProject() {
     floatMedia = -1;
     floatMediaOpen = false;
     libPlayId = -1;
+    OverlayClear();
+    colorOpen = false;
+    ovPanelOpen = false;
+    draggingOv = -1;
+    trimmingOv = -1;
     currentTime = 0;
     shownLocal = -1000.0f;
 #ifdef HAVE_FFMPEG
@@ -4687,11 +4768,17 @@ bool SaveProject(const std::string& path) {
         fprintf(f, "E %s %.4f\n", c.fxOut.empty() ? "-" : c.fxOut.c_str(), c.fxDur);
         fprintf(f, "K %.3f %.3f %.3f %.3f %.3f %.3f %d %.3f %.3f %.2f\n",
                 c.keySim, c.keySoft, c.keySpill, c.gsX, c.gsY, c.gsScale, c.muted ? 1 : 0, c.gsOpacity, c.gsAspect, c.gsRot);
+        fprintf(f, "G %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f\n",
+                c.gradeLight, c.gradeContrast, c.gradeWarm, c.gradeTint, c.gradeSat, c.gradeShadow, c.gradeGrain, c.gradeSharp);
     }
     for (const auto& b : bus) {
         fprintf(f, "B %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f\n",
                 b.start, b.duration, b.lightness, b.contrast, b.warmth, b.tint,
                 b.saturation, b.shadow, b.grain, b.sharpen);
+    }
+    for (const auto& o : gOverlays) {
+        fprintf(f, "O %d %.4f %.4f %.3f %.3f %.3f %.2f %.3f %.3f\n",
+                o.kind, o.start, o.duration, o.x, o.y, o.scale, o.rot, o.opacity, o.amount);
     }
     fprintf(f, "Y %.3f %.3f %.3f %d %.2f %.3f %.3f %.3f %.3f %.3f %.3f %d\n",
             subStyle.text[0], subStyle.text[1], subStyle.text[2], subStyle.border ? 1 : 0, subStyle.borderPx,
@@ -4809,6 +4896,30 @@ bool LoadProject(const std::string& path) {
                 if (b.start < 0) b.start = 0;
                 bus.push_back(b);
             }
+        } else if (line[0] == 'O' && line[1] == ' ') {
+            OverlayFx o;
+            if (sscanf(line, "O %d %f %f %f %f %f %f %f %f", &o.kind, &o.start, &o.duration, &o.x, &o.y, &o.scale, &o.rot, &o.opacity, &o.amount) == 9
+                && o.duration > 0.05f) {
+                if (o.kind < 0 || o.kind > 2) o.kind = 0;
+                if (o.start < 0) o.start = 0;
+                o.scale = o.scale < 0.15f ? 0.15f : (o.scale > 4.0f ? 4.0f : o.scale);
+                o.opacity = Clamp01(o.opacity);
+                o.amount = Clamp01(o.amount);
+                gOverlays.push_back(o);
+            }
+        } else if (line[0] == 'G' && line[1] == ' ' && !clips.empty()) {
+            float a, b, c, d, e, f0, g0, h;
+            if (sscanf(line, "G %f %f %f %f %f %f %f %f", &a, &b, &c, &d, &e, &f0, &g0, &h) == 8) {
+                Clip& cl = clips.back();
+                cl.gradeLight = Lim11(a);
+                cl.gradeContrast = Lim11(b);
+                cl.gradeWarm = Lim11(c);
+                cl.gradeTint = Lim11(d);
+                cl.gradeSat = Lim11(e);
+                cl.gradeShadow = Lim11(f0);
+                cl.gradeGrain = Clamp01(g0);
+                cl.gradeSharp = Clamp01(h);
+            }
         } else if (line[0] == 'K' && line[1] == ' ' && !clips.empty()) {
             float a = 0.35f, b = 0.22f, ck = 0.8f, x = 0, y = 0, sc = 1, op = 1, aspect = 1, rot = 0;
             int mute = 0;
@@ -4906,7 +5017,7 @@ int main(int argc, char* argv[]) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 
-    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 55",
+    SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 56",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900,
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!window) { SDL_Quit(); return 1; }
@@ -4923,8 +5034,19 @@ int main(int argc, char* argv[]) {
     ImGui::StyleColorsDark();
     {
         static const ImWchar ranges[] = { 0x0020, 0x00FF, 0x0590, 0x05FF, 0 };
-        if (!io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", 22.0f, nullptr, ranges))
+        ImFontConfig uiCfg;
+        uiCfg.OversampleH = 2;
+        uiCfg.OversampleV = 2;
+        uiCfg.PixelSnapH = false;
+        if (!io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", 22.0f, &uiCfg, ranges))
             io.Fonts->AddFontDefault();
+        ImFontConfig subCfg;
+        subCfg.OversampleH = 3;
+        subCfg.OversampleV = 2;
+        subCfg.PixelSnapH = false;
+        subtitleFont = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", 112.0f, &subCfg, ranges);
+        if (!subtitleFont)
+            subtitleFont = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\arial.ttf", 112.0f, &subCfg, ranges);
     }
     ImGui_ImplSDL2_InitForOpenGL(window, gl_context);
     ImGui_ImplOpenGL3_Init("#version 130");
@@ -5009,88 +5131,65 @@ int main(int argc, char* argv[]) {
         ImGui::SetNextWindowSize(io.DisplaySize);
         ImGui::Begin("Editor", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
 
-        if (ImGui::Button("New")) {
-            ClearProject();
-            previewStatus = "New project";
+        if (ImGui::BeginMenu("Project")) {
+            if (ImGui::MenuItem("New")) {
+                ClearProject();
+                previewStatus = "New project";
+            }
+            if (ImGui::MenuItem("Save")) {
+                std::string p = SaveDialog(hwnd, "DaniWorlds Project (*.dwp)\0*.dwp\0", "dwp", "Save Project");
+                if (!p.empty()) previewStatus = SaveProject(p) ? "Project saved" : "Save failed";
+            }
+            if (ImGui::MenuItem("Load")) {
+                std::string p = OpenDialog(hwnd, "DaniWorlds Project (*.dwp)\0*.dwp\0", "Load Project");
+                if (!p.empty()) previewStatus = LoadProject(p) ? "Project loaded" : "Load failed";
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem("Export")) requestExport = true;
+            ImGui::EndMenu();
         }
         ImGui::SameLine();
-        if (ImGui::Button("Import")) ImportFiles(hwnd);
-        ImGui::SameLine();
-        if (ImGui::Button("Export")) requestExport = true;
-        ImGui::SameLine();
-        if (ImGui::Button("Transform")) {
-            int pick = selectedClip;
-            if (pick < 0 || pick >= (int)clips.size()) pick = gsPanelClip;
-            if (pick >= 0 && pick < (int)clips.size()) {
-                int mid = clips[pick].mediaId;
-                if (mid >= 0 && mid < (int)media.size() && media[mid].type != "audio") {
-                    if (clips[pick].track == kGsTrack) {
-                        gsPanelClip = pick;
-                        gsPanelOpen = true;
+        if (ImGui::BeginMenu("Edit")) {
+            if (ImGui::MenuItem("Import")) ImportFiles(hwnd);
+            if (ImGui::MenuItem(asrOn ? "Stop subs" : "Auto subs")) {
+                if (asrOn) {
+                    asrOn = false;
+                    AsrClose();
+                    previewStatus = "Subtitles cancelled";
+                } else {
+                    asrEnd = ProjectEnd();
+                    if (asrEnd < 0.3) previewStatus = "Nothing to transcribe";
+                    else {
+                        SetPlaying(false);
+                        asrPcm.clear();
+                        asrSegs.clear();
+                        asrCursor = 0;
+                        asrChunk = 0;
+                        asrPhase = 0;
+                        asrOn = true;
+                        AsrLogReset();
+                        previewStatus = "Preparing subtitles. Log: asr.log";
                     }
-                    xformClip = pick;
-                    xformOpen = true;
-                    openedPanelThisFrame = true;
-                    previewStatus = "Transform";
-                } else previewStatus = "Select a video or image";
-            } else previewStatus = "Select a video or image";
-        }
-        ImGui::SameLine();
-        if (ImGui::Button(asrOn ? "Stop subs" : "Auto subs")) {
-            if (asrOn) {
-                asrOn = false;
-                AsrClose();
-                previewStatus = "Subtitles cancelled";
-            } else {
-                asrEnd = ProjectEnd();
-                if (asrEnd < 0.3) previewStatus = "Nothing to transcribe";
-                else {
-                    SetPlaying(false);
-                    asrPcm.clear();
-                    asrSegs.clear();
-                    asrCursor = 0;
-                    asrChunk = 0;
-                    asrPhase = 0;
-                    asrOn = true;
-                    AsrLogReset();
-                    previewStatus = "Preparing subtitles. Log: asr.log";
                 }
             }
-        }
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(92);
-        ImGui::Combo("##aslang", &asrLang, "Hebrew\0English\0");
-        ImGui::SameLine();
-        if (ImGui::Button("SRT")) {
-            if (subs.empty()) previewStatus = "No subtitles";
-            else {
-                std::string p = SaveDialog(hwnd, "Subtitles (*.srt)\0*.srt\0", "srt", "Export Subtitles");
-                previewStatus = (!p.empty() && WriteSrt(p)) ? "SRT saved" : (p.empty() ? "SRT cancelled" : "SRT failed");
+            ImGui::SetNextItemWidth(120);
+            ImGui::Combo("Language", &asrLang, "Hebrew\0English\0");
+            if (ImGui::MenuItem("Export SRT")) {
+                if (subs.empty()) previewStatus = "No subtitles";
+                else {
+                    std::string p = SaveDialog(hwnd, "Subtitles (*.srt)\0*.srt\0", "srt", "Export Subtitles");
+                    previewStatus = (!p.empty() && WriteSrt(p)) ? "SRT saved" : (p.empty() ? "SRT cancelled" : "SRT failed");
+                }
             }
+            ImGui::Separator();
+            if (ImGui::MenuItem(snapEnabled ? "Snap ON" : "Snap OFF")) snapEnabled = !snapEnabled;
+            if (ImGui::MenuItem("RIFE", nullptr, &exRife)) {}
+            ImGui::EndMenu();
         }
-        ImGui::SameLine();
-        if (ImGui::Button("Save")) {
-            std::string p = SaveDialog(hwnd, "DaniWorlds Project (*.dwp)\0*.dwp\0", "dwp", "Save Project");
-            if (!p.empty()) previewStatus = SaveProject(p) ? "Project saved" : "Save failed";
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Load")) {
-            std::string p = OpenDialog(hwnd, "DaniWorlds Project (*.dwp)\0*.dwp\0", "Load Project");
-            if (!p.empty()) previewStatus = LoadProject(p) ? "Project loaded" : "Load failed";
-        }
-        ImGui::SameLine();
-        if (ImGui::Button(snapEnabled ? "Snap ON" : "Snap OFF")) snapEnabled = !snapEnabled;
-        ImGui::SameLine();
-#ifdef HAVE_FFMPEG
-        ImGui::Text("| %.2fs | Media: %d | %s | Space=Play/Pause | ESC=Exit",
-                    currentTime, (int)media.size(), audioDev ? "Audio" : "No audio device");
-#else
-        ImGui::Text("| %.2fs | Media: %d | Space=Play/Pause | ESC=Exit", currentTime, (int)media.size());
-#endif
 
         ImGui::Separator();
         float availY = ImGui::GetContentRegionAvail().y;
-        float tlH = 26.0f + 58.0f + 42.0f * 8.0f + 8.0f * 6.0f + 28.0f;
+        float tlH = 26.0f + 58.0f + 62.0f + 42.0f * 8.0f + 8.0f * 6.0f + 28.0f;
         if (tlH > availY * 0.50f) tlH = availY * 0.50f;
         float topH = availY - tlH - 4.0f;
         if (topH < 220.0f) topH = 220.0f;
@@ -5168,6 +5267,48 @@ int main(int argc, char* argv[]) {
         FitAspectBox(p0, p1, AspectValue(exAspect), previewFrameMin, previewFrameMax);
         previewFrameValid = true;
         dl->AddRect(previewFrameMin, previewFrameMax, IM_COL32(70, 70, 70, 255));
+        if (ovDragMode == 0 || !ImGui::IsMouseDown(0)) {
+            if (!ImGui::IsMouseDown(0)) { ovDragMode = 0; ovDragIndex = -1; }
+        }
+        if (ImGui::IsMouseClicked(0) && ovDragMode == 0) {
+            ImVec2 m = ImGui::GetMousePos();
+            if (m.x >= previewFrameMin.x && m.y >= previewFrameMin.y && m.x <= previewFrameMax.x && m.y <= previewFrameMax.y) {
+                for (int i = (int)gOverlays.size() - 1; i >= 0; --i) {
+                    const OverlayFx& o = gOverlays[i];
+                    if (currentTime < o.start || currentTime >= o.start + o.duration) continue;
+                    float ax, ay, bx, by;
+                    OverlayBox(o, previewFrameMin.x, previewFrameMin.y, previewFrameMax.x, previewFrameMax.y, ax, ay, bx, by);
+                    float hx = (ax + bx) * 0.5f;
+                    float hy = ay - 16.0f;
+                    if (std::fabs(m.x - hx) < 10.0f && std::fabs(m.y - hy) < 10.0f) { gOverlaySel = i; ovDragMode = 3; ovDragIndex = i; break; }
+                    if (std::fabs(m.x - bx) < 12.0f && std::fabs(m.y - by) < 12.0f) { gOverlaySel = i; ovDragMode = 2; ovDragIndex = i; break; }
+                    if (m.x >= ax && m.x <= bx && m.y >= ay && m.y <= by) { gOverlaySel = i; ovDragMode = 1; ovDragIndex = i; break; }
+                }
+            }
+        } else if (ovDragMode && ImGui::IsMouseDown(0) && ovDragIndex >= 0 && ovDragIndex < (int)gOverlays.size()) {
+            OverlayFx& o = gOverlays[ovDragIndex];
+            float fw = std::max(1.0f, previewFrameMax.x - previewFrameMin.x);
+            float fh = std::max(1.0f, previewFrameMax.y - previewFrameMin.y);
+            ImGuiIO& pio = ImGui::GetIO();
+            if (ovDragMode == 1) {
+                o.x += pio.MouseDelta.x / (fw * 0.5f);
+                o.y += pio.MouseDelta.y / (fh * 0.5f);
+            } else if (ovDragMode == 2) {
+                o.scale += (pio.MouseDelta.x + pio.MouseDelta.y) / std::max(40.0f, fw * 0.25f);
+            } else if (ovDragMode == 3) {
+                float cx = (previewFrameMin.x + previewFrameMax.x) * 0.5f + o.x * fw * 0.5f;
+                float cy = (previewFrameMin.y + previewFrameMax.y) * 0.5f + o.y * fh * 0.5f;
+                float a0 = std::atan2((pio.MousePos.y - pio.MouseDelta.y) - cy, (pio.MousePos.x - pio.MouseDelta.x) - cx);
+                float a1 = std::atan2(pio.MousePos.y - cy, pio.MousePos.x - cx);
+                o.rot += (a1 - a0) * 57.2957795f;
+            }
+            if (o.x < -1.2f) o.x = -1.2f;
+            if (o.x > 1.2f) o.x = 1.2f;
+            if (o.y < -1.2f) o.y = -1.2f;
+            if (o.y > 1.2f) o.y = 1.2f;
+            if (o.scale < 0.15f) o.scale = 0.15f;
+            if (o.scale > 4.0f) o.scale = 4.0f;
+        }
 
         topClip = -1;
         int bestTrack = 99;
@@ -5224,6 +5365,14 @@ int main(int argc, char* argv[]) {
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Stop");
         ImGui::SameLine();
         {
+            int total = (int)currentTime;
+            int ms = (int)((currentTime - (float)total) * 100.0f);
+            if (ms > 99) ms = 99;
+            ImGui::AlignTextToFramePadding();
+            ImGui::Text("%02d:%02d.%02d", total / 60, total % 60, ms);
+        }
+        ImGui::SameLine();
+        {
             float comboW = 92.0f;
             float avail = ImGui::GetContentRegionAvail().x;
             if (avail > comboW) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + avail - comboW);
@@ -5254,6 +5403,8 @@ int main(int argc, char* argv[]) {
             tlSeconds = std::max(tlSeconds, b.start + b.duration + 30.0f);
         for (const auto& s : subs)
             tlSeconds = std::max(tlSeconds, s.start + s.duration + 30.0f);
+        for (const auto& o : gOverlays)
+            tlSeconds = std::max(tlSeconds, o.start + o.duration + 30.0f);
         float timeW = tlSeconds * pixelsPerSecond;
         ImGui::BeginChild("Timeline", ImVec2(0, tlH), true, ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_AlwaysHorizontalScrollbar);
         const char* trackNames[] = {"V1", "V2", "V3", "A1", "A2", "A3"};
@@ -5298,7 +5449,7 @@ int main(int argc, char* argv[]) {
         ImVec2 lane0 = ImGui::GetCursorScreenPos();
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(1, 0));
         ImGui::BeginGroup();
-        ImGui::TextUnformatted("SUB");
+        ImGui::TextUnformatted("BUS");
         if (ImGui::SmallButton("+")) {
             float end = 0.0f;
             for (const auto& c : clips) end = std::max(end, c.startTime + c.duration);
@@ -5350,6 +5501,51 @@ int main(int argc, char* argv[]) {
                 if (mouse.x < cp0.x + 8) { trimmingBus = i; trimBusSide = 0; }
                 else if (mouse.x > cp1.x - 8) { trimmingBus = i; trimBusSide = 1; }
                 else { draggingBus = i; busDragOffset = mouse.x - cp0.x; trimmingBus = -1; }
+            }
+        }
+        ImGui::EndChild();
+
+        ImGui::BeginChild("fxlane", ImVec2(timeW + 90.0f, 62.0f), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        ImVec2 fxLane0 = ImGui::GetCursorScreenPos();
+        ImGui::BeginGroup();
+        ImGui::TextUnformatted("FX");
+        if (ImGui::SmallButton("Dirt")) OverlayAdd(0, std::max(0.0f, currentTime));
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Fog")) OverlayAdd(1, std::max(0.0f, currentTime));
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Fire")) OverlayAdd(2, std::max(0.0f, currentTime));
+        ImGui::EndGroup();
+        ImGui::SetCursorScreenPos(ImVec2(fxLane0.x + 168.0f, fxLane0.y));
+        ImVec2 fxStart = ImGui::GetCursorScreenPos();
+        ovOriginX = fxStart.x;
+        ImGui::InvisibleButton("fxzone", ImVec2(std::max(8.0f, ImGui::GetContentRegionAvail().x), 44.0f));
+        ImDrawList* fxl = ImGui::GetWindowDrawList();
+        for (int i = 0; i < (int)gOverlays.size(); i++) {
+            const OverlayFx& o = gOverlays[i];
+            float x = fxStart.x + o.start * pixelsPerSecond;
+            float w = std::max(24.0f, o.duration * pixelsPerSecond);
+            ImVec2 cp0(x, fxStart.y);
+            ImVec2 cp1(x + w, fxStart.y + 40.0f);
+            ImU32 col = o.kind == 2 ? IM_COL32(180, 70, 30, 230) : (o.kind == 1 ? IM_COL32(90, 110, 130, 230) : IM_COL32(120, 110, 80, 230));
+            fxl->AddRectFilled(cp0, cp1, col, 3.0f);
+            if (i == gOverlaySel) fxl->AddRect(cp0, cp1, IM_COL32(255, 230, 160, 255), 3.0f, 0, 2.0f);
+            fxl->AddText(ImVec2(cp0.x + 6, cp0.y + 4), IM_COL32(255, 245, 230, 240), OverlayKindName(o.kind));
+            if (!ImGui::IsMouseHoveringRect(cp0, cp1) || TimelinePointerBusy()) continue;
+            ImVec2 mouse = ImGui::GetMousePos();
+            if (mouse.x < cp0.x + 8 || mouse.x > cp1.x - 8) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+            if (ImGui::IsMouseClicked(1)) {
+                gOverlaySel = i;
+                ovPanel = i;
+                ovPanelOpen = true;
+                openedPanelThisFrame = true;
+                selectedClip = -1;
+            }
+            if (ImGui::IsMouseClicked(0)) {
+                gOverlaySel = i;
+                selectedClip = -1;
+                if (mouse.x < cp0.x + 8) { trimmingOv = i; trimOvSide = 0; draggingOv = -1; }
+                else if (mouse.x > cp1.x - 8) { trimmingOv = i; trimOvSide = 1; draggingOv = -1; }
+                else { draggingOv = i; ovDragOffset = mouse.x - cp0.x; trimmingOv = -1; }
             }
         }
         ImGui::EndChild();
@@ -5753,6 +5949,32 @@ int main(int argc, char* argv[]) {
             } else draggingBus = -1;
         }
 
+        if (trimmingOv >= 0 && trimmingOv < (int)gOverlays.size()) {
+            if (ImGui::IsMouseDown(0)) {
+                float mx = (ImGui::GetMousePos().x - ovOriginX) / pixelsPerSecond;
+                OverlayFx& o = gOverlays[trimmingOv];
+                if (trimOvSide == 1) {
+                    float nd = SnapTime(-1, mx) - o.start;
+                    if (nd < 0.2f) nd = 0.2f;
+                    o.duration = nd;
+                } else {
+                    float end = o.start + o.duration;
+                    float ns = SnapTime(-1, mx);
+                    if (ns < 0) ns = 0;
+                    if (ns > end - 0.2f) ns = end - 0.2f;
+                    o.duration = end - ns;
+                    o.start = ns;
+                }
+            } else trimmingOv = -1;
+        }
+        if (draggingOv >= 0 && draggingOv < (int)gOverlays.size() && trimmingOv < 0) {
+            if (ImGui::IsMouseDown(0)) {
+                float ns = (ImGui::GetMousePos().x - ovDragOffset - ovOriginX) / pixelsPerSecond;
+                if (ns < 0) ns = 0;
+                gOverlays[draggingOv].start = SnapTime(-1, ns);
+            } else draggingOv = -1;
+        }
+
         if (trimmingSub >= 0 && trimmingSub < (int)subs.size()) {
             if (ImGui::IsMouseDown(0) && !TimelinePointerBusy()) {
                 float mx = (ImGui::GetMousePos().x - subsOriginX) / pixelsPerSecond;
@@ -5847,6 +6069,11 @@ int main(int argc, char* argv[]) {
                     if (ImGui::MenuItem("Transform")) {
                         xformClip = contextClip;
                         xformOpen = true;
+                        openedPanelThisFrame = true;
+                    }
+                    if (ImGui::MenuItem("Color")) {
+                        colorClip = contextClip;
+                        colorOpen = true;
                         openedPanelThisFrame = true;
                     }
                 }
@@ -6075,6 +6302,11 @@ int main(int argc, char* argv[]) {
                     ResetAudioSync();
 #endif
                 }
+                if (ImGui::Button("Color")) {
+                    colorClip = gsPanelClip;
+                    colorOpen = true;
+                    openedPanelThisFrame = true;
+                }
                 ImVec2 w0 = ImGui::GetWindowPos();
                 gsPanelRect = ImVec4(w0.x, w0.y, w0.x + ImGui::GetWindowSize().x, w0.y + ImGui::GetWindowSize().y);
                 gsPanelHolds = ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem)
@@ -6190,6 +6422,61 @@ int main(int argc, char* argv[]) {
                 if (!open) audioPanelOpen = false;
             }
         }
+        colorHolds = false;
+        if (colorOpen) {
+            if (colorClip < 0 || colorClip >= (int)clips.size()) colorOpen = false;
+            else {
+                PlacePanel(0.0f);
+                bool open = true;
+                if (ClickOutsidePanels()) open = false;
+                if (ImGui::Begin("Clip color", &open, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse)) {
+                    Clip& c = clips[colorClip];
+                    ImGui::TextUnformatted("Clip color");
+                    ImGui::Separator();
+                    DrawGradeSliders(c.gradeLight, c.gradeContrast, c.gradeWarm, c.gradeTint, c.gradeSat, c.gradeShadow, c.gradeGrain, c.gradeSharp);
+                    if (ImGui::Button("Reset")) {
+                        c.gradeLight = c.gradeContrast = c.gradeWarm = c.gradeTint = 0;
+                        c.gradeSat = c.gradeShadow = c.gradeGrain = c.gradeSharp = 0;
+                    }
+                    ImVec2 w0 = ImGui::GetWindowPos();
+                    colorRect = ImVec4(w0.x, w0.y, w0.x + ImGui::GetWindowSize().x, w0.y + ImGui::GetWindowSize().y);
+                    colorHolds = ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem)
+                        || (ImGui::IsWindowFocused() && ImGui::IsAnyItemActive());
+                }
+                ImGui::End();
+                if (!open) colorOpen = false;
+            }
+        }
+        ovPanelHolds = false;
+        if (ovPanelOpen) {
+            if (ovPanel < 0 || ovPanel >= (int)gOverlays.size()) ovPanelOpen = false;
+            else {
+                PlaceAtCursor();
+                bool open = true;
+                if (ClickOutsidePanels()) open = false;
+                if (ImGui::Begin("Overlay", &open, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse)) {
+                    OverlayFx& o = gOverlays[ovPanel];
+                    ImGui::TextUnformatted(OverlayKindName(o.kind));
+                    ImGui::Separator();
+                    SliderTyped("Opacity", &o.opacity, 0.0f, 1.0f, "%.2f");
+                    SliderTyped("Amount", &o.amount, 0.05f, 1.0f, "%.2f");
+                    SliderTyped("Rotate", &o.rot, -180.0f, 180.0f, "%.1f");
+                    SliderTyped("Size", &o.scale, 0.15f, 4.0f, "%.2f");
+                    ImGui::TextUnformatted("Drag in the preview. Corner scales, top handle rotates.");
+                    if (ImGui::Button("Delete")) {
+                        gOverlays.erase(gOverlays.begin() + ovPanel);
+                        gOverlaySel = -1;
+                        open = false;
+                    }
+                    ImVec2 w0 = ImGui::GetWindowPos();
+                    ovPanelRect = ImVec4(w0.x, w0.y, w0.x + ImGui::GetWindowSize().x, w0.y + ImGui::GetWindowSize().y);
+                    ovPanelHolds = ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem)
+                        || (ImGui::IsWindowFocused() && ImGui::IsAnyItemActive());
+                }
+                ImGui::End();
+                if (!open) ovPanelOpen = false;
+            }
+        }
         if (floatMediaOpen) {
             if (floatMedia < 0 || floatMedia >= (int)media.size()) floatMediaOpen = false;
             else {
@@ -6212,8 +6499,20 @@ int main(int argc, char* argv[]) {
                         if (!playerLib) playerLib = new VideoPlayer();
                         if (libPlayId != floatMedia) {
                             libPlayId = floatMedia;
-                            if (playerLib->Open(m.path)) {
-                                for (int n = 0; n < 12 && !playerLib->hasFrame; n++) playerLib->GrabFrame();
+                            libClock = 0;
+                            if (playerLib->Open(m.path)) playerLib->GrabFrame();
+                        }
+                        if (m.type == "video" && playerLib->hasFrame) {
+                            libClock += ImGui::GetIO().DeltaTime;
+                            int guard = 0;
+                            while (guard < 3 && playerLib->lastPts >= 0.0 && playerLib->lastPts + 0.0008 < libClock) {
+                                if (!playerLib->GrabFrame()) {
+                                    playerLib->Seek(0);
+                                    libClock = 0;
+                                    playerLib->GrabFrame();
+                                    break;
+                                }
+                                guard++;
                             }
                         }
                         if (playerLib->hasFrame && playerLib->texture) {
@@ -6252,7 +6551,13 @@ int main(int argc, char* argv[]) {
         ImVec2 view1 = previewFrameValid ? previewFrameMax : previewMax;
         fitValid = false;
         recordFit = true;
-        activeGrade = BusAt(currentTime);
+        activeGrade = nullptr;
+        previewGradeOn = false;
+        previewGrade = BusSegment();
+        if (topClip >= 0 && topClip < (int)clips.size()) previewGrade = ClipGradeOf(clips[topClip]);
+        if (const BusSegment* bs = BusAt(currentTime)) AddGrade(previewGrade, *bs);
+        previewGradeOn = BusActive(previewGrade);
+        activeGrade = previewGradeOn ? &previewGrade : nullptr;
         if (fxOther >= 0 && player && playerB && player->hasFrame && playerB->hasFrame && player->texture && playerB->texture) {
             int drawA = -1, drawB = -1;
             float prog = 0;
@@ -6307,6 +6612,8 @@ int main(int argc, char* argv[]) {
         }
         for (const auto& tb : thumbBlits)
             BlitVideo(tb.a, tb.b, tb.tex, tb.w, tb.h, tb.c0, tb.c1);
+        if (pglUseProgram) pglUseProgram(0);
+        OverlayDrawGL(view0.x, view0.y, view1.x, view1.y, currentTime, (int)io.DisplaySize.x, (int)io.DisplaySize.y);
         if (pglUseProgram) pglUseProgram(0);
         DrawPreviewSubs(view0, view1);
 #endif
