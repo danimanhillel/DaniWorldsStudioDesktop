@@ -59,12 +59,64 @@ void OverlayAdd(int kind, float start) {
     gOverlaySel = (int)gOverlays.size() - 1;
 }
 
-void OverlayBox(const OverlayFx& o, float x0, float y0, float x1, float y1, float& ax, float& ay, float& bx, float& by) {
+float OverlaySample(const std::vector<FxKey>& keys, float local, float fallback) {
+    if (keys.empty()) return fallback;
+    if (local <= keys.front().t) return local < keys.front().t - 0.0001f ? fallback : keys.front().v;
+    if (local >= keys.back().t) return keys.back().v;
+    int lo = 0;
+    int hi = (int)keys.size() - 1;
+    while (lo + 1 < hi) {
+        int mid = (lo + hi) / 2;
+        if (keys[mid].t <= local) lo = mid;
+        else hi = mid;
+    }
+    float span = keys[hi].t - keys[lo].t;
+    float u = span > 0.0001f ? (local - keys[lo].t) / span : 0.0f;
+    return keys[lo].v + (keys[hi].v - keys[lo].v) * u;
+}
+
+void OverlayRecord(std::vector<FxKey>& keys, float local, float v) {
+    if (local < 0) local = 0;
+    for (auto it = keys.begin(); it != keys.end(); ++it) {
+        if (std::fabs(it->t - local) <= 0.02f) { it->t = local; it->v = v; return; }
+        if (it->t > local) { keys.insert(it, FxKey{local, v}); return; }
+    }
+    keys.push_back(FxKey{local, v});
+}
+
+void OverlayWrite(OverlayFx& o, int channel, float before, float now, float time) {
+    if (channel < 0 || channel > 6) return;
+    if (!o.holdOn[channel]) {
+        o.hold[channel] = before;
+        o.holdOn[channel] = true;
+    }
+    float local = time - o.start;
+    if (local < 0) local = 0;
+    if (local > o.duration) local = o.duration;
+    OverlayRecord(o.anim[channel], local, now);
+}
+
+void OverlayResetAnim(OverlayFx& o) {
+    for (int i = 0; i < 7; i++) {
+        o.anim[i].clear();
+        o.holdOn[i] = false;
+        o.hold[i] = 0;
+    }
+}
+
+void OverlayBox(const OverlayFx& o, float x0, float y0, float x1, float y1, float& ax, float& ay, float& bx, float& by, float time) {
     float fw = std::max(1.0f, x1 - x0);
     float fh = std::max(1.0f, y1 - y0);
-    float sc = std::max(0.05f, o.scale);
-    float cx = (x0 + x1) * 0.5f + o.x * fw * 0.5f;
-    float cy = (y0 + y1) * 0.5f + o.y * fh * 0.5f;
+    float ox = o.x, oy = o.y, osc = o.scale;
+    if (time > -10000.0f) {
+        float local = time - o.start;
+        ox = OverlaySample(o.anim[0], local, o.holdOn[0] ? o.hold[0] : o.x);
+        oy = OverlaySample(o.anim[1], local, o.holdOn[1] ? o.hold[1] : o.y);
+        osc = OverlaySample(o.anim[2], local, o.holdOn[2] ? o.hold[2] : o.scale);
+    }
+    float sc = std::max(0.05f, osc);
+    float cx = (x0 + x1) * 0.5f + ox * fw * 0.5f;
+    float cy = (y0 + y1) * 0.5f + oy * fh * 0.5f;
     float hw = fw * 0.5f * sc;
     float hh = fh * 0.5f * sc;
     ax = cx - hw;
@@ -100,17 +152,29 @@ static FxEval EvalFx(const OverlayFx& o, float time, float shortSide) {
     if (local < 0) local = 0;
     if (local > 1) local = 1;
     float eased = local * local * (3.0f - 2.0f * local);
-    float amount = o.amount;
+    float localT = time - o.start;
+    auto anim = [&](int ch, float field) {
+        return OverlaySample(o.anim[ch], localT, o.holdOn[ch] ? o.hold[ch] : field);
+    };
+    float x = anim(0, o.x);
+    float y = anim(1, o.y);
+    float scale = anim(2, o.scale);
+    float rot = anim(3, o.rot);
+    float amount = anim(4, o.amount);
+    float opacity = anim(5, o.opacity);
+    float dir = anim(6, (float)o.dir);
     if (amount < 0) amount = 0;
     if (amount > 1) amount = 1;
+    if (opacity < 0) opacity = 0;
+    if (opacity > 1) opacity = 1;
     e.amount = amount;
-    e.shiftX = o.x * 0.5f;
-    e.shiftY = o.y * 0.5f;
-    e.rot = o.rot * 0.01745329252f;
-    e.scale = std::max(0.05f, o.scale);
-    e.opacity = o.opacity < 0 ? 0 : (o.opacity > 1 ? 1 : o.opacity);
+    e.shiftX = x * 0.5f;
+    e.shiftY = y * 0.5f;
+    e.rot = rot * 0.01745329252f;
+    e.scale = std::max(0.05f, scale);
+    e.opacity = opacity;
     e.mode = (float)o.kind;
-    e.dir = o.dir < 0 ? -1.0f : 1.0f;
+    e.dir = dir < 0 ? -1.0f : 1.0f;
     if (o.kind == 0) {
         float bucket = std::floor(time * 24.0f);
         float n1 = Hashf(bucket + 1.3f);
@@ -120,7 +184,7 @@ static FxEval EvalFx(const OverlayFx& o, float time, float shortSide) {
         e.shiftY += (n2 - 0.5f) * 2.0f * amp;
         e.rot += (n1 - 0.5f) * amount * 0.10f;
     } else if (o.kind == 1) {
-        float spin = o.dir < 0 ? -1.0f : 1.0f;
+        float spin = dir < 0 ? -1.0f : 1.0f;
         e.rot += spin * local * 6.2831853f * (0.35f + amount * 1.75f);
     } else if (o.kind == 2) {
         e.matrix = 1;
@@ -489,7 +553,7 @@ void OverlayDrawGL(float x0, float y0, float x1, float y1, float time, int scree
     if (selectedLive >= 0) {
         const OverlayFx& o = gOverlays[selectedLive];
         float ax, ay, bx, by;
-        OverlayBox(o, x0, y0, x1, y1, ax, ay, bx, by);
+        OverlayBox(o, x0, y0, x1, y1, ax, ay, bx, by, time);
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         glColor4f(1, 1, 1, 0.95f);

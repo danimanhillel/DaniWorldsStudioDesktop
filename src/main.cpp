@@ -3119,6 +3119,13 @@ static bool SliderTyped(const char* label, float* v, float mn, float mx, const c
     return changed;
 }
 
+static bool FxSlider(OverlayFx& o, const char* label, float* v, int channel, float mn, float mx, const char* fmt) {
+    float before = *v;
+    bool changed = SliderTyped(label, v, mn, mx, fmt);
+    if (changed && o.rec && isPlaying) OverlayWrite(o, channel, before, *v, currentTime);
+    return changed;
+}
+
 static void DrawPictureControls(Clip& c) {
     SliderTyped("Position X", &c.gsX, -1.0f, 1.0f, "%.2f");
     SliderTyped("Position Y", &c.gsY, -1.0f, 1.0f, "%.2f");
@@ -5535,6 +5542,10 @@ bool SaveProject(const std::string& path) {
     for (const auto& o : gOverlays) {
         fprintf(f, "O %d %.4f %.4f %.3f %.3f %.3f %.2f %.3f %.3f %d\n",
                 o.kind, o.start, o.duration, o.x, o.y, o.scale, o.rot, o.opacity, o.amount, o.dir < 0 ? -1 : 1);
+        for (int ch = 0; ch < 7; ch++) {
+            if (o.holdOn[ch]) fprintf(f, "H %d %.5f\n", ch, o.hold[ch]);
+            for (const auto& k : o.anim[ch]) fprintf(f, "P %d %.4f %.5f\n", ch, k.t, k.v);
+        }
     }
     fprintf(f, "Y %.3f %.3f %.3f %d %.2f %.3f %.3f %.3f %.3f %.3f %.3f %d\n",
             subStyle.text[0], subStyle.text[1], subStyle.text[2], subStyle.border ? 1 : 0, subStyle.borderPx,
@@ -5666,6 +5677,19 @@ bool LoadProject(const std::string& path) {
                 o.amount = Clamp01(o.amount);
                 o.dir = (n == 10 && dir < 0) ? -1 : 1;
                 gOverlays.push_back(o);
+            }
+        } else if (line[0] == 'H' && line[1] == ' ' && !gOverlays.empty()) {
+            int ch = 0;
+            float v = 0;
+            if (sscanf(line, "H %d %f", &ch, &v) == 2 && ch >= 0 && ch < 7) {
+                gOverlays.back().holdOn[ch] = true;
+                gOverlays.back().hold[ch] = v;
+            }
+        } else if (line[0] == 'P' && line[1] == ' ' && !gOverlays.empty()) {
+            int ch = 0;
+            float t = 0, v = 0;
+            if (sscanf(line, "P %d %f %f", &ch, &t, &v) == 3 && ch >= 0 && ch < 7 && t >= 0) {
+                OverlayRecord(gOverlays.back().anim[ch], t, v);
             }
         } else if (line[0] == 'G' && line[1] == ' ' && !clips.empty()) {
             float a, b, c, d, e, f0, g0, h;
@@ -6086,7 +6110,7 @@ int main(int argc, char* argv[]) {
                     const OverlayFx& o = gOverlays[i];
                     if (currentTime < o.start || currentTime >= o.start + o.duration) continue;
                     float ax, ay, bx, by;
-                    OverlayBox(o, previewFrameMin.x, previewFrameMin.y, previewFrameMax.x, previewFrameMax.y, ax, ay, bx, by);
+                    OverlayBox(o, previewFrameMin.x, previewFrameMin.y, previewFrameMax.x, previewFrameMax.y, ax, ay, bx, by, currentTime);
                     float hx = (ax + bx) * 0.5f;
                     float hy = ay + 16.0f;
                     if (std::fabs(m.x - hx) < 10.0f && std::fabs(m.y - hy) < 10.0f) { gOverlaySel = i; ovDragMode = 3; ovDragIndex = i; break; }
@@ -6099,24 +6123,46 @@ int main(int argc, char* argv[]) {
             float fw = std::max(1.0f, previewFrameMax.x - previewFrameMin.x);
             float fh = std::max(1.0f, previewFrameMax.y - previewFrameMin.y);
             ImGuiIO& pio = ImGui::GetIO();
+            bool capture = o.rec && isPlaying;
+            float local = currentTime - o.start;
+            float x = o.x, y = o.y, sc = o.scale, rot = o.rot;
+            if (capture) {
+                x = OverlaySample(o.anim[0], local, o.holdOn[0] ? o.hold[0] : o.x);
+                y = OverlaySample(o.anim[1], local, o.holdOn[1] ? o.hold[1] : o.y);
+                sc = OverlaySample(o.anim[2], local, o.holdOn[2] ? o.hold[2] : o.scale);
+                rot = OverlaySample(o.anim[3], local, o.holdOn[3] ? o.hold[3] : o.rot);
+            }
+            float bx = x, by = y, bs = sc, br = rot;
             if (ovDragMode == 1) {
-                o.x += pio.MouseDelta.x / (fw * 0.5f);
-                o.y += pio.MouseDelta.y / (fh * 0.5f);
+                x += pio.MouseDelta.x / (fw * 0.5f);
+                y += pio.MouseDelta.y / (fh * 0.5f);
             } else if (ovDragMode == 2) {
-                o.scale += (pio.MouseDelta.x + pio.MouseDelta.y) / std::max(40.0f, fw * 0.25f);
+                sc += (pio.MouseDelta.x + pio.MouseDelta.y) / std::max(40.0f, fw * 0.25f);
             } else if (ovDragMode == 3) {
-                float cx = (previewFrameMin.x + previewFrameMax.x) * 0.5f + o.x * fw * 0.5f;
-                float cy = (previewFrameMin.y + previewFrameMax.y) * 0.5f + o.y * fh * 0.5f;
+                float cx = (previewFrameMin.x + previewFrameMax.x) * 0.5f + x * fw * 0.5f;
+                float cy = (previewFrameMin.y + previewFrameMax.y) * 0.5f + y * fh * 0.5f;
                 float a0 = std::atan2((pio.MousePos.y - pio.MouseDelta.y) - cy, (pio.MousePos.x - pio.MouseDelta.x) - cx);
                 float a1 = std::atan2(pio.MousePos.y - cy, pio.MousePos.x - cx);
-                o.rot += (a1 - a0) * 57.2957795f;
+                rot += (a1 - a0) * 57.2957795f;
             }
-            if (o.x < -1.2f) o.x = -1.2f;
-            if (o.x > 1.2f) o.x = 1.2f;
-            if (o.y < -1.2f) o.y = -1.2f;
-            if (o.y > 1.2f) o.y = 1.2f;
-            if (o.scale < 0.15f) o.scale = 0.15f;
-            if (o.scale > 4.0f) o.scale = 4.0f;
+            if (x < -1.2f) x = -1.2f;
+            if (x > 1.2f) x = 1.2f;
+            if (y < -1.2f) y = -1.2f;
+            if (y > 1.2f) y = 1.2f;
+            if (sc < 0.15f) sc = 0.15f;
+            if (sc > 4.0f) sc = 4.0f;
+            o.x = x;
+            o.y = y;
+            o.scale = sc;
+            o.rot = rot;
+            bool moved = std::fabs(pio.MouseDelta.x) + std::fabs(pio.MouseDelta.y) > 0.01f;
+            if (capture && moved) {
+                if (ovDragMode == 1) {
+                    OverlayWrite(o, 0, bx, o.x, currentTime);
+                    OverlayWrite(o, 1, by, o.y, currentTime);
+                } else if (ovDragMode == 2) OverlayWrite(o, 2, bs, o.scale, currentTime);
+                else if (ovDragMode == 3) OverlayWrite(o, 3, br, o.rot, currentTime);
+            }
         }
 
         topClip = -1;
@@ -6369,6 +6415,16 @@ int main(int argc, char* argv[]) {
             fxl->AddRectFilled(cp0, cp1, FxLaneColor(o.kind), 3.0f);
             if (i == gOverlaySel) fxl->AddRect(cp0, cp1, IM_COL32(255, 230, 160, 255), 3.0f, 0, 2.0f);
             fxl->AddText(ImVec2(cp0.x + 6, cp0.y + 4), IM_COL32(255, 245, 230, 240), OverlayKindName(o.kind));
+            int recorded = 0;
+            for (int k = 0; k < 7; k++) recorded += (int)o.anim[k].size();
+            if (recorded > 0) {
+                fxl->AddCircleFilled(ImVec2(cp0.x + 8.0f, cp1.y - 7.0f), 3.2f, IM_COL32(220, 48, 48, 255));
+                ImGui::SetCursorScreenPos(ImVec2(cp1.x + 4.0f, cp0.y + 2.0f));
+                ImGui::PushID(3000 + i);
+                if (ImGui::SmallButton("Rst")) OverlayResetAnim(gOverlays[i]);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Reset recorded changes");
+                ImGui::PopID();
+            }
             if (ImGui::IsMouseHoveringRect(cp0, cp1)) fxHover = i;
             if (!ImGui::IsMouseHoveringRect(cp0, cp1) || TimelinePointerBusy()) continue;
             ImVec2 mouse = ImGui::GetMousePos();
@@ -7302,23 +7358,47 @@ int main(int argc, char* argv[]) {
                     OverlayFx& o = gOverlays[ovPanel];
                     ImGui::TextUnformatted(OverlayKindName(o.kind));
                     ImGui::Separator();
-                    SliderTyped("X", &o.x, -1.0f, 1.0f, "%.2f");
-                    SliderTyped("Y", &o.y, -1.0f, 1.0f, "%.2f");
-                    SliderTyped("Size", &o.scale, 0.15f, 4.0f, "%.2f");
-                    SliderTyped("Rotate", &o.rot, -180.0f, 180.0f, "%.1f");
-                    SliderTyped("Amount", &o.amount, 0.0f, 1.0f, "%.2f");
-                    SliderTyped("Opacity", &o.opacity, 0.0f, 1.0f, "%.2f");
+                    FxSlider(o, "X", &o.x, 0, -1.0f, 1.0f, "%.2f");
+                    FxSlider(o, "Y", &o.y, 1, -1.0f, 1.0f, "%.2f");
+                    FxSlider(o, "Size", &o.scale, 2, 0.15f, 4.0f, "%.2f");
+                    FxSlider(o, "Rotate", &o.rot, 3, -180.0f, 180.0f, "%.1f");
+                    FxSlider(o, "Amount", &o.amount, 4, 0.0f, 1.0f, "%.2f");
+                    FxSlider(o, "Opacity", &o.opacity, 5, 0.0f, 1.0f, "%.2f");
                     if (o.kind == 1) {
                         int cw = o.dir < 0 ? 1 : 0;
-                        if (ImGui::Combo("Direction", &cw, "Clockwise\0Counter-clockwise\0"))
+                        int prev = o.dir;
+                        if (ImGui::Combo("Direction", &cw, "Clockwise\0Counter-clockwise\0")) {
                             o.dir = cw == 0 ? 1 : -1;
+                            if (o.rec && isPlaying) OverlayWrite(o, 6, (float)prev, (float)o.dir, currentTime);
+                        }
                     }
                     if (o.kind == 11) {
                         int axis = o.dir < 0 ? 1 : 0;
-                        if (ImGui::Combo("Axis", &axis, "Horizontal\0Vertical\0"))
+                        int prev = o.dir;
+                        if (ImGui::Combo("Axis", &axis, "Horizontal\0Vertical\0")) {
                             o.dir = axis == 0 ? 1 : -1;
+                            if (o.rec && isPlaying) OverlayWrite(o, 6, (float)prev, (float)o.dir, currentTime);
+                        }
                     }
                     ImGui::TextUnformatted("Drag in the preview. Corner scales, top handle rotates.");
+                    {
+                        int recorded = 0;
+                        for (int k = 0; k < 7; k++) recorded += (int)o.anim[k].size();
+                        if (recorded > 0) ImGui::TextDisabled("%d recorded keys", recorded);
+                    }
+                    bool recLit = o.rec;
+                    if (recLit) {
+                        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.72f, 0.16f, 0.14f, 1.0f));
+                        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.84f, 0.22f, 0.18f, 1.0f));
+                        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.58f, 0.10f, 0.10f, 1.0f));
+                    }
+                    if (ImGui::Button("REC")) o.rec = !o.rec;
+                    if (recLit) ImGui::PopStyleColor(3);
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip(o.rec ? "Recording while Play is on" : "Record slider changes while Play is on");
+                    ImGui::SameLine();
+                    if (ImGui::Button("Reset")) OverlayResetAnim(o);
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Clear every recorded change");
+                    ImGui::SameLine();
                     if (ImGui::Button("Delete")) {
                         gOverlays.erase(gOverlays.begin() + ovPanel);
                         gOverlaySel = -1;
