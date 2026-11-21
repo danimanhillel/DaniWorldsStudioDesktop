@@ -5129,8 +5129,9 @@ int main(int argc, char* argv[]) {
 
         ImGui::SetNextWindowPos(ImVec2(0, 0));
         ImGui::SetNextWindowSize(io.DisplaySize);
-        ImGui::Begin("Editor", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
+        ImGui::Begin("Editor", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_MenuBar);
 
+        if (ImGui::BeginMenuBar()) {
         if (ImGui::BeginMenu("Project")) {
             if (ImGui::MenuItem("New")) {
                 ClearProject();
@@ -5148,7 +5149,6 @@ int main(int argc, char* argv[]) {
             if (ImGui::MenuItem("Export")) requestExport = true;
             ImGui::EndMenu();
         }
-        ImGui::SameLine();
         if (ImGui::BeginMenu("Edit")) {
             if (ImGui::MenuItem("Import")) ImportFiles(hwnd);
             if (ImGui::MenuItem(asrOn ? "Stop subs" : "Auto subs")) {
@@ -5186,8 +5186,9 @@ int main(int argc, char* argv[]) {
             if (ImGui::MenuItem("RIFE", nullptr, &exRife)) {}
             ImGui::EndMenu();
         }
+        ImGui::EndMenuBar();
+        }
 
-        ImGui::Separator();
         float availY = ImGui::GetContentRegionAvail().y;
         float tlH = 26.0f + 58.0f + 62.0f + 42.0f * 8.0f + 8.0f * 6.0f + 28.0f;
         if (tlH > availY * 0.50f) tlH = availY * 0.50f;
