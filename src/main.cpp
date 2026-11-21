@@ -286,6 +286,7 @@ bool ovPanelOpen = false;
 int ovPanel = -1;
 bool ovPanelHolds = false;
 ImVec4 ovPanelRect(0, 0, 0, 0);
+int fxHover = -1;
 double libClock = 0.0;
 std::vector<unsigned char> fontAtlas;
 int fontAtlasW = 0;
@@ -5158,7 +5159,20 @@ int main(int argc, char* argv[]) {
                 }
                 if ((event.key.keysym.sym == SDLK_i) && !event.key.repeat && !io.WantTextInput && !subEditorOpen && !(SDL_GetModState() & KMOD_CTRL))
                     ImportFiles(hwnd);
-                if (event.key.keysym.sym == SDLK_DELETE && !event.key.repeat && !mediaSel.empty() && !io.WantTextInput) {
+                if (event.key.keysym.sym == SDLK_DELETE && !event.key.repeat && fxHover >= 0 && fxHover < (int)gOverlays.size() && !io.WantTextInput) {
+                    gOverlays.erase(gOverlays.begin() + fxHover);
+                    if (gOverlaySel == fxHover) gOverlaySel = -1;
+                    else if (gOverlaySel > fxHover) gOverlaySel--;
+                    if (ovPanel == fxHover) { ovPanel = -1; ovPanelOpen = false; }
+                    else if (ovPanel > fxHover) ovPanel--;
+                    if (draggingOv == fxHover) draggingOv = -1;
+                    else if (draggingOv > fxHover) draggingOv--;
+                    if (trimmingOv == fxHover) trimmingOv = -1;
+                    else if (trimmingOv > fxHover) trimmingOv--;
+                    if (ovDragIndex == fxHover) { ovDragIndex = -1; ovDragMode = 0; }
+                    else if (ovDragIndex > fxHover) ovDragIndex--;
+                    fxHover = -1;
+                } else if (event.key.keysym.sym == SDLK_DELETE && !event.key.repeat && !mediaSel.empty() && !io.WantTextInput) {
                     DeleteSelectedMedia();
                 } else if (event.key.keysym.sym == SDLK_DELETE || event.key.keysym.sym == SDLK_BACKSPACE) {
                     if (selectedBus >= 0 && selectedBus < (int)bus.size() && !io.WantTextInput) {
@@ -5643,6 +5657,7 @@ int main(int argc, char* argv[]) {
             ImGui::EndDragDropTarget();
         }
         ImDrawList* fxl = ImGui::GetWindowDrawList();
+        fxHover = -1;
         for (int i = 0; i < (int)gOverlays.size(); i++) {
             const OverlayFx& o = gOverlays[i];
             float x = fxStart.x + o.start * pixelsPerSecond;
@@ -5652,6 +5667,7 @@ int main(int argc, char* argv[]) {
             fxl->AddRectFilled(cp0, cp1, FxLaneColor(o.kind), 3.0f);
             if (i == gOverlaySel) fxl->AddRect(cp0, cp1, IM_COL32(255, 230, 160, 255), 3.0f, 0, 2.0f);
             fxl->AddText(ImVec2(cp0.x + 6, cp0.y + 4), IM_COL32(255, 245, 230, 240), OverlayKindName(o.kind));
+            if (ImGui::IsMouseHoveringRect(cp0, cp1)) fxHover = i;
             if (!ImGui::IsMouseHoveringRect(cp0, cp1) || TimelinePointerBusy()) continue;
             ImVec2 mouse = ImGui::GetMousePos();
             if (mouse.x < cp0.x + 8 || mouse.x > cp1.x - 8) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);

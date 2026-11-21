@@ -242,9 +242,19 @@ static bool EnsureFxShader() {
         "      col.b = mix(col.b, cb, 0.9);\n"
         "      float scan = 0.90 + 0.10 * sin(gl_FragCoord.y * 1.7);\n"
         "      col *= scan;\n"
-        "      float n = fract(sin(dot(floor(gl_FragCoord.xy * 0.45) + floor(time * 11.0) * 17.0, vec2(12.9898, 78.233))) * 43758.5453);\n"
-        "      if (n > 0.996) col = vec3(0.92, 0.92, 0.88);\n"
-        "      else if (n > 0.989) col *= 0.15;\n"
+        "      float tq = floor(time * 18.0);\n"
+        "      float n1 = fract(sin(dot(gl_FragCoord.xy + vec2(tq * 19.0, tq * 7.0), vec2(12.9898, 78.233))) * 43758.5453);\n"
+        "      float n2 = fract(sin(dot(gl_FragCoord.yx + vec2(tq * 3.1, tq * 11.0), vec2(39.3467, 11.135))) * 24634.6345);\n"
+        "      float spark = smoothstep(0.9984, 0.9997, n1) * (0.06 + 0.16 * n2) * (0.22 + amount * 0.35);\n"
+        "      col += vec3(0.55, 0.52, 0.46) * spark;\n"
+        "      vec2 cell = gl_FragCoord.xy * (0.22 + n2 * 0.18) + vec2(tq * 0.17, tq * 0.09);\n"
+        "      vec2 cf = fract(cell) - 0.5;\n"
+        "      float n3 = fract(sin(dot(floor(cell) + tq * vec2(5.0, 9.0), vec2(12.9898, 78.233))) * 43758.5453);\n"
+        "      float rad = 0.06 + fract(n3 * 7.13) * 0.22;\n"
+        "      float blob = smoothstep(0.988, 0.998, n3) * smoothstep(rad, rad * 0.2, length(cf));\n"
+        "      float dust = blob * (0.05 + 0.12 * amount);\n"
+        "      col = mix(col, col * (0.86 + 0.14 * n2) + vec3(0.22, 0.20, 0.16), dust);\n"
+        "      col *= 1.0 - smoothstep(0.996, 0.9995, n2) * (0.03 + 0.06 * amount);\n"
         "      float bar = fract(time * 0.15);\n"
         "      if (abs(src.y - bar) < 0.015) {\n"
         "        float tear = (fract(sin(floor(time * 7.0) * 9.2) * 43758.5) - 0.5) * amount * 0.10;\n"
@@ -554,9 +564,33 @@ void OverlayStamp(unsigned char* canvas, int w, int h, float time) {
                         b = b * 0.1f + b2 * 0.9f;
                         float scan = 0.90f + 0.10f * std::sin((float)y * 1.7f);
                         r *= scan; g *= scan; b *= scan;
-                        float n = Fract(std::sin((std::floor(x * 0.45f) + std::floor(y * 0.45f) * 13.0f + std::floor(time * 11.0f) * 17.0f) * 12.9898f) * 43758.5453f);
-                        if (n > 0.996f) { r = 0.92f; g = 0.92f; b = 0.88f; }
-                        else if (n > 0.989f) { r *= 0.15f; g *= 0.15f; b *= 0.15f; }
+                        float tq = std::floor(time * 18.0f);
+                        float n1 = Fract(std::sin((x + tq * 19.0f) * 12.9898f + (y + tq * 7.0f) * 78.233f) * 43758.5453f);
+                        float n2 = Fract(std::sin((y + tq * 3.1f) * 39.3467f + (x + tq * 11.0f) * 11.135f) * 24634.6345f);
+                        float spark = 0.0f;
+                        if (n1 > 0.9984f) spark = ((n1 - 0.9984f) / 0.0013f);
+                        if (spark > 1.0f) spark = 1.0f;
+                        spark *= (0.06f + 0.16f * n2) * (0.22f + e.amount * 0.35f);
+                        r += 0.55f * spark; g += 0.52f * spark; b += 0.46f * spark;
+                        float cellx = x * (0.22f + n2 * 0.18f) + tq * 0.17f;
+                        float celly = y * (0.22f + n2 * 0.18f) + tq * 0.09f;
+                        float cfx = cellx - std::floor(cellx) - 0.5f;
+                        float cfy = celly - std::floor(celly) - 0.5f;
+                        float n3 = Fract(std::sin((std::floor(cellx) + tq * 5.0f) * 12.9898f + (std::floor(celly) + tq * 9.0f) * 78.233f) * 43758.5453f);
+                        float rad = 0.06f + Fract(n3 * 7.13f) * 0.22f;
+                        float dist = std::sqrt(cfx * cfx + cfy * cfy);
+                        float blob = 0.0f;
+                        if (n3 > 0.988f) blob = std::min(1.0f, (n3 - 0.988f) / 0.010f);
+                        float edge = rad - dist;
+                        float span = std::max(0.001f, rad * 0.8f);
+                        float fall = edge <= 0 ? 0.0f : (edge >= span ? 1.0f : edge / span);
+                        blob *= fall;
+                        float dust = blob * (0.05f + 0.12f * e.amount);
+                        r = r * (1.0f - dust) + (r * (0.86f + 0.14f * n2) + 0.22f) * dust;
+                        g = g * (1.0f - dust) + (g * (0.86f + 0.14f * n2) + 0.20f) * dust;
+                        b = b * (1.0f - dust) + (b * (0.86f + 0.14f * n2) + 0.16f) * dust;
+                        float dark = n2 > 0.996f ? std::min(1.0f, (n2 - 0.996f) / 0.0035f) * (0.03f + 0.06f * e.amount) : 0.0f;
+                        r *= 1.0f - dark; g *= 1.0f - dark; b *= 1.0f - dark;
                         if (std::fabs(sy - bar) < 0.015f) {
                             float tr, tg, tb;
                             float tx = std::clamp(sx + tear, 0.0f, 1.0f) * (float)(w - 1);
