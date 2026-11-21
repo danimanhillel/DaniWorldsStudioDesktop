@@ -5242,6 +5242,12 @@ void ApplyTrim(int idx, float mouseX) {
 }
 
 void ExportDims(int aspect, int res, int& w, int& h) {
+    if (res == 5) {
+        if (aspect == 1 || aspect == 4) { w = 768; h = 1376; }
+        else if (aspect == 2) { w = 768; h = 768; }
+        else { w = 1376; h = 768; }
+        return;
+    }
     const int heights[] = {720, 1080, 1440, 2160, 4320};
     const int widths169[] = {1280, 1920, 2560, 3840, 7680};
     if (res < 0) res = 0;
@@ -7021,6 +7027,8 @@ int main(int argc, char* argv[]) {
             ImGui::TextUnformatted("Resolution");
             if (ImGui::RadioButton("720p", exRes == 0)) exRes = 0;
             ImGui::SameLine();
+            if (ImGui::RadioButton("1376x768", exRes == 5)) exRes = 5;
+            ImGui::SameLine();
             if (ImGui::RadioButton("1080p", exRes == 1)) exRes = 1;
             ImGui::SameLine();
             if (ImGui::RadioButton("2K", exRes == 2)) exRes = 2;
@@ -7043,7 +7051,7 @@ int main(int argc, char* argv[]) {
             ExportDims(exAspect, exRes, ew, eh);
             ImGui::Separator();
             ImGui::Text("Output: %d x %d   @ %d fps", ew, eh, fps);
-            if (exRes >= 3) ImGui::TextDisabled("4K and 8K take a long time.");
+            if (exRes == 3 || exRes == 4) ImGui::TextDisabled("4K and 8K take a long time.");
             ImGui::Checkbox("Frame interpolation", &exRife);
             ImGui::TextDisabled("Renders the movie first, then fills frames on the GPU. 50 or 60 fps. Subtitles are added after.");
             ImGui::TextDisabled("%s", RifeProbe().detail.c_str());
