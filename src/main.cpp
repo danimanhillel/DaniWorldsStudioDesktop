@@ -179,6 +179,7 @@ std::vector<ThumbBlit> thumbBlits;
 float currentTime = 0.0f;
 float pixelsPerSecond = 50.0f;
 bool isPlaying = false;
+bool repeatOn = false;
 bool snapEnabled = true;
 int selectedClip = -1;
 std::vector<int> selection;
@@ -5225,6 +5226,7 @@ void ClearProject() {
     trimmingOv = -1;
     currentTime = 0;
     shownLocal = -1000.0f;
+    repeatOn = false;
 #ifdef HAVE_FFMPEG
     SetPlaying(false);
     for (auto& a : audioSrcs) CloseAudioSrc(a);
@@ -5319,13 +5321,25 @@ float TimelineEnd() {
 void StopIfFinished() {
     if (!isPlaying || draggingPlayhead) return;
     float end = TimelineEnd();
-    if (!clips.empty() && currentTime < end - 0.02f) return;
+    if (clips.empty() || currentTime < end - 0.02f) return;
+    if (repeatOn) {
+        currentTime = 0;
+        shownLocal = -1000.0f;
+#ifdef HAVE_FFMPEG
+        ResetAudioSync();
+        if (player) player->lastPts = -1;
+        if (playerB) playerB->lastPts = -1;
+        if (playerGS) playerGS->lastPts = -1;
+        if (playerNext) playerNext->lastPts = -1;
+#endif
+        return;
+    }
 #ifdef HAVE_FFMPEG
     SetPlaying(false);
 #else
     isPlaying = false;
 #endif
-    if (!clips.empty() && currentTime > end) currentTime = end;
+    if (currentTime > end) currentTime = end;
     shownLocal = -1000.0f;
 }
 
@@ -5335,6 +5349,7 @@ bool SaveProject(const std::string& path) {
     fprintf(f, "DWP1\n");
     fprintf(f, "time %.6f\n", currentTime);
     fprintf(f, "snap %d\n", snapEnabled ? 1 : 0);
+    fprintf(f, "repeat %d\n", repeatOn ? 1 : 0);
     fprintf(f, "pps %.3f\n", pixelsPerSecond);
     fprintf(f, "aspect %d\n", exAspect);
     for (const auto& m : media) {
@@ -5399,6 +5414,8 @@ bool LoadProject(const std::string& path) {
             currentTime = (float)atof(line + 5);
         } else if (strncmp(line, "snap ", 5) == 0) {
             snapEnabled = atoi(line + 5) != 0;
+        } else if (strncmp(line, "repeat ", 7) == 0) {
+            repeatOn = atoi(line + 7) != 0;
         } else if (strncmp(line, "pps ", 4) == 0) {
             float p = (float)atof(line + 4);
             if (p > 5.0f && p < 400.0f) pixelsPerSecond = p;
@@ -6015,18 +6032,15 @@ int main(int argc, char* argv[]) {
         }
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Stop");
         ImGui::SameLine();
-        if (TransportButton("repeat", 4)) {
-            currentTime = 0;
-            shownLocal = -1000.0f;
-#ifdef HAVE_FFMPEG
-            ResetAudioSync();
-            if (player) player->lastPts = -1;
-            SetPlaying(true);
-#else
-            isPlaying = true;
-#endif
+        bool repeatLit = repeatOn;
+        if (repeatLit) {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.78f, 0.32f, 0.10f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.88f, 0.40f, 0.14f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.62f, 0.22f, 0.06f, 1.0f));
         }
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Repeat");
+        if (TransportButton("repeat", 4)) repeatOn = !repeatOn;
+        if (repeatLit) ImGui::PopStyleColor(3);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip(repeatOn ? "Repeat on" : "Repeat");
         ImGui::SameLine();
         {
             int total = (int)currentTime;
