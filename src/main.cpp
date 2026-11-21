@@ -12,6 +12,11 @@
 #include <cmath>
 #include <cstring>
 #include <cstdlib>
+#include <thread>
+#include <mutex>
+#include <atomic>
+#include <condition_variable>
+#include <map>
 #include "effects.h"
 #include "overlay_fx.h"
 #include "rife.h"
@@ -428,6 +433,7 @@ public:
     HwDec* hw = nullptr;
     int videoStream = -1;
     int width = 0, height = 0;
+    int srcW = 0, srcH = 0;
     GLuint texture = 0;
     bool hasFrame = false;
     double lastPts = -1;
@@ -468,18 +474,28 @@ public:
     bool EnsureTextureFrom(AVFrame* src) {
         if (!src || src->width <= 0 || src->height <= 0) return false;
         AVPixelFormat srcFmt = (AVPixelFormat)src->format;
-        if (texture && swsCtx && width == src->width && height == src->height && swsFmt == srcFmt) return true;
+        int dw = src->width;
+        int dh = src->height;
+        int edge = std::max(dw, dh);
+        if (edge > 1280) {
+            double s = 1280.0 / (double)edge;
+            dw = std::max(2, (int)std::lround(src->width * s) & ~1);
+            dh = std::max(2, (int)std::lround(src->height * s) & ~1);
+        }
+        if (texture && swsCtx && width == dw && height == dh && swsFmt == srcFmt && srcW == src->width && srcH == src->height) return true;
         if (swsCtx) { sws_freeContext(swsCtx); swsCtx = nullptr; }
         if (rgbBuffer) { av_free(rgbBuffer); rgbBuffer = nullptr; }
         if (!rgbFrame) rgbFrame = av_frame_alloc();
-        width = src->width;
-        height = src->height;
+        srcW = src->width;
+        srcH = src->height;
+        width = dw;
+        height = dh;
         swsFmt = srcFmt;
         int numBytes = av_image_get_buffer_size(AV_PIX_FMT_RGBA, width, height, 1);
         rgbBuffer = (uint8_t*)av_malloc(numBytes);
         av_image_fill_arrays(rgbFrame->data, rgbFrame->linesize, rgbBuffer, AV_PIX_FMT_RGBA, width, height, 1);
-        swsCtx = sws_getContext(width, height, srcFmt, width, height, AV_PIX_FMT_RGBA,
-                                SWS_BILINEAR, nullptr, nullptr, nullptr);
+        swsCtx = sws_getContext(srcW, srcH, srcFmt, width, height, AV_PIX_FMT_RGBA,
+                                SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
         if (!swsCtx) { lastError = "sws failed"; return false; }
         if (!texture) glGenTextures(1, &texture);
         glBindTexture(GL_TEXTURE_2D, texture);
@@ -488,6 +504,26 @@ public:
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        return true;
+    }
+
+    bool ShowRGBA(const uint8_t* rgba, int w, int h) {
+        if (!rgba || w < 2 || h < 2) return false;
+        if (!texture) glGenTextures(1, &texture);
+        glBindTexture(GL_TEXTURE_2D, texture);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        if (width != w || height != h || !hasFrame) {
+            width = w;
+            height = h;
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+        } else {
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+        }
+        hasFrame = true;
         return true;
     }
 
@@ -520,7 +556,7 @@ public:
                         AVFrame* src = DownloadFrame(hw, frame);
                         if (!src) { av_packet_free(&packet); return false; }
                         if (!EnsureTextureFrom(src)) { av_packet_free(&packet); return false; }
-                        sws_scale(swsCtx, src->data, src->linesize, 0, height, rgbFrame->data, rgbFrame->linesize);
+                        sws_scale(swsCtx, src->data, src->linesize, 0, srcH, rgbFrame->data, rgbFrame->linesize);
                         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
                         glBindTexture(GL_TEXTURE_2D, texture);
                         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, rgbFrame->data[0]);
@@ -539,7 +575,7 @@ public:
             else lastPts = (lastPts < 0.0 ? 0.0 : lastPts);
             AVFrame* src = DownloadFrame(hw, frame);
             if (src && EnsureTextureFrom(src)) {
-                sws_scale(swsCtx, src->data, src->linesize, 0, height, rgbFrame->data, rgbFrame->linesize);
+                sws_scale(swsCtx, src->data, src->linesize, 0, srcH, rgbFrame->data, rgbFrame->linesize);
                 glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
                 glBindTexture(GL_TEXTURE_2D, texture);
                 glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, rgbFrame->data[0]);
@@ -564,11 +600,387 @@ public:
         hasFrame = false;
         width = 0;
         height = 0;
+        srcW = 0;
+        srcH = 0;
         lastPts = -1;
         swsFmt = AV_PIX_FMT_NONE;
         decName = "CPU";
     }
 };
+
+struct PreviewRam {
+    struct Frame { float pts = 0; std::vector<uint8_t> rgba; };
+    struct Slot { int w = 0; int h = 0; uint64_t bytes = 0; std::vector<Frame> frames; };
+    struct Span { float a = 0; float b = 0; };
+    struct Task {
+        int gen = 0;
+        int media = -1;
+        std::string path;
+        float from = 0;
+        float to = 0;
+        bool image = false;
+    };
+
+    std::mutex mu;
+    std::condition_variable cv;
+    std::map<int, Slot> slots;
+    std::map<int, std::vector<Span>> done;
+    std::thread worker;
+    std::atomic<bool> stop{false};
+    std::atomic<bool> pause{false};
+    std::atomic<bool> stalled{false};
+    std::atomic<int> gen{1};
+    std::atomic<int> pct{0};
+    std::atomic<int> decoding{-1};
+    std::atomic<uint64_t> usedBytes{0};
+    Task pending;
+    bool hasTask = false;
+    bool busy = false;
+
+    ~PreviewRam() { Stop(); }
+
+    static bool RoomFor(size_t bytes) {
+        uint64_t room = 512ull << 20;
+#ifdef _WIN32
+        MEMORYSTATUSEX mem;
+        mem.dwLength = sizeof(mem);
+        if (GlobalMemoryStatusEx(&mem)) {
+            uint64_t reserve = mem.ullTotalPhys / 5;
+            if (reserve < (2ull << 30)) reserve = 2ull << 30;
+            room = mem.ullAvailPhys > reserve ? mem.ullAvailPhys - reserve : 0;
+        }
+#endif
+        return room >= bytes;
+    }
+
+    bool MakeRoom(int keep, size_t need) {
+        if (RoomFor(need)) return true;
+        std::lock_guard<std::mutex> lk(mu);
+        while (!RoomFor(need)) {
+            int victim = -1;
+            uint64_t biggest = 0;
+            for (auto& kv : slots) {
+                if (kv.first == keep) continue;
+                if (kv.second.bytes > biggest) { biggest = kv.second.bytes; victim = kv.first; }
+            }
+            if (victim < 0) return false;
+            usedBytes -= slots[victim].bytes;
+            slots.erase(victim);
+            done.erase(victim);
+        }
+        return true;
+    }
+
+    void Push(int media, float pts, int w, int h, std::vector<uint8_t>& rgba) {
+        std::lock_guard<std::mutex> lk(mu);
+        Slot& s = slots[media];
+        if ((s.w && s.w != w) || (s.h && s.h != h)) {
+            usedBytes -= s.bytes;
+            s.frames.clear();
+            s.bytes = 0;
+            done.erase(media);
+        }
+        s.w = w;
+        s.h = h;
+        auto it = s.frames.begin();
+        while (it != s.frames.end() && it->pts + 0.001f < pts) ++it;
+        if (it != s.frames.end() && std::fabs(it->pts - pts) < 0.012f) return;
+        size_t n = rgba.size();
+        s.frames.insert(it, Frame{pts, std::move(rgba)});
+        s.bytes += n;
+        usedBytes += n;
+    }
+
+    void MarkDone(int media, float a, float b) {
+        std::lock_guard<std::mutex> lk(mu);
+        done[media].push_back(Span{a, b});
+    }
+
+    bool Covered(int media, float a, float b) {
+        std::lock_guard<std::mutex> lk(mu);
+        auto it = done.find(media);
+        if (it == done.end()) return false;
+        for (const Span& s : it->second)
+            if (s.a <= a + 0.08f && s.b + 0.08f >= b) return true;
+        return false;
+    }
+
+    void Decode(const Task& task) {
+        struct Dec {
+            AVFormatContext* fmt = nullptr;
+            AVCodecContext* ctx = nullptr;
+            HwDec* hw = nullptr;
+            AVFrame* frame = nullptr;
+            AVPacket* pkt = nullptr;
+            SwsContext* sws = nullptr;
+            ~Dec() {
+                if (sws) sws_freeContext(sws);
+                if (pkt) av_packet_free(&pkt);
+                if (frame) av_frame_free(&frame);
+                if (ctx) avcodec_free_context(&ctx);
+                if (hw) { hw->Free(); delete hw; }
+                if (fmt) avformat_close_input(&fmt);
+            }
+        } dec;
+        if (avformat_open_input(&dec.fmt, task.path.c_str(), nullptr, nullptr) < 0 ||
+            avformat_find_stream_info(dec.fmt, nullptr) < 0) {
+            MarkDone(task.media, task.from, task.to);
+            return;
+        }
+        int stream = -1;
+        for (unsigned i = 0; i < dec.fmt->nb_streams; i++) {
+            if (dec.fmt->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) { stream = (int)i; break; }
+        }
+        const AVCodec* codec = stream >= 0 ? avcodec_find_decoder(dec.fmt->streams[stream]->codecpar->codec_id) : nullptr;
+        const char* how = "CPU";
+        if (stream < 0 || !codec || !OpenDecoder(dec.ctx, codec, dec.fmt->streams[stream]->codecpar, dec.hw, how)) {
+            MarkDone(task.media, task.from, task.to);
+            return;
+        }
+        dec.frame = av_frame_alloc();
+        dec.pkt = av_packet_alloc();
+        if (!dec.frame || !dec.pkt) return;
+        float resume = task.from;
+        {
+            std::lock_guard<std::mutex> lk(mu);
+            auto it = slots.find(task.media);
+            if (it != slots.end()) {
+                for (const Frame& f : it->second.frames)
+                    if (f.pts >= task.from - 0.02f && f.pts < task.to && f.pts > resume) resume = f.pts;
+            }
+        }
+        if (!task.image && resume > 0.02f) {
+            int64_t ts = (int64_t)(resume / av_q2d(dec.fmt->streams[stream]->time_base));
+            av_seek_frame(dec.fmt, stream, ts, AVSEEK_FLAG_BACKWARD);
+            avcodec_flush_buffers(dec.ctx);
+        }
+        int dw = 0, dh = 0;
+        std::vector<uint8_t> rgba;
+        float lastKeep = -1;
+        bool eof = false;
+        int spins = 0;
+        while (!stop.load() && !pause.load() && task.gen == gen.load() && spins < 200000) {
+            spins++;
+            if (av_read_frame(dec.fmt, dec.pkt) < 0) { eof = true; break; }
+            if (dec.pkt->stream_index != stream) { av_packet_unref(dec.pkt); continue; }
+            int send = avcodec_send_packet(dec.ctx, dec.pkt);
+            av_packet_unref(dec.pkt);
+            if (send < 0 && send != AVERROR(EAGAIN)) continue;
+            while (avcodec_receive_frame(dec.ctx, dec.frame) == 0) {
+                if (stop.load() || pause.load() || task.gen != gen.load()) return;
+                AVFrame* src = DownloadFrame(dec.hw, dec.frame);
+                if (!src || src->width <= 0 || src->height <= 0) continue;
+                if (!dec.sws) {
+                    int edge = std::max(src->width, src->height);
+                    dw = src->width;
+                    dh = src->height;
+                    if (edge > 1280) {
+                        double s = 1280.0 / (double)edge;
+                        dw = std::max(2, (int)std::lround(src->width * s) & ~1);
+                        dh = std::max(2, (int)std::lround(src->height * s) & ~1);
+                    }
+                    dec.sws = sws_getContext(src->width, src->height, (AVPixelFormat)src->format, dw, dh, AV_PIX_FMT_RGBA,
+                                             SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
+                    rgba.assign((size_t)dw * (size_t)dh * 4, 0);
+                }
+                if (!dec.sws || rgba.empty()) return;
+                uint8_t* dstData[1] = { rgba.data() };
+                int dstLines[1] = { dw * 4 };
+                sws_scale(dec.sws, src->data, src->linesize, 0, src->height, dstData, dstLines);
+                float pts = 0;
+                if (!task.image && dec.frame->best_effort_timestamp != AV_NOPTS_VALUE)
+                    pts = (float)(dec.frame->best_effort_timestamp * av_q2d(dec.fmt->streams[stream]->time_base));
+                else if (!task.image)
+                    pts = lastKeep < 0 ? resume : lastKeep + 0.033f;
+                if (!task.image && pts + 0.04f < resume) continue;
+                if (!task.image && pts > task.to + 0.06f) {
+                    MarkDone(task.media, task.from, task.to);
+                    return;
+                }
+                if (!task.image && lastKeep >= 0 && pts - lastKeep < 0.028f) continue;
+                if (!MakeRoom(task.media, rgba.size())) { stalled = true; return; }
+                stalled = false;
+                std::vector<uint8_t> owned = rgba;
+                Push(task.media, pts, dw, dh, owned);
+                lastKeep = pts;
+                if (task.image) {
+                    MarkDone(task.media, task.from, task.to);
+                    return;
+                }
+            }
+        }
+        if (eof && task.gen == gen.load() && !pause.load())
+            MarkDone(task.media, task.from, task.to);
+    }
+
+    void ThreadMain() {
+#ifdef _WIN32
+        CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+#endif
+        while (!stop.load()) {
+            Task task;
+            {
+                std::unique_lock<std::mutex> lk(mu);
+                cv.wait(lk, [&]{ return stop.load() || hasTask; });
+                if (stop.load()) break;
+                task = pending;
+                hasTask = false;
+                busy = true;
+            }
+            decoding.store(task.media);
+            if (!pause.load() && task.gen == gen.load()) Decode(task);
+            decoding.store(-1);
+            std::lock_guard<std::mutex> lk(mu);
+            busy = false;
+        }
+#ifdef _WIN32
+        CoUninitialize();
+#endif
+    }
+
+    void EnsureThread() {
+        if (worker.joinable()) return;
+        stop = false;
+        worker = std::thread([this]{ ThreadMain(); });
+    }
+
+    void SetPaused(bool v) { pause.store(v); if (!v) cv.notify_all(); }
+
+    void Clear() {
+        gen.fetch_add(1);
+        std::lock_guard<std::mutex> lk(mu);
+        slots.clear();
+        done.clear();
+        usedBytes = 0;
+        hasTask = false;
+        pct = 0;
+        stalled = false;
+    }
+
+    void Stop() {
+        stop = true;
+        gen.fetch_add(1);
+        cv.notify_all();
+        if (worker.joinable()) worker.join();
+    }
+
+    bool Present(VideoPlayer* p, int media, float mediaT) {
+        if (!p || media < 0) return false;
+        std::vector<uint8_t> copy;
+        int w = 0, h = 0;
+        float pts = 0;
+        {
+            std::lock_guard<std::mutex> lk(mu);
+            auto it = slots.find(media);
+            if (it == slots.end() || it->second.frames.empty()) return false;
+            const Slot& s = it->second;
+            int best = 0;
+            if (s.frames.size() > 1) {
+                int lo = 0, hi = (int)s.frames.size() - 1, ans = 0;
+                while (lo <= hi) {
+                    int mid = (lo + hi) / 2;
+                    if (s.frames[mid].pts <= mediaT + 0.02f) { ans = mid; lo = mid + 1; }
+                    else hi = mid - 1;
+                }
+                best = ans;
+            }
+            if (std::fabs(s.frames[best].pts - mediaT) > 0.20f) return false;
+            copy = s.frames[best].rgba;
+            w = s.w;
+            h = s.h;
+            pts = s.frames[best].pts;
+        }
+        if (!p->ShowRGBA(copy.data(), w, h)) return false;
+        p->lastPts = pts;
+        return true;
+    }
+
+    int Percent() const { return pct.load(); }
+    bool MemoryFull() const { return stalled.load() && pct.load() < 99; }
+
+    void Tick(float time) {
+        struct R { int media; std::string path; float a, b, rank; bool image; };
+        std::vector<R> ranges;
+        for (const Clip& c : clips) {
+            if (c.track >= 3 && c.track != kGsTrack) continue;
+            if (c.mediaId < 0 || c.mediaId >= (int)media.size()) continue;
+            if (media[c.mediaId].type == "audio") continue;
+            R r;
+            r.media = c.mediaId;
+            r.path = media[c.mediaId].path;
+            r.image = media[c.mediaId].type == "image";
+            r.a = r.image ? 0.0f : std::max(0.0f, c.sourceOffset);
+            r.b = r.a + (r.image ? 0.05f : c.duration * std::max(0.05f, c.speed));
+            if (!r.image && media[c.mediaId].duration > 0.2f && r.b > media[c.mediaId].duration + 0.05f)
+                r.b = media[c.mediaId].duration + 0.05f;
+            if (r.b < r.a + 0.04f) r.b = r.a + 0.04f;
+            float mid = c.startTime + c.duration * 0.5f;
+            r.rank = std::fabs(mid - time);
+            ranges.push_back(r);
+        }
+        std::sort(ranges.begin(), ranges.end(), [](const R& a, const R& b) {
+            if (a.media != b.media) return a.media < b.media;
+            return a.a < b.a;
+        });
+        std::vector<R> merged;
+        for (const R& r : ranges) {
+            if (!merged.empty() && merged.back().media == r.media && r.a <= merged.back().b + 0.20f) {
+                if (r.b > merged.back().b) merged.back().b = r.b;
+                if (r.rank < merged.back().rank) merged.back().rank = r.rank;
+            } else merged.push_back(r);
+        }
+        std::sort(merged.begin(), merged.end(), [](const R& a, const R& b) {
+            return a.rank < b.rank || (a.rank == b.rank && a.media < b.media);
+        });
+        double want = 0, got = 0;
+        {
+            std::lock_guard<std::mutex> lk(mu);
+            for (const R& r : merged) {
+                double len = std::max(0.04f, r.b - r.a);
+                want += len;
+                auto it = slots.find(r.media);
+                int n = 0;
+                if (it != slots.end()) {
+                    for (const Frame& f : it->second.frames)
+                        if (f.pts + 0.02f >= r.a && f.pts <= r.b + 0.02f) n++;
+                }
+                got += std::min(len, n / 30.0);
+            }
+        }
+        pct = want <= 0.01 ? 100 : (int)std::lround(got / want * 100.0);
+        if (pct > 100) pct = 100;
+        int best = -1;
+        for (int i = 0; i < (int)merged.size(); i++) {
+            if (!Covered(merged[i].media, merged[i].a, merged[i].b)) { best = i; break; }
+        }
+        if (best < 0) { pct = merged.empty() ? 0 : 100; return; }
+        EnsureThread();
+        bool isBusy = false;
+        {
+            std::lock_guard<std::mutex> lk(mu);
+            isBusy = busy;
+        }
+        if (isBusy) {
+            if (decoding.load() != merged[best].media) gen.fetch_add(1);
+            return;
+        }
+        Task task;
+        task.gen = gen.load();
+        task.media = merged[best].media;
+        task.path = merged[best].path;
+        task.from = merged[best].a;
+        task.to = merged[best].b;
+        task.image = merged[best].image;
+        {
+            std::lock_guard<std::mutex> lk(mu);
+            pending = task;
+            hasTask = true;
+        }
+        cv.notify_one();
+    }
+};
+
+PreviewRam gRam;
 
 VideoPlayer* player = nullptr;
 int playingMediaId = -1;
@@ -3417,14 +3829,31 @@ ExportSession gExport;
 
 void SyncPreview(int topClip, float dt) {
     bool playing = isPlaying && !draggingPlayhead;
-    if (topClip < 0 || !player || !player->fmtCtx) {
+    if (topClip < 0 || !player) {
         if (playing) currentTime += dt;
         PumpAudio();
         return;
     }
     int mid = clips[topClip].mediaId;
-    if (mid >= 0 && mid < (int)media.size() && media[mid].type == "image") {
-        if (playing) currentTime += dt;
+    bool image = mid >= 0 && mid < (int)media.size() && media[mid].type == "image";
+    if (playing) currentTime += dt;
+    float speed = std::max(0.05f, clips[topClip].speed);
+    float mediaT = image ? 0.0f : clips[topClip].sourceOffset + ClipLocalTime(topClip, currentTime) * speed;
+    if (gRam.Present(player, mid, mediaT)) {
+        shownLocal = mediaT;
+        char buf[128];
+        int cachePct = gRam.Percent();
+        const char* tag = gRam.MemoryFull() ? "mem full" : (cachePct >= 99 ? "cached" : "loading");
+        snprintf(buf, sizeof(buf), "RAM %dx%d  %s %d%%", player->width, player->height, tag, cachePct);
+        previewStatus = buf;
+        PumpAudio();
+        return;
+    }
+    if (!player->fmtCtx) {
+        PumpAudio();
+        return;
+    }
+    if (image) {
         if (!player->hasFrame) {
             player->Seek(0);
             player->GrabFrame();
@@ -3433,10 +3862,6 @@ void SyncPreview(int topClip, float dt) {
         PumpAudio();
         return;
     }
-    if (playing) currentTime += dt;
-    float local = ClipLocalTime(topClip, currentTime);
-    float speed = std::max(0.05f, clips[topClip].speed);
-    float mediaT = clips[topClip].sourceOffset + local * speed;
     if (!playing && player->hasFrame && std::fabs(mediaT - shownLocal) <= 0.04f) {
         PumpAudio();
         return;
@@ -3456,7 +3881,7 @@ void SyncPreview(int topClip, float dt) {
     shownLocal = mediaT;
     if (player->hasFrame) {
         char buf[80];
-        snprintf(buf, sizeof(buf), "%s %dx%d  x%.2g", player->decName, player->width, player->height, speed);
+        snprintf(buf, sizeof(buf), "%s %dx%d  x%.2g  cache %d%%", player->decName, player->width, player->height, speed, gRam.Percent());
         previewStatus = buf;
     }
     PumpAudio();
@@ -3467,6 +3892,14 @@ void SyncSide(int clipIdx, float timelineT) {
     int mid = clips[clipIdx].mediaId;
     if (mid < 0 || mid >= (int)media.size()) return;
     if (!playerB) playerB = new VideoPlayer();
+    bool image = media[mid].type == "image";
+    float mediaT = image ? 0.0f : clips[clipIdx].sourceOffset + ClipLocalTime(clipIdx, timelineT) * std::max(0.05f, clips[clipIdx].speed);
+    if (gRam.Present(playerB, mid, mediaT)) {
+        playingClipB = clipIdx;
+        playingMediaIdB = mid;
+        shownLocalB = mediaT;
+        return;
+    }
     if (playingClipB != clipIdx || playingMediaIdB != mid || !playerB->fmtCtx) {
         if (playerNext && nextClipIdx == clipIdx && nextMediaId == mid && playerNext->fmtCtx && playerNext->hasFrame) {
             VideoPlayer* old = playerB;
@@ -3492,9 +3925,6 @@ void SyncSide(int clipIdx, float timelineT) {
         }
         return;
     }
-    float local = ClipLocalTime(clipIdx, timelineT);
-    float speed = std::max(0.05f, clips[clipIdx].speed);
-    float mediaT = clips[clipIdx].sourceOffset + local * speed;
     bool ahead = playerB->lastPts >= 0.0 && mediaT + 0.12f < (float)playerB->lastPts;
     if (playerB->lastPts < 0.0 || ahead) {
         playerB->Seek(std::max(0.0f, mediaT));
@@ -4560,6 +4990,13 @@ void SyncGreen() {
     int mid = clips[gsDrawClip].mediaId;
     if (mid < 0 || mid >= (int)media.size()) { gsDrawClip = -1; return; }
     if (!playerGS) playerGS = new VideoPlayer();
+    bool image = media[mid].type == "image";
+    float mediaT = image ? 0.0f : clips[gsDrawClip].sourceOffset + ClipLocalTime(gsDrawClip, currentTime) * std::max(0.05f, clips[gsDrawClip].speed);
+    if (gRam.Present(playerGS, mid, mediaT)) {
+        playingGsMedia = mid;
+        playingGsClip = gsDrawClip;
+        return;
+    }
     if (playingGsClip != gsDrawClip || playingGsMedia != mid || !playerGS->fmtCtx) {
         if (!playerGS->Open(media[mid].path)) { gsDrawClip = -1; return; }
         playingGsMedia = mid;
@@ -4574,8 +5011,6 @@ void SyncGreen() {
         }
         return;
     }
-    float speed = std::max(0.05f, clips[gsDrawClip].speed);
-    float mediaT = clips[gsDrawClip].sourceOffset + ClipLocalTime(gsDrawClip, currentTime) * speed;
     bool ahead = playerGS->lastPts >= 0.0 && mediaT + 0.12f < (float)playerGS->lastPts;
     if (playerGS->lastPts < 0.0 || ahead) {
         playerGS->Seek(std::max(0.0f, mediaT));
@@ -4787,6 +5222,7 @@ void ClearProject() {
     if (playerNext) playerNext->Close();
     if (playerGS) playerGS->Close();
     if (playerLib) playerLib->Close();
+    gRam.Clear();
     libPlayId = -1;
     playingMediaId = -1;
     playingClip = -1;
@@ -4829,6 +5265,7 @@ void RemoveMedia(int id) {
     if (playerNext) playerNext->Close();
     if (playerGS) playerGS->Close();
     if (playerLib) playerLib->Close();
+    gRam.Clear();
     libPlayId = -1;
     playingMediaId = -1;
     playingClip = -1;
@@ -6438,6 +6875,8 @@ int main(int argc, char* argv[]) {
         }
 
 #ifdef HAVE_FFMPEG
+        gRam.SetPaused(gExport.active || asrOn);
+        if (!gExport.active && !asrOn) gRam.Tick(currentTime);
         if (gExport.active) {
             ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
             ImGui::Begin("Exporting", nullptr, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize);
@@ -6831,6 +7270,7 @@ int main(int argc, char* argv[]) {
     }
 
 #ifdef HAVE_FFMPEG
+    gRam.Stop();
     if (gExport.active) gExport.Cancel();
     if (player) { delete player; player = nullptr; }
     if (playerB) { delete playerB; playerB = nullptr; }
