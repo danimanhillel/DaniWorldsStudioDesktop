@@ -2717,6 +2717,17 @@ static ImU32 FxLaneColor(int kind) {
     case 5:
     case 6:
     case 7: return IM_COL32(70, 90, 120, 235);
+    case 8: return IM_COL32(140, 70, 110, 235);
+    case 9: return IM_COL32(180, 60, 150, 235);
+    case 10: return IM_COL32(40, 140, 160, 235);
+    case 11: return IM_COL32(70, 100, 150, 235);
+    case 12: return IM_COL32(90, 90, 96, 235);
+    case 13: return IM_COL32(150, 110, 60, 235);
+    case 14: return IM_COL32(50, 40, 70, 235);
+    case 15: return IM_COL32(40, 130, 120, 235);
+    case 16: return IM_COL32(110, 110, 110, 235);
+    case 17: return IM_COL32(60, 150, 90, 235);
+    case 18: return IM_COL32(190, 100, 40, 235);
     default: return IM_COL32(140, 70, 110, 235);
     }
 }
@@ -2770,7 +2781,7 @@ static void DrawFxIcon(ImDrawList* dl, ImVec2 a, ImVec2 b, int kind) {
                               IM_COL32(150, 170, 190, alpha), 3.0f);
         }
         dl->AddRectFilled(ImVec2(c.x - w * 0.36f, c.y - h * 0.36f), ImVec2(c.x + w * 0.36f, c.y + h * 0.36f), IM_COL32(96, 118, 146, 230), 2.0f);
-    } else {
+    } else if (kind == 8) {
         ImVec2 p0(c.x - w * 0.5f, c.y - h * 0.5f);
         ImVec2 p1(c.x + w * 0.5f, c.y + h * 0.5f);
         dl->AddRectFilled(p0, p1, IM_COL32(42, 24, 48, 255), 2.0f);
@@ -2782,6 +2793,54 @@ static void DrawFxIcon(ImDrawList* dl, ImVec2 a, ImVec2 b, int kind) {
         dl->AddCircleFilled(ImVec2(p0.x + 6.0f + n * (w - 12.0f), c.y - h * 0.12f), 2.2f, IM_COL32(245, 245, 240, 230));
         float bar = p0.y + std::fmod(t * 0.35f, 1.0f) * (p1.y - p0.y);
         dl->AddRectFilled(ImVec2(p0.x, bar), ImVec2(p1.x, bar + 2.0f), IM_COL32(255, 230, 210, 120));
+    } else if (kind == 9) {
+        ImVec2 p0(c.x - w * 0.5f, c.y - h * 0.5f);
+        for (int i = 0; i < 5; i++) {
+            float y = p0.y + i * (h / 5.0f);
+            float shift = std::sin(std::floor(t * 8.0f) + i * 1.7f) * w * 0.12f;
+            dl->AddRectFilled(ImVec2(p0.x + shift, y + 1), ImVec2(p0.x + w + shift, y + h / 5.0f - 1), IM_COL32(200, 70, 160, 230));
+        }
+    } else if (kind == 10) {
+        ImVec2 o(c.x - w * 0.5f, c.y - h * 0.5f);
+        int n = 5;
+        float cw = w / n, ch = h / n;
+        for (int y = 0; y < n; y++) for (int x = 0; x < n; x++) {
+            int v = 70 + ((x * 3 + y * 5) % 4) * 40;
+            dl->AddRectFilled(ImVec2(o.x + x * cw, o.y + y * ch), ImVec2(o.x + (x + 1) * cw - 1.5f, o.y + (y + 1) * ch - 1.5f), IM_COL32(v, v + 20, v + 30, 255));
+        }
+    } else if (kind == 11) {
+        dl->AddRectFilled(ImVec2(c.x - w * 0.5f, c.y - h * 0.45f), ImVec2(c.x, c.y + h * 0.45f), IM_COL32(90, 130, 190, 255));
+        dl->AddRectFilled(ImVec2(c.x, c.y - h * 0.45f), ImVec2(c.x + w * 0.5f, c.y + h * 0.45f), IM_COL32(70, 100, 160, 255));
+        dl->AddLine(ImVec2(c.x, c.y - h * 0.45f), ImVec2(c.x, c.y + h * 0.45f), IM_COL32(255, 255, 255, 180), 1.5f);
+    } else if (kind == 12) {
+        dl->AddRectFilled(ImVec2(c.x - w * 0.5f, c.y - h * 0.45f), ImVec2(c.x, c.y + h * 0.45f), IM_COL32(230, 230, 230, 255));
+        dl->AddRectFilled(ImVec2(c.x, c.y - h * 0.45f), ImVec2(c.x + w * 0.5f, c.y + h * 0.45f), IM_COL32(24, 24, 28, 255));
+    } else if (kind == 13) {
+        dl->AddRectFilled(ImVec2(c.x - w * 0.5f, c.y - h * 0.45f), ImVec2(c.x + w * 0.5f, c.y + h * 0.45f), IM_COL32(168, 122, 64, 255), 2.0f);
+    } else if (kind == 14) {
+        dl->AddRectFilled(ImVec2(c.x - w * 0.5f, c.y - h * 0.45f), ImVec2(c.x + w * 0.5f, c.y + h * 0.45f), IM_COL32(180, 180, 190, 255), 2.0f);
+        dl->AddRectFilled(ImVec2(c.x - w * 0.5f, c.y - h * 0.45f), ImVec2(c.x - w * 0.18f, c.y + h * 0.45f), IM_COL32(10, 8, 16, 180));
+        dl->AddRectFilled(ImVec2(c.x + w * 0.18f, c.y - h * 0.45f), ImVec2(c.x + w * 0.5f, c.y + h * 0.45f), IM_COL32(10, 8, 16, 180));
+    } else if (kind == 15) {
+        ImVec2 prev(c.x - w * 0.5f, c.y);
+        for (int i = 1; i <= 16; i++) {
+            float u = i / 16.0f;
+            ImVec2 p(c.x - w * 0.5f + u * w, c.y + std::sin(u * 8.0f + t * 3.0f) * h * 0.28f);
+            dl->AddLine(prev, p, IM_COL32(80, 200, 180, 255), 2.0f);
+            prev = p;
+        }
+    } else if (kind == 16) {
+        dl->AddRectFilled(ImVec2(c.x - w * 0.5f, c.y - h * 0.45f), ImVec2(c.x + w * 0.5f, c.y + h * 0.45f), IM_COL32(150, 150, 150, 255), 2.0f);
+        dl->AddCircleFilled(ImVec2(c.x - w * 0.12f, c.y), h * 0.16f, IM_COL32(40, 40, 40, 255));
+    } else if (kind == 17) {
+        dl->AddCircleFilled(c, h * 0.42f, IM_COL32(70, 170, 110, 255), 24);
+        dl->AddCircle(c, h * 0.28f, IM_COL32(230, 255, 230, 180), 16, 1.5f);
+    } else if (kind == 18) {
+        dl->AddRectFilled(ImVec2(c.x - w * 0.5f, c.y - h * 0.45f), ImVec2(c.x + w * 0.5f, c.y + h * 0.45f), IM_COL32(40, 24, 18, 255), 2.0f);
+        float u = std::fmod(t * 0.25f, 1.0f);
+        dl->AddCircleFilled(ImVec2(c.x - w * 0.4f + u * w * 0.8f, c.y), h * 0.28f, IM_COL32(255, 140, 50, 180), 16);
+    } else {
+        quad(c, w * 0.7f, h * 0.7f, 0, IM_COL32(120, 120, 120, 255));
     }
 }
 
@@ -4980,7 +5039,7 @@ bool LoadProject(const std::string& path) {
             int dir = 1;
             int n = sscanf(line, "O %d %f %f %f %f %f %f %f %f %d", &o.kind, &o.start, &o.duration, &o.x, &o.y, &o.scale, &o.rot, &o.opacity, &o.amount, &dir);
             if ((n == 9 || n == 10) && o.duration > 0.05f) {
-                if (o.kind < 0 || o.kind > 8) o.kind = 0;
+                if (o.kind < 0 || o.kind >= OverlayKindCount()) o.kind = 0;
                 if (o.start < 0) o.start = 0;
                 o.scale = o.scale < 0.15f ? 0.15f : (o.scale > 4.0f ? 4.0f : o.scale);
                 o.opacity = Clamp01(o.opacity);
@@ -6606,6 +6665,11 @@ int main(int argc, char* argv[]) {
                         int cw = o.dir < 0 ? 1 : 0;
                         if (ImGui::Combo("Direction", &cw, "Clockwise\0Counter-clockwise\0"))
                             o.dir = cw == 0 ? 1 : -1;
+                    }
+                    if (o.kind == 11) {
+                        int axis = o.dir < 0 ? 1 : 0;
+                        if (ImGui::Combo("Axis", &axis, "Horizontal\0Vertical\0"))
+                            o.dir = axis == 0 ? 1 : -1;
                     }
                     ImGui::TextUnformatted("Drag in the preview. Corner scales, top handle rotates.");
                     if (ImGui::Button("Delete")) {

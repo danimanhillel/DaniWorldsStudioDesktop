@@ -15,7 +15,7 @@ void OverlayClear() {
     gOverlaySel = -1;
 }
 
-int OverlayKindCount() { return 9; }
+int OverlayKindCount() { return 19; }
 
 const char* OverlayKindName(int kind) {
     switch (kind) {
@@ -28,6 +28,16 @@ const char* OverlayKindName(int kind) {
     case 6: return "Blur In";
     case 7: return "Blur Out";
     case 8: return "VHS";
+    case 9: return "Glitch";
+    case 10: return "Pixelate";
+    case 11: return "Mirror";
+    case 12: return "Invert";
+    case 13: return "Sepia";
+    case 14: return "Vignette";
+    case 15: return "Wave";
+    case 16: return "Mono";
+    case 17: return "Fisheye";
+    case 18: return "Light Leak";
     default: return "Effect";
     }
 }
@@ -41,7 +51,9 @@ void OverlayAdd(int kind, float start) {
     o.duration = 4.0f;
     o.scale = 1.0f;
     o.opacity = 1.0f;
-    o.amount = (kind == 0 || kind == 5 || kind == 6 || kind == 7) ? 0.65f : 0.75f;
+    if (kind == 12 || kind == 13 || kind == 16) o.amount = 1.0f;
+    else if (kind == 0 || kind == 5 || kind == 6 || kind == 7) o.amount = 0.65f;
+    else o.amount = 0.75f;
     o.dir = 1;
     gOverlays.push_back(o);
     gOverlaySel = (int)gOverlays.size() - 1;
@@ -77,6 +89,8 @@ struct FxEval {
     int vhs = 0;
     float opacity = 1;
     float amount = 0.7f;
+    float mode = 0;
+    float dir = 1;
 };
 
 static FxEval EvalFx(const OverlayFx& o, float time, float shortSide) {
@@ -95,6 +109,8 @@ static FxEval EvalFx(const OverlayFx& o, float time, float shortSide) {
     e.rot = o.rot * 0.01745329252f;
     e.scale = std::max(0.05f, o.scale);
     e.opacity = o.opacity < 0 ? 0 : (o.opacity > 1 ? 1 : o.opacity);
+    e.mode = (float)o.kind;
+    e.dir = o.dir < 0 ? -1.0f : 1.0f;
     if (o.kind == 0) {
         float bucket = std::floor(time * 24.0f);
         float n1 = Hashf(bucket + 1.3f);
@@ -160,7 +176,7 @@ static PFN_glUseProgram_t pUse = nullptr;
 static GLuint fxProg = 0;
 static int fxReady = 0;
 static int uTex = -1, uTexel = -1, uShift = -1, uRot = -1, uScale = -1, uPass = -1, uRadius = -1;
-static int uMatrix = -1, uVhs = -1, uOpacity = -1, uAmount = -1, uTime = -1;
+static int uMatrix = -1, uVhs = -1, uOpacity = -1, uAmount = -1, uTime = -1, uMode = -1, uDir = -1;
 static GLuint grabA = 0, grabB = 0;
 static int grabW = 0, grabH = 0;
 
@@ -206,7 +222,7 @@ static bool EnsureFxShader() {
         "uniform sampler2D tex;\n"
         "uniform vec2 texel;\n"
         "uniform vec2 shift;\n"
-        "uniform float rot, scale, pass, radius, matrix, vhs, opacity, amount, time;\n"
+        "uniform float rot, scale, pass, radius, matrix, vhs, opacity, amount, time, mode, dir;\n"
         "void main() {\n"
         "  if (pass > 0.5) {\n"
         "    vec2 step = pass < 1.5 ? vec2(texel.x, 0.0) : vec2(0.0, texel.y);\n"
@@ -229,6 +245,32 @@ static bool EnsureFxShader() {
         "  vec2 src = d + vec2(0.5);\n"
         "  float inside = (src.x >= 0.0 && src.x <= 1.0 && src.y >= 0.0 && src.y <= 1.0) ? 1.0 : 0.0;\n"
         "  if (matrix > 0.5 && inside > 0.5) src = fract(src * 3.0);\n"
+        "  if (mode > 8.5 && mode < 9.5 && inside > 0.5) {\n"
+        "    float bands = mix(6.0, 28.0, amount);\n"
+        "    float band = floor(src.y * bands);\n"
+        "    float gn = fract(sin(band * 17.13 + floor(time * 14.0) * 9.2) * 43758.5453);\n"
+        "    if (gn > 0.62) src.x = clamp(src.x + (gn - 0.5) * amount * 0.45, 0.0, 1.0);\n"
+        "  }\n"
+        "  if (mode > 9.5 && mode < 10.5 && inside > 0.5) {\n"
+        "    float cells = mix(140.0, 6.0, amount);\n"
+        "    src = (floor(src * cells) + 0.5) / cells;\n"
+        "  }\n"
+        "  if (mode > 10.5 && mode < 11.5 && inside > 0.5) {\n"
+        "    if (dir >= 0.0) { if (src.x > 0.5) src.x = 1.0 - src.x; }\n"
+        "    else { if (src.y > 0.5) src.y = 1.0 - src.y; }\n"
+        "  }\n"
+        "  if (mode > 14.5 && mode < 15.5 && inside > 0.5) {\n"
+        "    src.x += sin(src.y * mix(6.0, 22.0, amount) + time * 2.6) * amount * 0.045;\n"
+        "    src.y += cos(src.x * mix(5.0, 16.0, amount) - time * 2.1) * amount * 0.028;\n"
+        "    src = clamp(src, 0.0, 1.0);\n"
+        "  }\n"
+        "  if (mode > 16.5 && mode < 17.5) {\n"
+        "    vec2 q = (src - 0.5) * 2.0;\n"
+        "    float rr = length(q);\n"
+        "    q *= 1.0 + amount * 0.75 * rr * rr;\n"
+        "    src = q * 0.5 + 0.5;\n"
+        "    inside = (src.x >= 0.0 && src.x <= 1.0 && src.y >= 0.0 && src.y <= 1.0) ? 1.0 : 0.0;\n"
+        "  }\n"
         "  vec3 base = texture2D(tex, vUV).rgb;\n"
         "  vec3 col = vec3(0.0);\n"
         "  if (inside > 0.5) {\n"
@@ -265,6 +307,31 @@ static bool EnsureFxShader() {
         "      col = mix(vec3(l), col, 0.72);\n"
         "      col = col * 0.90 + vec3(0.05, 0.035, 0.06);\n"
         "    }\n"
+        "    if (mode > 8.5 && mode < 9.5) {\n"
+        "      float split = (1.0 + amount * 6.0) * texel.x;\n"
+        "      col.r = mix(col.r, texture2D(tex, tuv + vec2(split, 0.0)).r, 0.85);\n"
+        "      col.b = mix(col.b, texture2D(tex, tuv - vec2(split, 0.0)).b, 0.85);\n"
+        "    }\n"
+        "    if (mode > 11.5 && mode < 12.5) col = mix(col, vec3(1.0) - col, amount);\n"
+        "    if (mode > 12.5 && mode < 13.5) {\n"
+        "      float l = dot(col, vec3(0.299, 0.587, 0.114));\n"
+        "      col = mix(col, vec3(l * 1.08, l * 0.78, l * 0.48), amount);\n"
+        "    }\n"
+        "    if (mode > 13.5 && mode < 14.5) {\n"
+        "      float vig = smoothstep(0.25, 0.85, distance(src, vec2(0.5)));\n"
+        "      col *= 1.0 - vig * (0.25 + amount * 0.75);\n"
+        "    }\n"
+        "    if (mode > 15.5 && mode < 16.5) {\n"
+        "      float l = dot(col, vec3(0.299, 0.587, 0.114));\n"
+        "      col = mix(col, vec3(l), amount);\n"
+        "    }\n"
+        "    if (mode > 17.5 && mode < 18.5) {\n"
+        "      float sweep = fract(time * 0.08);\n"
+        "      vec2 lc = vec2(mix(-0.15, 1.15, sweep), 0.42 + 0.18 * sin(time * 0.6));\n"
+        "      float ld = length((src - lc) * vec2(0.65, 1.25));\n"
+        "      float leak = exp(-ld * ld * mix(6.0, 2.2, amount));\n"
+        "      col += vec3(1.0, 0.42, 0.10) * leak * (0.25 + amount * 0.7);\n"
+        "    }\n"
         "  }\n"
         "  vec3 outc = inside > 0.5 ? col : vec3(0.0);\n"
         "  outc = mix(base, outc, opacity);\n"
@@ -298,6 +365,8 @@ static bool EnsureFxShader() {
     uOpacity = pGetUniform(fxProg, "opacity");
     uAmount = pGetUniform(fxProg, "amount");
     uTime = pGetUniform(fxProg, "time");
+    uMode = pGetUniform(fxProg, "mode");
+    uDir = pGetUniform(fxProg, "dir");
     fxReady = 1;
     return true;
 }
@@ -338,6 +407,8 @@ static void DrawFxQuad(float x0, float y0, float x1, float y1, const FxEval& e, 
     if (uOpacity >= 0) pUniform1f(uOpacity, e.opacity);
     if (uAmount >= 0) pUniform1f(uAmount, e.amount);
     if (uTime >= 0) pUniform1f(uTime, time);
+    if (uMode >= 0) pUniform1f(uMode, e.mode);
+    if (uDir >= 0) pUniform1f(uDir, e.dir);
     glBegin(GL_QUADS);
     glTexCoord2f(0, 1); glVertex2f(x0, y0);
     glTexCoord2f(1, 1); glVertex2f(x1, y0);
@@ -551,6 +622,37 @@ void OverlayStamp(unsigned char* canvas, int w, int h, float time) {
                     sx = Fract(sx * 3.0f);
                     sy = Fract(sy * 3.0f);
                 }
+                int mode = (int)std::lround(e.mode);
+                if (inside && mode == 9) {
+                    float bands = 6.0f + e.amount * 22.0f;
+                    float band = std::floor(sy * bands);
+                    float gn = Fract(std::sin(band * 17.13f + std::floor(time * 14.0f) * 9.2f) * 43758.5453f);
+                    if (gn > 0.62f) sx = std::clamp(sx + (gn - 0.5f) * e.amount * 0.45f, 0.0f, 1.0f);
+                }
+                if (inside && mode == 10) {
+                    float cells = 140.0f + (6.0f - 140.0f) * e.amount;
+                    sx = (std::floor(sx * cells) + 0.5f) / cells;
+                    sy = (std::floor(sy * cells) + 0.5f) / cells;
+                }
+                if (inside && mode == 11) {
+                    if (e.dir >= 0.0f) { if (sx > 0.5f) sx = 1.0f - sx; }
+                    else { if (sy > 0.5f) sy = 1.0f - sy; }
+                }
+                if (inside && mode == 15) {
+                    sx += std::sin(sy * (6.0f + e.amount * 16.0f) + time * 2.6f) * e.amount * 0.045f;
+                    sy += std::cos(sx * (5.0f + e.amount * 11.0f) - time * 2.1f) * e.amount * 0.028f;
+                    sx = std::clamp(sx, 0.0f, 1.0f);
+                    sy = std::clamp(sy, 0.0f, 1.0f);
+                }
+                if (mode == 17) {
+                    float qx = (sx - 0.5f) * 2.0f;
+                    float qy = (sy - 0.5f) * 2.0f;
+                    float rr = std::sqrt(qx * qx + qy * qy);
+                    float f = 1.0f + e.amount * 0.75f * rr * rr;
+                    sx = qx * f * 0.5f + 0.5f;
+                    sy = qy * f * 0.5f + 0.5f;
+                    inside = sx >= 0.0f && sx <= 1.0f && sy >= 0.0f && sy <= 1.0f;
+                }
                 float r = 0, g = 0, b = 0;
                 if (inside) {
                     SampleRGBA(work.data(), w, h, sx * (float)(w - 1), sy * (float)(h - 1), r, g, b);
@@ -606,6 +708,51 @@ void OverlayStamp(unsigned char* canvas, int w, int h, float time) {
                         r = r * 0.90f + 0.05f;
                         g = g * 0.90f + 0.035f;
                         b = b * 0.90f + 0.06f;
+                    }
+                    if (mode == 9) {
+                        float rr, gg, bb, br, bg, b2;
+                        float split = 1.0f + e.amount * 6.0f;
+                        SampleRGBA(work.data(), w, h, sx * (float)(w - 1) + split, sy * (float)(h - 1), rr, gg, bb);
+                        SampleRGBA(work.data(), w, h, sx * (float)(w - 1) - split, sy * (float)(h - 1), br, bg, b2);
+                        (void)gg; (void)bb; (void)br; (void)bg;
+                        r = r * 0.15f + rr * 0.85f;
+                        b = b * 0.15f + b2 * 0.85f;
+                    }
+                    if (mode == 12) {
+                        r = r * (1.0f - e.amount) + (1.0f - r) * e.amount;
+                        g = g * (1.0f - e.amount) + (1.0f - g) * e.amount;
+                        b = b * (1.0f - e.amount) + (1.0f - b) * e.amount;
+                    }
+                    if (mode == 13) {
+                        float l = r * 0.299f + g * 0.587f + b * 0.114f;
+                        r = r * (1.0f - e.amount) + l * 1.08f * e.amount;
+                        g = g * (1.0f - e.amount) + l * 0.78f * e.amount;
+                        b = b * (1.0f - e.amount) + l * 0.48f * e.amount;
+                    }
+                    if (mode == 14) {
+                        float dxv = sx - 0.5f, dyv = sy - 0.5f;
+                        float dist = std::sqrt(dxv * dxv + dyv * dyv);
+                        float vig = dist <= 0.25f ? 0.0f : (dist >= 0.85f ? 1.0f : (dist - 0.25f) / 0.60f);
+                        float mul = 1.0f - vig * (0.25f + e.amount * 0.75f);
+                        r *= mul; g *= mul; b *= mul;
+                    }
+                    if (mode == 16) {
+                        float l = r * 0.299f + g * 0.587f + b * 0.114f;
+                        r = r * (1.0f - e.amount) + l * e.amount;
+                        g = g * (1.0f - e.amount) + l * e.amount;
+                        b = b * (1.0f - e.amount) + l * e.amount;
+                    }
+                    if (mode == 18) {
+                        float sweep = Fract(time * 0.08f);
+                        float lx = -0.15f + 1.30f * sweep;
+                        float ly = 0.42f + 0.18f * std::sin(time * 0.6f);
+                        float ldx = (sx - lx) * 0.65f;
+                        float ldy = (sy - ly) * 1.25f;
+                        float ld = ldx * ldx + ldy * ldy;
+                        float tight = 6.0f + (2.2f - 6.0f) * e.amount;
+                        float leak = std::exp(-ld * tight);
+                        float gain = leak * (0.25f + e.amount * 0.7f);
+                        r += gain; g += 0.42f * gain; b += 0.10f * gain;
                     }
                 }
                 const unsigned char* base = work.data() + ((size_t)y * w + x) * 4;
