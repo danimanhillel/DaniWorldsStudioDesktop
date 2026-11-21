@@ -54,6 +54,7 @@ endif()
 add_executable(DaniWorldsStudioDesktop
     src/main.cpp
     src/effects.cpp
+    src/overlay_fx.cpp
     src/rife.cpp
     src/asr.cpp
     ${imgui_SOURCE_DIR}/imgui.cpp
