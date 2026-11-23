@@ -12,3 +12,4 @@ const RifeInfo& RifeProbe();
 bool RifeStartup(std::string& err);
 void RifeShutdown();
 bool RifeRun(const uint8_t* rgba0, const uint8_t* rgba1, int w, int h, float t, uint8_t* rgbaOut);
+bool RifePrepareCuda(std::string& why);
