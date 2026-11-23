@@ -257,6 +257,11 @@ bool marqueeLive = false;
 bool marqueeMoved = false;
 ImVec2 trackLanePos[6];
 float tlTrackH = 42.0f;
+struct DragOrig { int idx; float orig; };
+std::vector<DragOrig> groupClipDrag;
+std::vector<DragOrig> groupSubDrag;
+std::vector<int> groupSkip;
+float groupAnchor = 0;
 int editingSub = -1;
 char subEditBuf[512] = {0};
 bool subEditorOpen = false;
@@ -5248,6 +5253,7 @@ float SnapTime(int ignore, float proposed) {
     test(currentTime);
     for (int i = 0; i < (int)clips.size(); i++) {
         if (i == ignore) continue;
+        if (std::find(groupSkip.begin(), groupSkip.end(), i) != groupSkip.end()) continue;
         test(clips[i].startTime);
         test(clips[i].startTime + clips[i].duration);
     }
@@ -5270,6 +5276,7 @@ float SnapStart(int ignore, float dur, float proposed) {
     test(currentTime - dur);
     for (int i = 0; i < (int)clips.size(); i++) {
         if (i == ignore) continue;
+        if (std::find(groupSkip.begin(), groupSkip.end(), i) != groupSkip.end()) continue;
         float s = clips[i].startTime;
         float e = s + clips[i].duration;
         test(e);
@@ -5278,6 +5285,103 @@ float SnapStart(int ignore, float dur, float proposed) {
         test(e - dur);
     }
     return best;
+}
+
+static void ClearGroupDrag() {
+    groupClipDrag.clear();
+    groupSubDrag.clear();
+    groupSkip.clear();
+    groupAnchor = 0;
+}
+
+static void CaptureGroupDrag(int clipLeader, int subLeader) {
+    ClearGroupDrag();
+    if (clipLeader >= 0 && clipLeader < (int)clips.size())
+        groupAnchor = clips[clipLeader].startTime;
+    else if (subLeader >= 0 && subLeader < (int)subs.size())
+        groupAnchor = subs[subLeader].start;
+    for (int i : selection) {
+        if (i < 0 || i >= (int)clips.size()) continue;
+        groupClipDrag.push_back({i, clips[i].startTime});
+        groupSkip.push_back(i);
+    }
+    if (clipLeader >= 0 && std::find(groupSkip.begin(), groupSkip.end(), clipLeader) == groupSkip.end()
+        && clipLeader < (int)clips.size()) {
+        groupClipDrag.push_back({clipLeader, clips[clipLeader].startTime});
+        groupSkip.push_back(clipLeader);
+    }
+    for (int i : subSelection) {
+        if (i < 0 || i >= (int)subs.size()) continue;
+        groupSubDrag.push_back({i, subs[i].start});
+    }
+    if (subLeader >= 0 && subLeader < (int)subs.size()) {
+        bool have = false;
+        for (const auto& g : groupSubDrag) if (g.idx == subLeader) have = true;
+        if (!have) groupSubDrag.push_back({subLeader, subs[subLeader].start});
+    }
+}
+
+static void ApplyGroupDelta(float delta) {
+    float earliest = 1e9f;
+    for (const auto& g : groupClipDrag) earliest = std::min(earliest, g.orig);
+    for (const auto& g : groupSubDrag) earliest = std::min(earliest, g.orig);
+    if (earliest < 1e8f && earliest + delta < 0) delta = -earliest;
+    for (const auto& g : groupClipDrag) {
+        if (g.idx >= 0 && g.idx < (int)clips.size()) clips[g.idx].startTime = g.orig + delta;
+    }
+    for (const auto& g : groupSubDrag) {
+        if (g.idx >= 0 && g.idx < (int)subs.size()) subs[g.idx].start = g.orig + delta;
+    }
+}
+
+static void PushAfter(float at, float delta) {
+    if (delta < 0.001f) return;
+    for (Clip& c : clips)
+        if (c.startTime >= at - 0.001f) c.startTime += delta;
+    for (Subtitle& s : subs)
+        if (s.start >= at - 0.001f) s.start += delta;
+    for (BusSegment& b : bus)
+        if (b.start >= at - 0.001f) b.start += delta;
+    for (OverlayFx& o : gOverlays)
+        if (o.start >= at - 0.001f) o.start += delta;
+}
+
+static bool FindInsertPoint(int track, float dropT, float& at) {
+    std::vector<int> ids;
+    for (int i = 0; i < (int)clips.size(); i++)
+        if (clips[i].track == track) ids.push_back(i);
+    if ((int)ids.size() < 2) return false;
+    std::sort(ids.begin(), ids.end(), [](int a, int b) {
+        if (clips[a].startTime != clips[b].startTime) return clips[a].startTime < clips[b].startTime;
+        return a < b;
+    });
+    float tol = std::max(0.2f, 16.0f / std::max(1.0f, pixelsPerSecond));
+    for (size_t k = 0; k + 1 < ids.size(); k++) {
+        const Clip& L = clips[ids[k]];
+        const Clip& R = clips[ids[k + 1]];
+        float endL = L.startTime + L.duration;
+        float startR = R.startTime;
+        float zone0 = endL - tol;
+        float zone1 = std::max(endL, startR) + tol;
+        if (startR > endL + 0.03f) zone1 = startR + tol;
+        if (zone0 < L.startTime + 0.05f) zone0 = L.startTime + 0.05f;
+        if (dropT < zone0 || dropT > zone1) continue;
+        at = std::max(0.0f, endL);
+        return true;
+    }
+    return false;
+}
+
+static void AddClipOnTrack(Clip c, float dropT) {
+    if (dropT < 0) dropT = 0;
+    float at = 0;
+    if (FindInsertPoint(c.track, dropT, at)) {
+        PushAfter(at, std::max(0.05f, c.duration));
+        c.startTime = at;
+    } else {
+        c.startTime = SnapStart(-1, c.duration, dropT);
+    }
+    clips.push_back(c);
 }
 
 void EnsureEnvelope(Clip& c) {
@@ -5393,6 +5497,9 @@ static void ClearTimelineDrags() {
     marqueeLive = false;
     marqueeKind = 0;
     marqueeMoved = false;
+    groupClipDrag.clear();
+    groupSubDrag.clear();
+    groupSkip.clear();
 }
 
 struct UiShield {
@@ -5547,36 +5654,12 @@ static void BeginMarquee(int kind, ImVec2 p) {
 }
 
 static void ApplyMarquee(ImVec2 m) {
-    if (marqueeKind == 3) {
-        int prev = selectedSub;
-        selection.clear();
-        selectedClip = -1;
-        selectedBus = -1;
-        subSelection.clear();
-        selectedSub = -1;
-        for (int i = 0; i < (int)subs.size(); i++) {
-            float x = subsOriginX + subs[i].start * pixelsPerSecond;
-            float w = std::max(28.0f, subs[i].duration * pixelsPerSecond);
-            ImVec2 c0(x, subsLaneY + 4.0f);
-            ImVec2 c1(x + w, subsLaneY + 4.0f + tlTrackH - 8.0f);
-            if (!ScreenHit(marqueeStart, m, c0, c1)) continue;
-            subSelection.push_back(i);
-        }
-        if (!subSelection.empty()) {
-            selectedSub = subSelection.back();
-            if (subEditorOpen && selectedSub != prev) {
-                editingSub = selectedSub;
-                LoadSubEditor(subs[selectedSub].text);
-            }
-        }
-        return;
-    }
-    bool picture = marqueeKind == 1;
+    int prev = selectedSub;
     selection.clear();
     selectedClip = -1;
     selectedBus = -1;
-    selectedSub = -1;
     subSelection.clear();
+    selectedSub = -1;
     auto consider = [&](int i, float originX, float originY) {
         float x = originX + clips[i].startTime * pixelsPerSecond;
         float w = std::max(24.0f, clips[i].duration * pixelsPerSecond);
@@ -5587,14 +5670,25 @@ static void ApplyMarquee(ImVec2 m) {
     };
     for (int i = 0; i < (int)clips.size(); i++) {
         int tr = clips[i].track;
-        if (picture) {
-            if (tr >= 0 && tr < 3) consider(i, trackLanePos[tr].x, trackLanePos[tr].y);
-            else if (tr == kGsTrack) consider(i, gsOriginX, gsLaneY + 4.0f);
-        } else if (tr >= 3 && tr < 6) {
-            consider(i, trackLanePos[tr].x, trackLanePos[tr].y);
-        }
+        if (tr >= 0 && tr < 6) consider(i, trackLanePos[tr].x, trackLanePos[tr].y);
+        else if (tr == kGsTrack) consider(i, gsOriginX, gsLaneY + 4.0f);
+    }
+    for (int i = 0; i < (int)subs.size(); i++) {
+        float x = subsOriginX + subs[i].start * pixelsPerSecond;
+        float w = std::max(28.0f, subs[i].duration * pixelsPerSecond);
+        ImVec2 c0(x, subsLaneY + 4.0f);
+        ImVec2 c1(x + w, subsLaneY + 4.0f + tlTrackH - 8.0f);
+        if (!ScreenHit(marqueeStart, m, c0, c1)) continue;
+        subSelection.push_back(i);
     }
     if (!selection.empty()) selectedClip = selection.back();
+    if (!subSelection.empty()) {
+        selectedSub = subSelection.back();
+        if (subEditorOpen && selectedSub != prev) {
+            editingSub = selectedSub;
+            LoadSubEditor(subs[selectedSub].text);
+        }
+    }
 }
 
 int ClipBelow(int above, float t) {
@@ -7181,7 +7275,10 @@ int main(int argc, char* argv[]) {
                         selectedBus = -1;
                         draggingBus = -1;
                         trimmingBus = -1;
-                    } else if ((selectedClip >= 0 || !selection.empty()) && !io.WantTextInput) {
+                    } else if (!io.WantTextInput &&
+                               ((selectedClip >= 0 || !selection.empty()) ||
+                                (selectedSub >= 0 || !subSelection.empty()))) {
+                        if (selectedClip >= 0 || !selection.empty()) {
                         std::vector<int> kill = selection;
                         if (selectedClip >= 0) kill.push_back(selectedClip);
                         std::sort(kill.begin(), kill.end());
@@ -7205,7 +7302,8 @@ int main(int argc, char* argv[]) {
                         draggingClip = -1;
                         trimmingClip = -1;
                         dragVolClip = -1;
-                    } else if (!io.WantTextInput && (selectedSub >= 0 || !subSelection.empty())) {
+                        }
+                        if (selectedSub >= 0 || !subSelection.empty()) {
                         std::vector<int> kill = subSelection;
                         if (selectedSub >= 0) kill.push_back(selectedSub);
                         std::sort(kill.begin(), kill.end());
@@ -7227,6 +7325,8 @@ int main(int argc, char* argv[]) {
                             editingSub = -1;
                             subEditorOpen = false;
                         }
+                        }
+                        ClearGroupDrag();
                     }
                 }
             }
@@ -7831,10 +7931,9 @@ int main(int argc, char* argv[]) {
                 Clip c;
                 c.mediaId = mid;
                 c.duration = media[mid].duration;
-                float localX = ImGui::GetMousePos().x - gsStart.x;
-                c.startTime = SnapStart(-1, c.duration, localX / pixelsPerSecond);
                 c.track = kGsTrack;
-                clips.push_back(c);
+                float localX = ImGui::GetMousePos().x - gsStart.x;
+                AddClipOnTrack(c, localX / pixelsPerSecond);
                 SelectOnly((int)clips.size() - 1);
             }
             ImGui::EndDragDropTarget();
@@ -7864,10 +7963,11 @@ int main(int argc, char* argv[]) {
                     openedPanelThisFrame = true;
                 }
                 if (ImGui::IsMouseClicked(0)) {
-                    SelectOnly(i);
+                    if (IsSelected(i)) selectedClip = i;
+                    else SelectOnly(i);
                     if (mouse.x < cp0.x + 8) { trimmingClip = i; trimSide = 0; trimAnchorX = mouse.x; trimOrigStart = clips[i].startTime; trimOrigDur = clips[i].duration; trimOrigOffset = clips[i].sourceOffset; }
                     else if (mouse.x > cp1.x - 8) { trimmingClip = i; trimSide = 1; trimAnchorX = mouse.x; trimOrigStart = clips[i].startTime; trimOrigDur = clips[i].duration; trimOrigOffset = clips[i].sourceOffset; }
-                    else { draggingClip = i; dragOffsetX = mouse.x - cp0.x; trimmingClip = -1; }
+                    else { draggingClip = i; dragOffsetX = mouse.x - cp0.x; trimmingClip = -1; CaptureGroupDrag(i, -1); }
                 }
             }
         }
@@ -7914,14 +8014,18 @@ int main(int argc, char* argv[]) {
                     subStyleClick = false;
                 }
                 if (ImGui::IsMouseClicked(0)) {
-                    selectedSub = i;
-                    subSelection.clear();
-                    subSelection.push_back(i);
-                    selectedClip = -1;
-                    selection.clear();
+                    bool keep = std::find(subSelection.begin(), subSelection.end(), i) != subSelection.end();
+                    if (keep) selectedSub = i;
+                    else {
+                        selectedSub = i;
+                        subSelection.clear();
+                        subSelection.push_back(i);
+                        selectedClip = -1;
+                        selection.clear();
+                    }
                     if (mouse.x < cp0.x + 8) { trimmingSub = i; trimSubSide = 0; }
                     else if (mouse.x > cp1.x - 8) { trimmingSub = i; trimSubSide = 1; }
-                    else { draggingSub = i; subDragOffset = mouse.x - cp0.x; trimmingSub = -1; }
+                    else { draggingSub = i; subDragOffset = mouse.x - cp0.x; trimmingSub = -1; CaptureGroupDrag(-1, i); }
                     LoadSubEditor(subs[i].text);
                     editingSub = i;
                     subEditorOpen = true;
@@ -7958,10 +8062,9 @@ int main(int argc, char* argv[]) {
                             c.mediaId = mid;
                             c.duration = media[mid].duration;
                             c.sourceOffset = 0;
-                            float localX = ImGui::GetMousePos().x - trackStart.x;
-                            c.startTime = SnapStart(-1, c.duration, localX / pixelsPerSecond);
                             c.track = t;
-                            clips.push_back(c);
+                            float localX = ImGui::GetMousePos().x - trackStart.x;
+                            AddClipOnTrack(c, localX / pixelsPerSecond);
                             SelectOnly((int)clips.size() - 1);
                     }
                 }
@@ -8073,7 +8176,8 @@ int main(int argc, char* argv[]) {
                         ToggleSelect(i);
                         break;
                     }
-                    SelectOnly(i);
+                    if (IsSelected(i)) selectedClip = i;
+                    else SelectOnly(i);
                     EnsureEnvelope(clips[i]);
                     int hit = -1;
                     for (int p = 0; p < (int)clips[i].volume.size(); p++) {
@@ -8099,6 +8203,7 @@ int main(int argc, char* argv[]) {
                         } else {
                             draggingClip = i;
                             dragOffsetX = mx - cp0.x;
+                            CaptureGroupDrag(i, -1);
                         }
                     }
                     break;
@@ -8217,7 +8322,8 @@ int main(int argc, char* argv[]) {
                 float origin = (tr == kGsTrack) ? gsOriginX : trackPositions[tr].x;
                 float newStart = (mouse.x - dragOffsetX - origin) / pixelsPerSecond;
                 newStart = SnapStart(draggingClip, clips[draggingClip].duration, newStart);
-                clips[draggingClip].startTime = newStart;
+                if (groupClipDrag.empty() && groupSubDrag.empty()) clips[draggingClip].startTime = newStart;
+                else ApplyGroupDelta(newStart - groupAnchor);
                 int mid = clips[draggingClip].mediaId;
                 bool isVideo = mid >= 0 && mid < (int)media.size() && (media[mid].type == "video" || media[mid].type == "image");
                 bool isAudio = mid >= 0 && mid < (int)media.size() && media[mid].type == "audio";
@@ -8233,7 +8339,7 @@ int main(int argc, char* argv[]) {
                         }
                     }
                 }
-            } else draggingClip = -1;
+            } else { draggingClip = -1; ClearGroupDrag(); }
         }
 
         if (trimmingBus >= 0 && trimmingBus < (int)bus.size()) {
@@ -8310,8 +8416,10 @@ int main(int argc, char* argv[]) {
         if (draggingSub >= 0 && draggingSub < (int)subs.size() && trimmingSub < 0) {
             if (ImGui::IsMouseDown(0) && !TimelinePointerBusy()) {
                 float ns = (ImGui::GetMousePos().x - subDragOffset - subsOriginX) / pixelsPerSecond;
-                subs[draggingSub].start = SnapTime(-1, ns);
-            } else draggingSub = -1;
+                ns = SnapTime(-1, ns);
+                if (groupClipDrag.empty() && groupSubDrag.empty()) subs[draggingSub].start = ns;
+                else ApplyGroupDelta(ns - groupAnchor);
+            } else { draggingSub = -1; ClearGroupDrag(); }
         }
 
         float phX = trackPositions[0].x + currentTime * pixelsPerSecond;
