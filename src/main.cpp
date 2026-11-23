@@ -5334,19 +5334,22 @@ static void ApplyGroupDelta(float delta) {
     }
 }
 
-static void PushAfter(float at, float delta) {
-    if (delta < 0.001f) return;
-    for (Clip& c : clips)
-        if (c.startTime >= at - 0.001f) c.startTime += delta;
-    for (Subtitle& s : subs)
-        if (s.start >= at - 0.001f) s.start += delta;
-    for (BusSegment& b : bus)
-        if (b.start >= at - 0.001f) b.start += delta;
-    for (OverlayFx& o : gOverlays)
-        if (o.start >= at - 0.001f) o.start += delta;
+static void PushAfter(float at, float delta, float floorT) {
+    if (delta > -0.001f && delta < 0.001f) return;
+    auto shift = [&](float& t) {
+        if (t + 0.001f < at) return;
+        float n = t + delta;
+        if (n < floorT) n = floorT;
+        if (n < 0) n = 0;
+        t = n;
+    };
+    for (Clip& c : clips) shift(c.startTime);
+    for (Subtitle& s : subs) shift(s.start);
+    for (BusSegment& b : bus) shift(b.start);
+    for (OverlayFx& o : gOverlays) shift(o.start);
 }
 
-static bool FindInsertPoint(int track, float dropT, float& at) {
+static bool FindInsertPoint(int track, float dropT, float& at, float& rightStart) {
     std::vector<int> ids;
     for (int i = 0; i < (int)clips.size(); i++)
         if (clips[i].track == track) ids.push_back(i);
@@ -5367,6 +5370,7 @@ static bool FindInsertPoint(int track, float dropT, float& at) {
         if (zone0 < L.startTime + 0.05f) zone0 = L.startTime + 0.05f;
         if (dropT < zone0 || dropT > zone1) continue;
         at = std::max(0.0f, endL);
+        rightStart = startR;
         return true;
     }
     return false;
@@ -5374,9 +5378,11 @@ static bool FindInsertPoint(int track, float dropT, float& at) {
 
 static void AddClipOnTrack(Clip c, float dropT) {
     if (dropT < 0) dropT = 0;
-    float at = 0;
-    if (FindInsertPoint(c.track, dropT, at)) {
-        PushAfter(at, std::max(0.05f, c.duration));
+    float at = 0, rightStart = 0;
+    if (FindInsertPoint(c.track, dropT, at, rightStart)) {
+        float dur = std::max(0.05f, c.duration);
+        float delta = (at + dur) - rightStart;
+        PushAfter(std::min(at, rightStart), delta, at);
         c.startTime = at;
     } else {
         c.startTime = SnapStart(-1, c.duration, dropT);
