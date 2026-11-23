@@ -29,7 +29,7 @@ not tell them to rebuild.
 |---|---|
 | Remote | `github.com/danimanhillel/DaniWorldsStudioDesktop`, branch `main` |
 | Local mirror | `/tmp/dws` |
-| Skill written against | SwinIR removed from export; RIFE remains |
+| Skill written against | GS imported images keep their aspect; SwinIR stays removed; RIFE remains |
 
 Sources: `src/main.cpp` (almost all UI, timeline, preview, export), `effects.cpp`,
 `overlay_fx.cpp`, `rife.cpp` / `rife.h`, `asr.cpp` / `asr.h`,
@@ -112,6 +112,42 @@ under a gap is `playerUnder`. Draw a texture because `playingClip == clip`,
 **not** because `topClip == drawA`.
 
 `gRam.Present` on the main player accepts 0.20s. `SyncSide` is tighter (0.045s).
+
+## GS images keep their aspect
+
+Imported stills (`type == "image"`, not a solid) that **enter** the GS lane are
+contained in the project frame. Green-screen **video** and **solids** still fill.
+Do not letterbox at draw time: `BlitKeyed` / `BlendChromaPlaced` stretch the
+texture across the dest box, and video-track images already letterbox in
+`FitAspectBox` before the gs transform. Baking a contain onto a clip that stays
+on V1/V2/V3 would letterbox twice.
+
+`ContainGsImage` runs on a GS drop and when a dragged clip's track **changes
+onto** GS, and only if Size/Aspect are still identity (`gsFit != 2`):
+
+```
+F = AspectValue(exAspect)
+I = media.aspect (else thumbW/thumbH)
+rel = clamp(I / F, 0.25, 4)
+gsAspect = rel
+gsScale  = rel > 1 ? 1/rel : 1
+gsFit = 1
+```
+
+Displayed aspect is `F * gsAspect`. Wider than the frame letterboxes; taller
+pillarboxes. `gsFit`: 0 legacy, 1 this auto contain, 2 the user moved Size or
+Aspect (slider or the preview scale/aspect handle). It is the last integer on
+the `K` line. Old projects omit it.
+
+- Leaving GS resets scale/aspect to 1 when they still equal that contain, so V1
+  does not letterbox twice. Position and rotation stay. A fill the user set
+  (`gsFit == 2`, Size 1 and Aspect 1) is kept, including after save.
+- Do **not** rebake every frame.
+- `LoadProject`, after `MakeThumbnail`: GS stills with `gsFit == 1`, or legacy
+  identity (`gsFit == 0` and scale/aspect still 1), are contained once.
+  `gsFit == 2` is left alone.
+- Changing `exAspect` refits only `gsFit == 1` GS stills. Undo restores the
+  snapshot and must **not** refit again.
 
 ## Preview cache (`PreviewRam gRam`)
 

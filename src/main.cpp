@@ -118,6 +118,7 @@ struct Clip {
     float gsAspect = 1.0f;
     float gsRot = 0.0f;
     float gsOpacity = 1.0f;
+    int gsFit = 0;
     bool muted = false;
     float gradeLight = 0.0f;
     float gradeContrast = 0.0f;
@@ -3215,8 +3216,8 @@ static bool FxSlider(OverlayFx& o, const char* label, float* v, int channel, flo
 static void DrawPictureControls(Clip& c) {
     SliderTyped("Position X", &c.gsX, -1.0f, 1.0f, "%.2f");
     SliderTyped("Position Y", &c.gsY, -1.0f, 1.0f, "%.2f");
-    SliderTyped("Size", &c.gsScale, 0.05f, 4.0f, "%.2f");
-    SliderTyped("Aspect", &c.gsAspect, 0.25f, 4.0f, "%.2f");
+    if (SliderTyped("Size", &c.gsScale, 0.05f, 4.0f, "%.2f")) c.gsFit = 2;
+    if (SliderTyped("Aspect", &c.gsAspect, 0.25f, 4.0f, "%.2f")) c.gsFit = 2;
     SliderTyped("Rotate", &c.gsRot, -180.0f, 180.0f, "%.1f");
 }
 
@@ -3328,6 +3329,69 @@ static float AspectValue(int aspect) {
     if (aspect == 3) return 4.0f / 3.0f;
     if (aspect == 4) return 3.0f / 4.0f;
     return 16.0f / 9.0f;
+}
+
+static bool IsImportedStill(const Clip& c) {
+    if (c.mediaId < 0 || c.mediaId >= (int)media.size()) return false;
+    const MediaItem& m = media[c.mediaId];
+    return m.type == "image" && !IsSolidPath(m.path);
+}
+
+static float StillAspect(const Clip& c) {
+    const MediaItem& m = media[c.mediaId];
+    if (m.aspect > 0.05f) return m.aspect;
+    if (m.thumbW > 0 && m.thumbH > 0) return (float)m.thumbW / (float)m.thumbH;
+    return 0.0f;
+}
+
+static void GsContainPair(float imageAspect, float& aspect, float& scale) {
+    float frame = AspectValue(exAspect);
+    if (!(frame > 0.05f)) frame = 16.0f / 9.0f;
+    float rel = imageAspect / frame;
+    if (rel < 0.25f) rel = 0.25f;
+    if (rel > 4.0f) rel = 4.0f;
+    aspect = rel;
+    scale = (rel > 1.0f) ? (1.0f / rel) : 1.0f;
+}
+
+static void ContainGsImage(Clip& c) {
+    if (!IsImportedStill(c)) return;
+    float image = StillAspect(c);
+    if (!(image > 0.05f)) return;
+    GsContainPair(image, c.gsAspect, c.gsScale);
+    c.gsFit = 1;
+}
+
+static bool GsScaleIdentity(const Clip& c) {
+    return std::fabs(c.gsScale - 1.0f) < 0.02f && std::fabs(c.gsAspect - 1.0f) < 0.02f;
+}
+
+static bool GsStillAutoContain(const Clip& c) {
+    if (!IsImportedStill(c)) return false;
+    float image = StillAspect(c);
+    if (!(image > 0.05f)) return false;
+    float aspect = 1.0f, scale = 1.0f;
+    GsContainPair(image, aspect, scale);
+    return std::fabs(c.gsAspect - aspect) < 0.02f && std::fabs(c.gsScale - scale) < 0.02f;
+}
+
+static void ReleaseGsImageContain(Clip& c) {
+    if (!GsStillAutoContain(c)) return;
+    c.gsScale = 1.0f;
+    c.gsAspect = 1.0f;
+    c.gsFit = 0;
+}
+
+static void RefitAutoGsImages() {
+    for (Clip& c : clips)
+        if (c.track == kGsTrack && c.gsFit == 1) ContainGsImage(c);
+}
+
+static void BakeLoadedGsImages() {
+    for (Clip& c : clips) {
+        if (c.track != kGsTrack || !IsImportedStill(c) || c.gsFit == 2) continue;
+        if (c.gsFit == 1 || GsScaleIdentity(c)) ContainGsImage(c);
+    }
 }
 
 static bool ClipCoversFrame(const Clip& c, float picAspect, float effectScale) {
@@ -4706,6 +4770,7 @@ static void DragXform(int clip, int top) {
         c.gsY += pio.MouseDelta.y / (ph * 0.5f);
     } else if (xformDrag == 2) {
         c.gsScale += (pio.MouseDelta.x * (cs - sn) + pio.MouseDelta.y * (sn + cs)) / std::max(40.0f, pw * 0.25f);
+        c.gsFit = 2;
     } else if (xformDrag == 3) {
         float a0 = std::atan2((pio.MousePos.y - pio.MouseDelta.y) - g.center.y, (pio.MousePos.x - pio.MouseDelta.x) - g.center.x);
         float a1 = std::atan2(pio.MousePos.y - g.center.y, pio.MousePos.x - g.center.x);
@@ -4713,6 +4778,7 @@ static void DragXform(int clip, int top) {
     } else if (xformDrag == 4) {
         float along = pio.MouseDelta.x * cs + pio.MouseDelta.y * sn;
         c.gsAspect += along / (pw * 0.5f * std::max(0.05f, c.gsScale));
+        c.gsFit = 2;
     }
     if (c.gsX < -1.0f) c.gsX = -1.0f;
     if (c.gsX > 1.0f) c.gsX = 1.0f;
@@ -6644,8 +6710,8 @@ bool SaveProject(const std::string& path) {
                 c.eqGain[0], c.eqGain[1], c.eqGain[2], c.eqGain[3],
                 c.eqGain[4], c.eqGain[5], c.eqGain[6], c.eqGain[7]);
         fprintf(f, "E %s %.4f\n", c.fxOut.empty() ? "-" : c.fxOut.c_str(), c.fxDur);
-        fprintf(f, "K %.3f %.3f %.3f %.3f %.3f %.3f %d %.3f %.3f %.2f\n",
-                c.keySim, c.keySoft, c.keySpill, c.gsX, c.gsY, c.gsScale, c.muted ? 1 : 0, c.gsOpacity, c.gsAspect, c.gsRot);
+        fprintf(f, "K %.3f %.3f %.3f %.3f %.3f %.3f %d %.3f %.3f %.2f %d\n",
+                c.keySim, c.keySoft, c.keySpill, c.gsX, c.gsY, c.gsScale, c.muted ? 1 : 0, c.gsOpacity, c.gsAspect, c.gsRot, c.gsFit);
         fprintf(f, "G %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f\n",
                 c.gradeLight, c.gradeContrast, c.gradeWarm, c.gradeTint, c.gradeSat, c.gradeShadow, c.gradeGrain, c.gradeSharp);
     }
@@ -6719,6 +6785,7 @@ static Clip ClipWithoutFx(const Clip& s) {
     d.gsAspect = s.gsAspect;
     d.gsRot = s.gsRot;
     d.gsOpacity = s.gsOpacity;
+    d.gsFit = s.gsFit;
     d.muted = s.muted;
     d.gradeLight = s.gradeLight;
     d.gradeContrast = s.gradeContrast;
@@ -6764,7 +6831,7 @@ static std::string EditSignature(const EditSnap& e) {
           << c.speed << '\t' << c.fadeIn << c.fadeOut << '\t' << c.track << '\t' << c.muted << '\t'
           << c.fxOut << '\t' << c.fxDur << '\t'
           << c.keySim << '\t' << c.keySoft << '\t' << c.keySpill << '\t'
-          << c.gsX << '\t' << c.gsY << '\t' << c.gsScale << '\t' << c.gsAspect << '\t' << c.gsRot << '\t' << c.gsOpacity << '\t'
+          << c.gsX << '\t' << c.gsY << '\t' << c.gsScale << '\t' << c.gsAspect << '\t' << c.gsRot << '\t' << c.gsOpacity << '\t' << c.gsFit << '\t'
           << c.gradeLight << '\t' << c.gradeContrast << '\t' << c.gradeWarm << '\t' << c.gradeTint << '\t'
           << c.gradeSat << '\t' << c.gradeShadow << '\t' << c.gradeGrain << '\t' << c.gradeSharp << '\t'
           << c.eqOn << c.reverbOn << c.delayOn << '\t' << c.reverbTime << '\t' << c.delayTempo;
@@ -7105,8 +7172,8 @@ bool LoadProject(const std::string& path) {
             }
         } else if (line[0] == 'K' && line[1] == ' ' && !clips.empty()) {
             float a = 0.35f, b = 0.22f, ck = 0.8f, x = 0, y = 0, sc = 1, op = 1, aspect = 1, rot = 0;
-            int mute = 0;
-            int n = sscanf(line, "K %f %f %f %f %f %f %d %f %f %f", &a, &b, &ck, &x, &y, &sc, &mute, &op, &aspect, &rot);
+            int mute = 0, fit = 0;
+            int n = sscanf(line, "K %f %f %f %f %f %f %d %f %f %f %d", &a, &b, &ck, &x, &y, &sc, &mute, &op, &aspect, &rot, &fit);
             if (n >= 3) {
                 clips.back().keySim = Clamp01(a);
                 clips.back().keySoft = Clamp01(b);
@@ -7121,6 +7188,7 @@ bool LoadProject(const std::string& path) {
             if (n >= 8) clips.back().gsOpacity = Clamp01(op);
             if (n >= 9) clips.back().gsAspect = aspect < 0.2f ? 0.2f : (aspect > 4.0f ? 4.0f : aspect);
             if (n >= 10) clips.back().gsRot = rot < -360.0f ? -360.0f : (rot > 360.0f ? 360.0f : rot);
+            if (n >= 11) clips.back().gsFit = (fit == 1 || fit == 2) ? fit : 0;
         } else if (line[0] == 'Y' && line[1] == ' ') {
             float tr, tg, tb, bp, br, bg, bb, gr, gg, gb;
             int border = 1, back = 0;
@@ -7168,6 +7236,7 @@ bool LoadProject(const std::string& path) {
         (void)m;
 #endif
     }
+    BakeLoadedGsImages();
     shownLocal = -1000.0f;
     return true;
 }
@@ -7742,6 +7811,7 @@ int main(int argc, char* argv[]) {
                 for (int i = 0; i < 5; i++) {
                     if (ImGui::Selectable(names[i], exAspect == i) && exAspect != i) {
                         exAspect = i;
+                        RefitAutoGsImages();
                         SplitLongSubs();
                     }
                 }
@@ -7947,6 +8017,7 @@ int main(int argc, char* argv[]) {
                 c.mediaId = mid;
                 c.duration = media[mid].duration;
                 c.track = kGsTrack;
+                if (media[mid].type == "image") ContainGsImage(c);
                 float localX = ImGui::GetMousePos().x - gsStart.x;
                 AddClipOnTrack(c, localX / pixelsPerSecond);
                 SelectOnly((int)clips.size() - 1);
@@ -8342,6 +8413,7 @@ int main(int argc, char* argv[]) {
                 int mid = clips[draggingClip].mediaId;
                 bool isVideo = mid >= 0 && mid < (int)media.size() && (media[mid].type == "video" || media[mid].type == "image");
                 bool isAudio = mid >= 0 && mid < (int)media.size() && media[mid].type == "audio";
+                int prevTrack = clips[draggingClip].track;
                 if (isVideo && mouse.y >= gsLaneY && mouse.y < gsLaneY + trackH) {
                     clips[draggingClip].track = kGsTrack;
                 } else {
@@ -8352,6 +8424,14 @@ int main(int argc, char* argv[]) {
                                 clips[draggingClip].track = t;
                             break;
                         }
+                    }
+                }
+                if (clips[draggingClip].track != prevTrack) {
+                    if (clips[draggingClip].track == kGsTrack) {
+                        if (clips[draggingClip].gsFit != 2 && GsScaleIdentity(clips[draggingClip]))
+                            ContainGsImage(clips[draggingClip]);
+                    } else if (prevTrack == kGsTrack) {
+                        ReleaseGsImageContain(clips[draggingClip]);
                     }
                 }
             } else { draggingClip = -1; ClearGroupDrag(); }
@@ -8611,15 +8691,15 @@ int main(int argc, char* argv[]) {
             ImGui::TextUnformatted("Export video");
             ImGui::Separator();
             ImGui::TextUnformatted("Aspect");
-            if (ImGui::RadioButton("16:9", exAspect == 0)) exAspect = 0;
+            if (ImGui::RadioButton("16:9", exAspect == 0) && exAspect != 0) { exAspect = 0; RefitAutoGsImages(); }
             ImGui::SameLine();
-            if (ImGui::RadioButton("9:16", exAspect == 1)) exAspect = 1;
+            if (ImGui::RadioButton("9:16", exAspect == 1) && exAspect != 1) { exAspect = 1; RefitAutoGsImages(); }
             ImGui::SameLine();
-            if (ImGui::RadioButton("1:1", exAspect == 2)) exAspect = 2;
+            if (ImGui::RadioButton("1:1", exAspect == 2) && exAspect != 2) { exAspect = 2; RefitAutoGsImages(); }
             ImGui::SameLine();
-            if (ImGui::RadioButton("4:3", exAspect == 3)) exAspect = 3;
+            if (ImGui::RadioButton("4:3", exAspect == 3) && exAspect != 3) { exAspect = 3; RefitAutoGsImages(); }
             ImGui::SameLine();
-            if (ImGui::RadioButton("3:4", exAspect == 4)) exAspect = 4;
+            if (ImGui::RadioButton("3:4", exAspect == 4) && exAspect != 4) { exAspect = 4; RefitAutoGsImages(); }
             ImGui::Spacing();
             ImGui::TextUnformatted("Resolution");
             if (ImGui::RadioButton("720p", exRes == 0)) exRes = 0;

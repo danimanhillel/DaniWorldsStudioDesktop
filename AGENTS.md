@@ -13,3 +13,5 @@ ripple insert, or panels-above-timeline.
 - Reply to the user in Hebrew. Do not vendor ONNX weights or `onnxruntime.dll`.
 - SwinIR was removed from export. Do not add it back unless the user asks.
   RIFE stays. The `swinir_realsr_x4.onnx` file beside the exe is unused.
+- Imported images that enter the GS channel keep their aspect (`ContainGsImage`,
+  `gsFit`). Video GS and solids still fill. Do not rebake every frame.
