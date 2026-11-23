@@ -197,6 +197,8 @@ ImVec2 previewMin(0, 0), previewMax(0, 0);
 ImVec2 previewFrameMin(0, 0), previewFrameMax(0, 0);
 ImVec2 previewPanelMin(0, 0), previewPanelMax(0, 0);
 bool previewFrameValid = false;
+static int bgShow[2] = {-1, -1};
+static int bgShowN = 0;
 float shownLocal = -1000.0f;
 int trimmingClip = -1;
 int trimSide = 0;
@@ -1164,6 +1166,10 @@ VideoPlayer* playerB = nullptr;
 int playingMediaIdB = -1;
 int playingClipB = -1;
 float shownLocalB = -1000.0f;
+VideoPlayer* playerUnder = nullptr;
+int playingMediaIdUnder = -1;
+int playingClipUnder = -1;
+float shownLocalUnder = -1000.0f;
 VideoPlayer* playerNext = nullptr;
 int nextMediaId = -1;
 int nextClipIdx = -1;
@@ -3313,6 +3319,64 @@ static float AspectValue(int aspect) {
     return 16.0f / 9.0f;
 }
 
+static bool ClipCoversFrame(const Clip& c, float picAspect, float effectScale) {
+    if (std::fabs(c.gsX) > 0.002f || std::fabs(c.gsY) > 0.002f || std::fabs(c.gsRot) > 0.4f) return false;
+    float frameAspect = AspectValue(exAspect);
+    if (!(picAspect > 0.05f)) picAspect = frameAspect;
+    float lw = 1.0f, lh = 1.0f;
+    if (picAspect > frameAspect) lh = frameAspect / picAspect;
+    else lw = picAspect / frameAspect;
+    float sc = c.gsScale * (effectScale < 0.05f ? 1.0f : effectScale);
+    float asp = c.gsAspect < 0.05f ? 1.0f : c.gsAspect;
+    lw *= sc * asp;
+    lh *= sc;
+    return lw >= 0.995f && lh >= 0.995f;
+}
+
+static float ClipPixelAspect(int clip) {
+    if (clip < 0 || clip >= (int)clips.size()) return 16.0f / 9.0f;
+    if (playingClip == clip && player && player->width > 0 && player->height > 0)
+        return (float)player->width / (float)player->height;
+    if (playingClipB == clip && playerB && playerB->width > 0 && playerB->height > 0)
+        return (float)playerB->width / (float)playerB->height;
+    if (playingClipUnder == clip && playerUnder && playerUnder->width > 0 && playerUnder->height > 0)
+        return (float)playerUnder->width / (float)playerUnder->height;
+    int mid = clips[clip].mediaId;
+    if (mid >= 0 && mid < (int)media.size() && media[mid].aspect > 0.05f) return media[mid].aspect;
+    return 16.0f / 9.0f;
+}
+
+static bool FrontLeavesGaps(int top, int partner, int plate, int drive, float t, int* bg, int& nb) {
+    nb = 0;
+    if (top < 0 || top >= (int)clips.size()) return false;
+    for (int tr = 2; tr >= 0; --tr) {
+        int c = -1;
+        for (int i = 0; i < (int)clips.size(); i++) {
+            if (clips[i].track != tr) continue;
+            if (t < clips[i].startTime || t >= clips[i].startTime + clips[i].duration) continue;
+            c = i;
+        }
+        if (c < 0 || c == top || c == partner || c == plate || c == drive) continue;
+        if (nb < 2) bg[nb++] = c;
+    }
+    if (nb == 0) return false;
+    int base = top;
+    float effect = 1.0f;
+    if (partner >= 0) {
+        int a = -1, b = -1;
+        float prog = 0;
+        std::string id;
+        if (TransitionForClip(top, t, a, b, prog, id)) {
+            base = a;
+            FxLook look;
+            FxEvaluate(id.c_str(), prog, look);
+            effect = look.scaleA;
+        }
+    }
+    if (base < 0 || base >= (int)clips.size()) return true;
+    return !ClipCoversFrame(clips[base], ClipPixelAspect(base), effect);
+}
+
 static void FitAspectBox(ImVec2 p0, ImVec2 p1, float aspect, ImVec2& a, ImVec2& b) {
     float areaW = std::max(1.0f, p1.x - p0.x);
     float areaH = std::max(1.0f, p1.y - p0.y);
@@ -3758,16 +3822,69 @@ void ExportSession::Step() {
             BlitToCanvas(idx, &c);
             return true;
         };
+        int bg[2] = {-1, -1};
+        int nb = 0;
+        int partner = useFx ? ta : -1;
+        int drive = useFx ? tb : top;
+        bool gaps = FrontLeavesGaps(top, partner, plate, drive, (float)t, bg, nb);
+        if (gaps) {
+            for (int i = 0; i < nb; i++) blitClip(bg[i], t);
+        }
         if (useFx) {
-            static std::vector<uint8_t> frameA, frameB;
+            static std::vector<uint8_t> frameA, frameB, bgKeep;
+            if (gaps) bgKeep = canvas;
             std::fill(canvas.begin(), canvas.end(), 0);
             if (blitClip(ta, t)) frameA = canvas;
             else frameA.assign(canvas.size(), 0);
             std::fill(canvas.begin(), canvas.end(), 0);
             if (blitClip(tb, t)) frameB = canvas;
             else frameB.assign(canvas.size(), 0);
-            FxComposite(tid.c_str(), tp, canvas.data(), w, h,
-                        frameA.data(), w, h, frameB.data(), w, h);
+            if (!gaps) {
+                FxComposite(tid.c_str(), tp, canvas.data(), w, h,
+                            frameA.data(), w, h, frameB.data(), w, h);
+            } else {
+                FxLook look;
+                FxEvaluate(tid.c_str(), tp, look);
+                float wb0 = look.alphaB;
+                if (wb0 < 0) wb0 = 0;
+                if (wb0 > 1) wb0 = 1;
+                float wa0 = 1.0f - wb0;
+                canvas = bgKeep;
+                auto sample = [&](const std::vector<uint8_t>& img, int x, int y, float scale, int& r, int& g, int& b, int& a) {
+                    r = g = b = a = 0;
+                    if ((int)img.size() < w * h * 4 || scale < 0.05f) return;
+                    float u = ((x + 0.5f) / (float)w - 0.5f) / scale + 0.5f;
+                    float v = ((y + 0.5f) / (float)h - 0.5f) / scale + 0.5f;
+                    if (u < 0.0f || v < 0.0f || u >= 1.0f || v >= 1.0f) return;
+                    int ix = (int)(u * (float)(w - 1));
+                    int iy = (int)(v * (float)(h - 1));
+                    if (ix < 0) ix = 0;
+                    if (iy < 0) iy = 0;
+                    if (ix >= w) ix = w - 1;
+                    if (iy >= h) iy = h - 1;
+                    const uint8_t* p = img.data() + ((size_t)iy * (size_t)w + ix) * 4;
+                    r = p[0]; g = p[1]; b = p[2]; a = p[3];
+                };
+                for (int y = 0; y < h; y++) {
+                    for (int x = 0; x < w; x++) {
+                        int ar, ag, ab, aa, br, bgg, bb, ba;
+                        sample(frameA, x, y, look.scaleA, ar, ag, ab, aa);
+                        sample(frameB, x, y, look.scaleB, br, bgg, bb, ba);
+                        float wa = aa ? wa0 : 0.0f;
+                        float wb = ba ? wb0 : 0.0f;
+                        float sum = wa + wb;
+                        size_t i = ((size_t)y * (size_t)w + x) * 4;
+                        if (sum <= 0.001f) continue;
+                        float keep = 1.0f - sum;
+                        if (keep < 0) keep = 0;
+                        const uint8_t* s = canvas.data() + i;
+                        canvas[i] = (uint8_t)std::min(255, (int)(ar * wa + br * wb + s[0] * keep));
+                        canvas[i + 1] = (uint8_t)std::min(255, (int)(ag * wa + bgg * wb + s[1] * keep));
+                        canvas[i + 2] = (uint8_t)std::min(255, (int)(ab * wa + bb * wb + s[2] * keep));
+                        canvas[i + 3] = 255;
+                    }
+                }
+            }
         } else {
             blitClip(top, t);
         }
@@ -4136,59 +4253,67 @@ void SyncPreview(int topClip, float dt) {
     PumpAudio();
 }
 
-void SyncSide(int clipIdx, float timelineT) {
+static void SyncHeld(VideoPlayer*& slot, int& slotClip, int& slotMedia, float& slotShown, int clipIdx, float timelineT) {
     if (clipIdx < 0 || clipIdx >= (int)clips.size()) return;
     int mid = clips[clipIdx].mediaId;
     if (mid < 0 || mid >= (int)media.size()) return;
-    if (!playerB) playerB = new VideoPlayer();
+    if (!slot) slot = new VideoPlayer();
     bool image = media[mid].type == "image";
     float mediaT = image ? 0.0f : clips[clipIdx].sourceOffset + ClipLocalTime(clipIdx, timelineT) * std::max(0.05f, clips[clipIdx].speed);
-    if (gRam.Present(playerB, mid, mediaT)) {
-        playingClipB = clipIdx;
-        playingMediaIdB = mid;
-        shownLocalB = mediaT;
-        bool close = image || std::fabs((float)playerB->lastPts - mediaT) <= 0.045f;
+    if (gRam.Present(slot, mid, mediaT)) {
+        slotClip = clipIdx;
+        slotMedia = mid;
+        slotShown = mediaT;
+        bool close = image || std::fabs((float)slot->lastPts - mediaT) <= 0.045f;
         if (close) return;
     }
-    bool sideReady = playerB->fmtCtx || (playerB->still && playerB->hasFrame);
-    if (playingClipB != clipIdx || playingMediaIdB != mid || !sideReady) {
+    bool sideReady = slot->fmtCtx || (slot->still && slot->hasFrame);
+    if (slotClip != clipIdx || slotMedia != mid || !sideReady) {
         if (playerNext && nextClipIdx == clipIdx && nextMediaId == mid && playerNext->fmtCtx && playerNext->hasFrame) {
-            VideoPlayer* old = playerB;
-            playerB = playerNext;
+            VideoPlayer* old = slot;
+            slot = playerNext;
             playerNext = nullptr;
-            playingMediaIdB = mid;
+            slotMedia = mid;
             nextMediaId = -1;
             nextClipIdx = -1;
-            shownLocalB = -1000.0f;
-            if (old && old != playerB) { old->Close(); delete old; }
-        } else if (!playerB->Open(media[mid].path)) {
+            slotShown = -1000.0f;
+            if (old && old != slot) { old->Close(); delete old; }
+        } else if (!slot->Open(media[mid].path)) {
             return;
         } else {
-            playingMediaIdB = mid;
-            shownLocalB = -1000.0f;
+            slotMedia = mid;
+            slotShown = -1000.0f;
         }
-        playingClipB = clipIdx;
+        slotClip = clipIdx;
     }
     if (media[mid].type == "image") {
-        if (!playerB->hasFrame) {
-            playerB->Seek(0);
-            playerB->GrabFrame();
+        if (!slot->hasFrame) {
+            slot->Seek(0);
+            slot->GrabFrame();
         }
         return;
     }
-    bool ahead = playerB->lastPts >= 0.0 && mediaT + 0.08f < (float)playerB->lastPts;
-    bool behind = playerB->lastPts < 0.0 || (float)playerB->lastPts + 0.08f < mediaT;
+    bool ahead = slot->lastPts >= 0.0 && mediaT + 0.08f < (float)slot->lastPts;
+    bool behind = slot->lastPts < 0.0 || (float)slot->lastPts + 0.08f < mediaT;
     if (ahead || behind) {
-        if (playerB->lastPts < 0.0 || ahead || (float)playerB->lastPts + 0.20f < mediaT)
-            playerB->Seek(std::max(0.0f, mediaT));
-        playerB->GrabFrame();
+        if (slot->lastPts < 0.0 || ahead || (float)slot->lastPts + 0.20f < mediaT)
+            slot->Seek(std::max(0.0f, mediaT));
+        slot->GrabFrame();
     }
     int guard = 0;
-    while (playerB->lastPts >= 0.0 && (float)playerB->lastPts + 0.0005f < mediaT && guard < 400) {
-        if (!playerB->GrabFrame()) break;
+    while (slot->lastPts >= 0.0 && (float)slot->lastPts + 0.0005f < mediaT && guard < 400) {
+        if (!slot->GrabFrame()) break;
         guard++;
     }
-    shownLocalB = mediaT;
+    slotShown = mediaT;
+}
+
+void SyncSide(int clipIdx, float timelineT) {
+    SyncHeld(playerB, playingClipB, playingMediaIdB, shownLocalB, clipIdx, timelineT);
+}
+
+void SyncUnder(int clipIdx, float timelineT) {
+    SyncHeld(playerUnder, playingClipUnder, playingMediaIdUnder, shownLocalUnder, clipIdx, timelineT);
 }
 
 
@@ -4432,6 +4557,8 @@ static float ShownAspect(int clip) {
             return (float)player->width / (float)player->height;
         if (playingClipB == clip && playerB && playerB->width > 0 && playerB->height > 0)
             return (float)playerB->width / (float)playerB->height;
+        if (playingClipUnder == clip && playerUnder && playerUnder->width > 0 && playerUnder->height > 0)
+            return (float)playerUnder->width / (float)playerUnder->height;
     }
     if (clip >= 0 && clip < (int)clips.size()) {
         int mid = clips[clip].mediaId;
@@ -4461,6 +4588,7 @@ static bool XformOnScreen(int clip, int top, int plate) {
     if (clip < 0 || clip >= (int)clips.size()) return false;
     if (clip == top || clip == plate || clip == gsDrawClip || clip == playingClip) return true;
     if (fxOther >= 0 && clip == playingClipB) return true;
+    for (int i = 0; i < bgShowN; i++) if (bgShow[i] == clip) return true;
     return false;
 }
 
@@ -4775,6 +4903,54 @@ void BlitFxPair(ImVec2 p0, ImVec2 p1, GLuint texA, int aw, int ah, GLuint texB, 
     glDisable(GL_BLEND);
     glDisable(GL_TEXTURE_2D);
     glDisable(GL_SCISSOR_TEST);
+}
+
+static void DrawBackgroundClip(int clip, ImVec2 view0, ImVec2 view1) {
+    if (clip < 0 || clip >= (int)clips.size()) return;
+    GLuint tex = 0;
+    int tw = 0, th = 0;
+#ifdef HAVE_FFMPEG
+    auto take = [&](VideoPlayer* p, int id) -> bool {
+        if (id == clip && p && p->hasFrame && p->texture && p->width > 0 && p->height > 0) {
+            tex = p->texture;
+            tw = p->width;
+            th = p->height;
+            return true;
+        }
+        return false;
+    };
+    if (!take(playerUnder, playingClipUnder) && !take(playerB, playingClipB) && !take(player, playingClip)) {
+        int mid = clips[clip].mediaId;
+        if (mid >= 0 && mid < (int)media.size() && media[mid].thumb) {
+            tex = media[mid].thumb;
+            tw = media[mid].thumbW;
+            th = media[mid].thumbH;
+        }
+    }
+#else
+    int mid = clips[clip].mediaId;
+    if (mid >= 0 && mid < (int)media.size() && media[mid].thumb) {
+        tex = media[mid].thumb;
+        tw = media[mid].thumbW;
+        th = media[mid].thumbH;
+    }
+#endif
+    if (!tex || tw < 1 || th < 1) return;
+    const Clip& c = clips[clip];
+    BusSegment grade = ClipGradeOf(c);
+    if (const BusSegment* bs = BusAt(currentTime)) AddGrade(grade, *bs);
+    static BusSegment layerGrade;
+    layerGrade = grade;
+    const BusSegment* saved = activeGrade;
+    activeGrade = BusActive(layerGrade) ? &layerGrade : nullptr;
+    bool rec = recordFit;
+    recordFit = false;
+    bool alpha = false;
+    int mid = c.mediaId;
+    if (mid >= 0 && mid < (int)media.size()) alpha = SolidHasAlpha(media[mid].path);
+    BlitVideo(view0, view1, tex, tw, th, view0, view1, c.gsX, c.gsY, c.gsScale, c.gsAspect, c.gsRot, alpha);
+    recordFit = rec;
+    activeGrade = saved;
 }
 
 void BlitKeyed(ImVec2 a, ImVec2 b, GLuint tex, float sim, float soft, float spill, float ox, float oy, float scale, float opacity, float aspect, float rot) {
@@ -5732,6 +5908,44 @@ void ReleaseSidePlayer() {
 #endif
 }
 
+void ReleaseUnder() {
+#ifdef HAVE_FFMPEG
+    if (playerUnder && (playerUnder->fmtCtx || playerUnder->hasFrame)) playerUnder->Close();
+    playingMediaIdUnder = -1;
+    playingClipUnder = -1;
+    shownLocalUnder = -1000.0f;
+#endif
+}
+
+static void SyncBackground(int top, int plate, int drive) {
+#ifdef HAVE_FFMPEG
+    int bg[2] = {-1, -1};
+    int nb = 0;
+    int partner = fxOther;
+    bool gaps = FrontLeavesGaps(top, partner, plate, drive, currentTime, bg, nb);
+    bgShowN = 0;
+    bgShow[0] = bgShow[1] = -1;
+    if (!gaps) {
+        if (fxOther < 0) ReleaseSidePlayer();
+        ReleaseUnder();
+        return;
+    }
+    bgShowN = nb;
+    bgShow[0] = bg[0];
+    bgShow[1] = nb > 1 ? bg[1] : -1;
+    if (fxOther < 0) {
+        SyncSide(bg[nb - 1], currentTime);
+        if (nb >= 2) SyncUnder(bg[0], currentTime);
+        else ReleaseUnder();
+    } else {
+        SyncUnder(bg[nb - 1], currentTime);
+    }
+#else
+    (void)top; (void)plate; (void)drive;
+    bgShowN = 0;
+#endif
+}
+
 void SyncGreen() {
 #ifdef HAVE_FFMPEG
     gsDrawClip = FindGsClip(currentTime);
@@ -5975,6 +6189,7 @@ void ClearProject() {
     audioSrcs.clear();
     if (player) player->Close();
     if (playerB) playerB->Close();
+    if (playerUnder) playerUnder->Close();
     if (playerNext) playerNext->Close();
     if (playerGS) playerGS->Close();
     if (playerLib) playerLib->Close();
@@ -5984,6 +6199,8 @@ void ClearProject() {
     playingClip = -1;
     playingMediaIdB = -1;
     playingClipB = -1;
+    playingMediaIdUnder = -1;
+    playingClipUnder = -1;
     playingGsClip = -1;
     playingGsMedia = -1;
     nextMediaId = -1;
@@ -6018,6 +6235,7 @@ void RemoveMedia(int id) {
     audioSrcs.clear();
     if (player) player->Close();
     if (playerB) playerB->Close();
+    if (playerUnder) playerUnder->Close();
     if (playerNext) playerNext->Close();
     if (playerGS) playerGS->Close();
     if (playerLib) playerLib->Close();
@@ -6027,6 +6245,8 @@ void RemoveMedia(int id) {
     playingClip = -1;
     playingMediaIdB = -1;
     playingClipB = -1;
+    playingMediaIdUnder = -1;
+    playingClipUnder = -1;
     playingGsClip = -1;
     playingGsMedia = -1;
     nextMediaId = -1;
@@ -6316,6 +6536,7 @@ static void ApplyEdit(const EditSnap& e) {
         audioSrcs.clear();
         if (player) player->Close();
         if (playerB) playerB->Close();
+        if (playerUnder) playerUnder->Close();
         if (playerNext) playerNext->Close();
         if (playerGS) playerGS->Close();
         if (playerLib) playerLib->Close();
@@ -6325,6 +6546,8 @@ static void ApplyEdit(const EditSnap& e) {
         playingClip = -1;
         playingMediaIdB = -1;
         playingClipB = -1;
+        playingMediaIdUnder = -1;
+        playingClipUnder = -1;
         playingGsClip = -1;
         playingGsMedia = -1;
         nextMediaId = -1;
@@ -8074,11 +8297,11 @@ int main(int argc, char* argv[]) {
                 SyncSide(fxOther, currentTime);
                 ClipEffect* fx = FxFind(fxActiveId.c_str());
                 if (fx) previewStatus += std::string(" | ") + fx->label();
-            } else {
-                if (topClip >= 0 && playingClip != topClip) EnsurePlayerForClip(topClip);
-                PrefetchUpcoming(topClip);
-                ReleaseSidePlayer();
+            } else if (topClip >= 0 && playingClip != topClip) {
+                EnsurePlayerForClip(topClip);
             }
+            SyncBackground(topClip, previewPlate, driveClip);
+            if (fxOther < 0) PrefetchUpcoming(topClip);
             StopIfFinished();
         }
         if (asrOn) AsrPump();
@@ -8402,6 +8625,7 @@ int main(int argc, char* argv[]) {
         if (const BusSegment* bs = BusAt(currentTime)) AddGrade(previewGrade, *bs);
         previewGradeOn = BusActive(previewGrade);
         activeGrade = previewGradeOn ? &previewGrade : nullptr;
+        for (int bi = 0; bi < bgShowN; bi++) DrawBackgroundClip(bgShow[bi], view0, view1);
         if (fxOther >= 0 && player && playerB && player->hasFrame && playerB->hasFrame && player->texture && playerB->texture) {
             int drawA = -1, drawB = -1;
             float prog = 0;
@@ -8541,6 +8765,7 @@ int main(int argc, char* argv[]) {
     if (gExport.active) gExport.Cancel();
     if (player) { delete player; player = nullptr; }
     if (playerB) { delete playerB; playerB = nullptr; }
+    if (playerUnder) { delete playerUnder; playerUnder = nullptr; }
     if (playerNext) { delete playerNext; playerNext = nullptr; }
     if (playerGS) { delete playerGS; playerGS = nullptr; }
     if (playerLib) { delete playerLib; playerLib = nullptr; }
