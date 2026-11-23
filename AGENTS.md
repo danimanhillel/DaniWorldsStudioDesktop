@@ -3,7 +3,7 @@
 Windows C++/SDL2/ImGui/OpenGL/FFmpeg editor. This is **not** a web app.
 Before any edit, read `.grok/skills/daniworlds-studio/SKILL.md` and follow it.
 Do not regress preview handoff, underlay, transition-end snap, group drag,
-ripple insert, panels-above-timeline, or the BasicVSR++ → RIFE export order.
+ripple insert, or panels-above-timeline.
 
 - Local mirror the agent uses: `/tmp/dws`. Remote: `origin` `main`.
 - Do not `cmake --build` on Linux. The user builds on Windows with `taskkill`,
@@ -11,5 +11,5 @@ ripple insert, panels-above-timeline, or the BasicVSR++ → RIFE export order.
 - Git author and committer: `danimanhillel` / `danimanhillel@users.noreply.github.com`,
   set on the `git commit` command itself. Never `git config`.
 - Reply to the user in Hebrew. Do not vendor ONNX weights or `onnxruntime.dll`.
-- The build does not download `models\swinir_realsr_x4.onnx`. The export
-  checkbox is SwinIR x4 (64×64 tiles), not BasicVSR++. Same `onnxruntime.dll` as RIFE.
+- SwinIR was removed from export. Do not add it back unless the user asks.
+  RIFE stays. The `swinir_realsr_x4.onnx` file beside the exe is unused.

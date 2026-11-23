@@ -56,7 +56,6 @@ add_executable(DaniWorldsStudioDesktop
     src/effects.cpp
     src/overlay_fx.cpp
     src/rife.cpp
-    src/vsr.cpp
     src/asr.cpp
     ${imgui_SOURCE_DIR}/imgui.cpp
     ${imgui_SOURCE_DIR}/imgui_demo.cpp

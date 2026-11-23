@@ -29,16 +29,16 @@ not tell them to rebuild.
 |---|---|
 | Remote | `github.com/danimanhillel/DaniWorldsStudioDesktop`, branch `main` |
 | Local mirror | `/tmp/dws` |
-| Skill written against | SwinIR x4 export upscale (checkbox still `exVsr`) |
+| Skill written against | SwinIR removed from export; RIFE remains |
 
 Sources: `src/main.cpp` (almost all UI, timeline, preview, export), `effects.cpp`,
-`overlay_fx.cpp`, `rife.cpp` / `rife.h`, `vsr.cpp` / `vsr.h`, `asr.cpp` / `asr.h`,
+`overlay_fx.cpp`, `rife.cpp` / `rife.h`, `asr.cpp` / `asr.h`,
 `onnxruntime_c_api.h`. CMake: C++17, SDL2 **2.30.8** static via FetchContent,
 ImGui **v1.91.5**, OpenGL, FFmpeg only if `FFMPEG_INCLUDE_DIRS` + `FFMPEG_LIBRARIES`
 (or pkg-config). MSVC flags: `/bigobj /Zm300`.
 
 **Do not run `cmake --build` in this Linux sandbox.** There is no MSVC. A
-`g++ -std=c++17 -fsyntax-only` of `vsr.cpp` / `rife.cpp` is the only local check,
+`g++ -std=c++17 -fsyntax-only` of `rife.cpp` is the only local check,
 and it does **not** replace the user's build. `main.cpp` is Windows-shaped
 (FFmpeg + GL + ImGui) and will not link here.
 
@@ -71,10 +71,13 @@ new generator or a clean rebuild unless they ask.
 - Do not add a feature they did not ask for. A bugfix does not get a refactor.
 - Do not redo a shipped commit (list at the bottom). Read the code first; the
   summary in chat can be stale relative to `main`.
-- Do not vendor `swinir_realsr_x4.onnx`, RIFE onnx, or ORT DLLs. CMake `POST_BUILD`
+- Do not vendor RIFE onnx or ORT DLLs. CMake `POST_BUILD`
   copies **only** `models/mel80.bin` and `models/multilingual.tiktoken` next to
   the exe. The build does **not** download models or DLLs.
-- Do not silently bilinear-upscale when SwinIR or the DLL is missing.
+- **SwinIR is gone.** `swinir_realsr_x4.onnx` is a fixed 64×64 tile, so a 2K
+  export was ~209 GPU calls per frame and the user rejected it as impractical.
+  Do not add SwinIR or BasicVSR++ back unless they ask. There is still no
+  official BasicVSR++ ONNX. `vsr.cpp` / `vsr.h` / `RifePrepareCuda` are deleted.
 - Declare functions and globals **before** use. MSVC is not gcc: `C2065` /
   `C3861` (`gSolidTex`, `ClipBelow` — fixed in `33115fc`). `AddClipOnTrack` must
   **not** call `SelectOnly` (defined later). Callers `SelectOnly` after the drop.
@@ -312,115 +315,32 @@ Other res values 0–4 are 720 / 1080 / 1440 / 2160 / 4320. 16:9 widths
 
 ## Export pipeline
 
-`ExportSession::Begin(out, ew, eh, fps, exRife, exSubMode != 1, exVsr)`.
+`ExportSession::Begin(out, ew, eh, fps, exRife, exSubMode != 1)`.
 
 Phases:
 
-0. Render the timeline into an mp4 at the encoder size.
+0. Render the timeline into an mp4 at the chosen export size.
 1. RIFE (`BeginRifePass` / `StepRife`), only if `exRife` and fps `>= 48` and even.
    The render is at `fps/2` into `outPath + ".rife-tmp.mp4"`, then RIFE writes
    the final file at `outFps`. `RifeRun` **refuses** `w` or `h` `> 3840`.
-2. SwinIR (`BeginVsrPass` / `StepVsr`) when `exVsr`. The checkbox label is
-   **SwinIR**. This phase runs **before** phase 1. UI treats
-   `phase == 1 || phase == 2` as the GPU step (max 16 steps / 80ms).
+   The UI treats `phase == 1` as the GPU step (max 16 steps / 80ms).
 
-Order when both checkboxes are on:
+Subtitles: burned during phase 0 only when `burnSubs && !rifeOn`. If RIFE is on,
+they burn inside `StepRife`, on the full-rate frames.
 
-1. Render at **exactly 1/4**. Fail up front if either full side is not divisible
-   by 4 or the low-res side would be `< 16`. There is no 2× fallback.
-2. Phase 2 runs `swinir_realsr_x4.onnx` and writes the chosen `ExportDims`.
-3. `VsrShutdown` + `ReleasePassDecoder`, **then** `BeginRifePass` if `exRife`.
-4. Subtitles burn on the **last full-resolution encode**, never on the low-res
-   render.
+`CloseAll` deletes `*.rife-tmp.mp4` and calls `RifeShutdown()` if RIFE was on.
+There is no second upscale pass.
 
-Burn rule on the phase-0 render: `burnSubs && !rifeOn && !vsrOn`.
-During the VSR encode, burn only if `!rifeOn`. If RIFE follows, burn inside
-`StepRife`.
-
-`CloseAll` removes both temp files (`*.rife-tmp.mp4` and `*.vsr-tmp.mp4`),
-calls `VsrShutdown()` then `RifeShutdown()` if RIFE was on, and clears the VSR
-fields. VSR and RIFE each `LoadLibrary` / `FreeLibrary` their **own**
-`onnxruntime.dll`. They must not be live at the same time. VSR shuts down
-before `RifeStartup`.
-
-8K **and** both options is rejected in `Begin`, before the long render:
-
-> Frame interpolation stops above 3840, so it cannot follow SwinIR at this size. Uncheck it.
-
-8K encoder inside `BeginVsrPass` uses `hevc_nvenc` / `libx265` when `w` or `h`
-`> 4096`. `BeginRifePass` itself is still h264. 8K+RIFE without VSR was
-pre-existing; the hard reject is only when VSR is also on.
-
-Audio is packet-copied from the low-res file into the upscale file (same
-pattern as `BeginRifePass`), then RIFE copies it again.
-
-Missing model or DLL: fail **immediately** with `VsrProbe().detail`. Do not
-start the render. If the graph's scale hint (or the first tile's measured
-scale) is not 4, fail and tell the user to put `models\swinir_realsr_x4.onnx`
-next to the exe. **No bilinear fallback.**
-
-The published SwinIR file is fixed **64×64 NCHW float RGB in `[0, 1]`** →
-**256×256**, input name `image`, output name `upscaled`, batch is the only
-dynamic axis. `BuildVsrTiles` must feed that exact tile. Fixed-graph tiles use
-overlap `tile/2` (32 on a 64 tile) and keep the inner half so seams stay inside
-the window border. Do not pass a 256 tile into this file. Rank-4 NCHW means
-`T = 1` (one frame at a time). Edge pixels outside the frame are clamped.
-A float peak above **16** is treated as 0–255; SwinIR overshoot just above 1
-must stay in the 0–1 path and be clipped per pixel.
-
-Checkbox order in the export popup: **SwinIR** immediately **before**
-"Frame interpolation", and the checkbox shows `VsrProbe().detail`.
-
-### ONNX layout the loader accepts (`vsr.cpp`)
-
-One float image tensor, rank 4 or 5, optional scalar scale. SwinIR is rank 4
-NCHW. The older rank-5 layouts are still recognized, but the checkbox looks
-only for the SwinIR filename.
-
-| Rank | Test | Layout |
-|---|---|---|
-| 5, dim2 == 3 | OpenMMLab `lqs` | NTCHW `[1,T,3,H,W]` |
-| 5, dim1 == 3 | | NCTHW |
-| 5, dim4 == 3 | | NTHWC |
-| 5, all dynamic | assumed | NTCHW |
-| 4, dim3 == 3 | | NHWC (T = 1) |
-| 4 otherwise | | NCHW |
-
-Output spatial size is the axis pair that is the same integer multiple (1–8)
-of the tile. Center time index is `T/2` when the output has a time axis.
-
-Files probed **next to the exe** (not in the repo):
-
-- `models\swinir_realsr_x4.onnx`
-- `swinir_realsr_x4.onnx`
-- `onnxruntime.dll`
-
-Do not look for `basicvsrpp.onnx` anymore. There is still no official
-BasicVSR++ ONNX; do not switch the checkbox back to it unless the user asks.
-
-Log: `vsr.log` next to the exe. CUDA preload goes through `RifePrepareCuda`
-→ `PreloadCuda` and also writes `rife.log`. Do not `FreeLibrary` RIFE's
-`gKeep`. If CUDA fails, the session falls back to CPU and the status says CPU.
-Linux stubs say "SwinIR is available on Windows".
-
-### Models and DLLs — what is actually downloadable
-
-- The build downloads **neither** the ONNX nor the DLL.
-- If RIFE already runs, **reuse** the `onnxruntime.dll` already next to the
-  exe (and `onnxruntime_providers_cuda.dll` /
-  `onnxruntime_providers_shared.dll` if they placed them). No second DLL.
-- SwinIR file (HTTP 200, about 122MB, **not** vendored):
-  `https://huggingface.co/Heliosoph/swinir-onnx/resolve/main/swinir_realsr_x4.onnx`
-  Put it in `models\swinir_realsr_x4.onnx` next to the exe.
-- Do **not** send guessed ONNX Runtime zip URLs. The user already has CUDA 13
-  + cuDNN + `zlibwapi` working for RIFE.
+8K encoder in the main `Begin` uses `hevc_nvenc` / `libx265` when `w` or `h`
+`> 4096`. `BeginRifePass` itself is still h264, and `RifeRun` refuses above 3840.
 
 ### RIFE (already shipped)
 
 Windows-only, `onnxruntime.dll` loaded dynamically, model
-`models/rife49.onnx` or `rife.onnx`. CUDA via `PreloadCuda` (zlibwapi, CUDA 13,
-cuDNN). Log `rife.log`. `RifePrepareCuda` is the export VSR calls; it must
-keep calling `PreloadCuda` and must not free `gKeep`.
+`models/rife49.onnx` or `rife.onnx` next to the exe (same folder the user
+already uses). CUDA via `PreloadCuda` (zlibwapi, CUDA 13, cuDNN). Log
+`rife.log`. Do not `FreeLibrary` the kept preload module. The build does not
+download the DLL or the model. Do not send guessed ONNX Runtime zip URLs.
 
 ### Whisper subs (already shipped)
 

@@ -22,7 +22,6 @@
 #include "effects.h"
 #include "overlay_fx.h"
 #include "rife.h"
-#include "vsr.h"
 #include "asr.h"
 
 #ifdef HAVE_FFMPEG
@@ -217,7 +216,6 @@ static void SplitLongSubs();
 int exRes = 1;
 int exFpsIdx = 1;
 bool exRife = false;
-bool exVsr = false;
 int exSubMode = 0;
 bool asrOn = false;
 int asrPhase = 0;
@@ -2249,37 +2247,15 @@ struct ExportSession {
     std::vector<uint8_t> prevRGBA, nextRGBA, rifeMid;
     bool haveNext = false;
     bool emitMid = false;
-    bool vsrOn = false;
-    bool vsrPrimed = false;
-    bool vsrEof = false;
-    int vsrScale = 1;
-    int fullW = 0, fullH = 0;
-    int lrW = 0, lrH = 0;
-    int vsrTotal = 0;
-    int vsrFrame = 0;
-    int vsrT = 1;
-    int vsrCenter = 0;
-    int vsrDecoded = 0;
-    int vsrTile = 0;
-    std::string vsrSrc;
-    std::vector<std::vector<uint8_t>> vsrWin;
-    std::vector<uint8_t> vsrHR;
-    struct VsrTile { int x, y, tw, th, cx, cy, cw, ch; };
-    std::vector<VsrTile> vsrTiles;
 
     void CloseAll();
-    bool Begin(const std::string& outPath, int width, int height, int framesPerSec, bool useRife, bool burn, bool useVsr);
+    bool Begin(const std::string& outPath, int width, int height, int framesPerSec, bool useRife, bool burn);
     void Step();
     void StepRife();
-    void StepVsr();
     bool BeginRifePass();
-    bool BeginVsrPass();
     void SealPass();
     bool ReadRifeFrame(std::vector<uint8_t>& dst);
-    bool ReadVsrFrame(std::vector<uint8_t>& dst);
     void ReleasePassDecoder();
-    bool PrimeVsrWindow();
-    void BuildVsrTiles();
     void Cancel();
     void Fail(const char* msg);
     void Finish(bool ok);
@@ -2343,20 +2319,9 @@ void ExportSession::CloseAll() {
     headerWritten = false;
     ReleasePassDecoder();
     if (!tempPath.empty()) { ::remove(tempPath.c_str()); tempPath.clear(); }
-    if (!vsrSrc.empty()) { ::remove(vsrSrc.c_str()); vsrSrc.clear(); }
-    VsrShutdown();
     if (rifeOn) RifeShutdown();
     rifeOn = false;
     rifeFails = 0;
-    vsrOn = false;
-    vsrPrimed = false;
-    vsrEof = false;
-    vsrScale = 1;
-    fullW = fullH = lrW = lrH = 0;
-    vsrTotal = vsrFrame = vsrT = vsrCenter = vsrDecoded = vsrTile = 0;
-    vsrWin.clear();
-    vsrHR.clear();
-    vsrTiles.clear();
     phase = 0;
     outFps = 0;
     baseFps = 0;
@@ -2712,16 +2677,12 @@ void ExportSession::BlitToCanvas(int idx, const Clip* place) {
     }
 }
 
-bool ExportSession::Begin(const std::string& outPath, int width, int height, int framesPerSec, bool useRife, bool burn, bool useVsr) {
+bool ExportSession::Begin(const std::string& outPath, int width, int height, int framesPerSec, bool useRife, bool burn) {
     CloseAll();
     path = outPath;
     w = width & ~1;
     h = height & ~1;
     fps = framesPerSec;
-    fullW = w;
-    fullH = h;
-    lrW = w;
-    lrH = h;
     if (w < 2 || h < 2 || fps < 1) { status = "Bad export settings"; previewStatus = status; return false; }
     timelineEnd = 0;
     for (const auto& c : clips) {
@@ -2747,27 +2708,6 @@ bool ExportSession::Begin(const std::string& outPath, int width, int height, int
         path = tempPath;
         fps = baseFps;
         rifeOn = true;
-    }
-    if (useVsr) {
-        if (rifeOn && (fullW > 3840 || fullH > 3840)) {
-            Fail("Frame interpolation stops above 3840, so it cannot follow SwinIR at this size. Uncheck it.");
-            return false;
-        }
-        if (!VsrProbe().files) { Fail(VsrProbe().detail.c_str()); return false; }
-        if ((fullW % 4) || (fullH % 4) || fullW / 4 < 16 || fullH / 4 < 16) {
-            Fail("SwinIR upscales exactly 4x. This export size is too small or not divisible by 4.");
-            return false;
-        }
-        int scale = 4;
-        vsrOn = true;
-        vsrScale = scale;
-        w = fullW / scale;
-        h = fullH / scale;
-        lrW = w;
-        lrH = h;
-        vsrSrc = outPath + ".vsr-tmp.mp4";
-        path = vsrSrc;
-        if (!rifeOn) finalPath = outPath;
     }
     burnSubs = burn;
     total = (int)std::ceil(timelineEnd * (double)fps);
@@ -2923,13 +2863,10 @@ bool ExportSession::Begin(const std::string& outPath, int width, int height, int
     pkt = av_packet_alloc();
     active = true;
     char buf[192];
-    int showW = fullW > 0 ? fullW : w;
-    int showH = fullH > 0 ? fullH : h;
+    int showW = w;
+    int showH = h;
     int showFps = rifeOn ? outFps : framesPerSec;
-    const char* later = "";
-    if (vsrOn && rifeOn) later = " then SwinIR and RIFE";
-    else if (vsrOn) later = " then SwinIR";
-    else if (rifeOn) later = " then RIFE";
+    const char* later = rifeOn ? " then RIFE" : "";
     snprintf(buf, sizeof(buf), "Exporting %dx%d %d fps %s%s%s", showW, showH, showFps, encLabel, videoOnly ? " (no audio)" : "", later);
     status = buf;
     previewStatus = status;
@@ -3845,10 +3782,8 @@ static void BurnSubtitles(uint8_t* canvas, int cw, int ch, float t) {
 #endif
 void ExportSession::Step() {
     if (!active) return;
-    if (phase == 2) { StepVsr(); return; }
     if (phase == 1) { StepRife(); return; }
     if (frameIndex >= total) {
-        if (vsrOn) { BeginVsrPass(); return; }
         if (rifeOn && outFps > baseFps) { BeginRifePass(); return; }
         Finish(true);
         return;
@@ -4023,7 +3958,7 @@ void ExportSession::Step() {
     }
     OverlayStamp(canvas.data(), w, h, (float)t);
     if (const BusSegment* bs = BusAt((float)t)) GradeCanvas(canvas.data(), w, h, *bs, frameIndex);
-    if (burnSubs && !rifeOn && !vsrOn) BurnSubtitles(canvas.data(), w, h, (float)t);
+    if (burnSubs && !rifeOn) BurnSubtitles(canvas.data(), w, h, (float)t);
     if (!vframe || av_frame_make_writable(vframe) < 0) { Fail("Video frame failed"); return; }
     uint8_t* srcData[1] = { canvas.data() };
     int srcLines[1] = { w * 4 };
@@ -4045,11 +3980,7 @@ void ExportSession::Step() {
     frameIndex++;
     int pct = total ? (frameIndex * 100) / total : 0;
     char buf[192];
-    if (vsrOn && rifeOn)
-        snprintf(buf, sizeof(buf), "Rendering %d%%  (%d/%d)  then SwinIR and RIFE", pct, frameIndex, total);
-    else if (vsrOn)
-        snprintf(buf, sizeof(buf), "Rendering %d%%  (%d/%d)  then SwinIR", pct, frameIndex, total);
-    else if (rifeOn)
+    if (rifeOn)
         snprintf(buf, sizeof(buf), "Rendering %d%%  (%d/%d)  then RIFE", pct, frameIndex, total);
     else
         snprintf(buf, sizeof(buf), "Export %d%%  (%d/%d)  %dx%d", pct, frameIndex, total, w, h);
@@ -4127,378 +4058,6 @@ void ExportSession::ReleasePassDecoder() {
     if (rifeIn) avformat_close_input(&rifeIn);
     if (rifeAudio) avformat_close_input(&rifeAudio);
     rifeStream = -1;
-    vsrEof = false;
-}
-
-bool ExportSession::ReadVsrFrame(std::vector<uint8_t>& dst) {
-    if (!rifeIn || !rifeDec || !rifePkt || !rifeFrame || lrW < 2 || lrH < 2) return false;
-    for (;;) {
-        if (avcodec_receive_frame(rifeDec, rifeFrame) == 0 && rifeFrame->width > 0 && rifeFrame->height > 0) {
-            if (!rifeSws) {
-                rifeSws = sws_getContext(rifeFrame->width, rifeFrame->height, (AVPixelFormat)rifeFrame->format,
-                                         lrW, lrH, AV_PIX_FMT_RGBA, SWS_BILINEAR, nullptr, nullptr, nullptr);
-            }
-            if (!rifeSws) return false;
-            dst.assign((size_t)lrW * (size_t)lrH * 4, 0);
-            uint8_t* data[1] = { dst.data() };
-            int lines[1] = { lrW * 4 };
-            sws_scale(rifeSws, rifeFrame->data, rifeFrame->linesize, 0, rifeFrame->height, data, lines);
-            return true;
-        }
-        if (vsrEof) return false;
-        int rd = av_read_frame(rifeIn, rifePkt);
-        if (rd < 0) {
-            avcodec_send_packet(rifeDec, nullptr);
-            vsrEof = true;
-            continue;
-        }
-        if (rifePkt->stream_index != rifeStream) { av_packet_unref(rifePkt); continue; }
-        avcodec_send_packet(rifeDec, rifePkt);
-        av_packet_unref(rifePkt);
-    }
-}
-
-bool ExportSession::PrimeVsrWindow() {
-    VsrShape sh = VsrQuery();
-    vsrT = sh.window > 0 ? sh.window : 1;
-    if (vsrT > 31) vsrT = 31;
-    vsrCenter = vsrT / 2;
-    vsrWin.assign((size_t)vsrT, {});
-    std::vector<uint8_t> frame;
-    if (!ReadVsrFrame(frame) || frame.empty()) { Fail("Rendered video is empty"); return false; }
-    for (int i = 0; i < vsrT; i++) vsrWin[(size_t)i] = frame;
-    vsrDecoded = 1;
-    int future = vsrT - 1 - vsrCenter;
-    for (int k = 1; k <= future; k++) {
-        std::vector<uint8_t> nxt;
-        if (vsrDecoded < vsrTotal && ReadVsrFrame(nxt) && nxt.size() == frame.size()) {
-            vsrDecoded++;
-            vsrWin[(size_t)(vsrCenter + k)] = std::move(nxt);
-        } else {
-            vsrWin[(size_t)(vsrCenter + k)] = vsrWin[(size_t)(vsrCenter + k - 1)];
-        }
-    }
-    return true;
-}
-
-void ExportSession::BuildVsrTiles() {
-    vsrTiles.clear();
-    VsrShape sh = VsrQuery();
-    int tileW = sh.fixedW;
-    int tileH = sh.fixedH;
-    bool fixed = tileW > 0 && tileH > 0;
-    if (!fixed) {
-        bool big = lrW > 640 || lrH > 640 || (int64_t)lrW * (int64_t)lrH > (int64_t)640 * 360;
-        if (!big) {
-            VsrTile t;
-            t.x = 0; t.y = 0;
-            t.tw = (lrW + 3) & ~3;
-            t.th = (lrH + 3) & ~3;
-            t.cx = 0; t.cy = 0; t.cw = lrW; t.ch = lrH;
-            vsrTiles.push_back(t);
-            return;
-        }
-        tileW = std::min(lrW, 256) & ~3;
-        tileH = std::min(lrH, 256) & ~3;
-        if (tileW < 16) tileW = std::min(lrW, 16);
-        if (tileH < 16) tileH = std::min(lrH, 16);
-    }
-    if (lrW <= tileW && lrH <= tileH) {
-        VsrTile t;
-        t.x = 0; t.y = 0; t.tw = tileW; t.th = tileH;
-        t.cx = 0; t.cy = 0; t.cw = lrW; t.ch = lrH;
-        vsrTiles.push_back(t);
-        return;
-    }
-    int overlap = 16;
-    if (fixed) overlap = std::max(8, std::min(tileW, tileH) / 2);
-    if (overlap >= tileW) overlap = std::max(0, tileW / 2);
-    if (overlap >= tileH) overlap = std::max(0, tileH / 2);
-    int strideX = std::max(1, tileW - overlap);
-    int strideY = std::max(1, tileH - overlap);
-    for (int y = 0;;) {
-        int yy = y;
-        if (yy + tileH > lrH) yy = std::max(0, lrH - tileH);
-        for (int x = 0;;) {
-            int xx = x;
-            if (xx + tileW > lrW) xx = std::max(0, lrW - tileW);
-            VsrTile t;
-            t.x = xx; t.y = yy; t.tw = tileW; t.th = tileH;
-            t.cx = (xx == 0) ? 0 : overlap / 2;
-            t.cy = (yy == 0) ? 0 : overlap / 2;
-            int right = (xx + tileW >= lrW) ? tileW : tileW - overlap / 2;
-            int bot = (yy + tileH >= lrH) ? tileH : tileH - overlap / 2;
-            t.cw = std::max(1, right - t.cx);
-            t.ch = std::max(1, bot - t.cy);
-            vsrTiles.push_back(t);
-            if (xx + tileW >= lrW) break;
-            int nx = xx + strideX;
-            if (nx <= xx) break;
-            x = nx;
-        }
-        if (yy + tileH >= lrH) break;
-        int ny = yy + strideY;
-        if (ny <= yy) break;
-        y = ny;
-    }
-}
-
-bool ExportSession::BeginVsrPass() {
-    lrW = w;
-    lrH = h;
-    int passFps = fps;
-    vsrTotal = total;
-    std::string src = vsrSrc;
-    std::string dest = (rifeOn && !tempPath.empty()) ? tempPath : finalPath;
-    if (src.empty() || dest.empty() || lrW < 2 || lrH < 2) { Fail("SwinIR export is not ready"); return false; }
-    SealPass();
-    std::string err;
-    if (!VsrStartup(err)) { Fail(err.c_str()); return false; }
-    VsrShape sh = VsrQuery();
-    if (sh.scaleHint > 1 && sh.scaleHint != vsrScale) {
-        char b[240];
-        snprintf(b, sizeof(b), "This SwinIR model upscales %dx, but this export used %dx. Put models\\swinir_realsr_x4.onnx next to the program", sh.scaleHint, vsrScale);
-        Fail(b);
-        return false;
-    }
-    if (avformat_open_input(&rifeIn, src.c_str(), nullptr, nullptr) < 0 || avformat_find_stream_info(rifeIn, nullptr) < 0) {
-        Fail("Cannot open the rendered video");
-        return false;
-    }
-    rifeStream = -1;
-    for (unsigned i = 0; i < rifeIn->nb_streams; i++) {
-        if (rifeIn->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) { rifeStream = (int)i; break; }
-    }
-    if (rifeStream < 0) { Fail("Rendered video has no picture"); return false; }
-    const AVCodec* codec = avcodec_find_decoder(rifeIn->streams[rifeStream]->codecpar->codec_id);
-    rifeDec = codec ? avcodec_alloc_context3(codec) : nullptr;
-    if (!rifeDec || avcodec_parameters_to_context(rifeDec, rifeIn->streams[rifeStream]->codecpar) < 0 || avcodec_open2(rifeDec, codec, nullptr) < 0) {
-        Fail("Cannot decode the rendered video");
-        return false;
-    }
-    rifeFrame = av_frame_alloc();
-    rifePkt = av_packet_alloc();
-    vsrEof = false;
-    w = fullW;
-    h = fullH;
-    fps = passFps;
-    if (avformat_alloc_output_context2(&fmt, nullptr, "mp4", dest.c_str()) < 0 || !fmt) {
-        Fail("Cannot create the upscaled mp4");
-        return false;
-    }
-    const bool large = (w > 4096 || h > 4096);
-    const AVCodec* vcodec0 = nullptr;
-    bool useNv = false;
-    if (large) {
-        vcodec0 = avcodec_find_encoder_by_name("hevc_nvenc");
-        if (vcodec0) useNv = true;
-        if (!vcodec0) vcodec0 = avcodec_find_encoder_by_name("libx265");
-    }
-    if (!vcodec0) {
-        vcodec0 = avcodec_find_encoder_by_name("h264_nvenc");
-        if (vcodec0) useNv = true;
-    }
-    if (!vcodec0) {
-        useNv = false;
-        vcodec0 = avcodec_find_encoder_by_name("libx264");
-    }
-    if (!vcodec0) vcodec0 = avcodec_find_encoder_by_name("h264_mf");
-    if (!vcodec0) vcodec0 = avcodec_find_encoder(AV_CODEC_ID_H264);
-    if (!vcodec0) { Fail("Encoder not found"); return false; }
-    auto openEnc = [&](const AVCodec* c, bool nv) -> bool {
-        if (!c) return false;
-        if (vctx) avcodec_free_context(&vctx);
-        vctx = avcodec_alloc_context3(c);
-        if (!vctx) return false;
-        vctx->width = w;
-        vctx->height = h;
-        vctx->time_base = AVRational{1, fps};
-        vctx->framerate = AVRational{fps, 1};
-        vctx->gop_size = fps;
-        vctx->max_b_frames = 0;
-        vctx->pix_fmt = AV_PIX_FMT_YUV420P;
-        int64_t br = (int64_t)w * (int64_t)h;
-        if (br < 4000000) br = 4000000;
-        if (br > 80000000) br = 80000000;
-        vctx->bit_rate = br;
-        if (fmt->oformat->flags & AVFMT_GLOBALHEADER) vctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
-        if (nv && vctx->priv_data) {
-            av_opt_set(vctx->priv_data, "preset", "p4", 0);
-            av_opt_set(vctx->priv_data, "rc", "vbr", 0);
-            av_opt_set(vctx->priv_data, "cq", "18", 0);
-        } else if (c->name && strcmp(c->name, "libx264") == 0 && vctx->priv_data) {
-            av_opt_set(vctx->priv_data, "preset", "veryfast", 0);
-            av_opt_set(vctx->priv_data, "crf", "18", 0);
-        } else if (c->name && strcmp(c->name, "libx265") == 0 && vctx->priv_data) {
-            av_opt_set(vctx->priv_data, "preset", "ultrafast", 0);
-            av_opt_set(vctx->priv_data, "crf", "20", 0);
-        }
-        return avcodec_open2(vctx, c, nullptr) >= 0;
-    };
-    if (!openEnc(vcodec0, useNv)) {
-        const AVCodec* fb = avcodec_find_encoder_by_name(large ? "libx265" : "libx264");
-        if (!fb) fb = avcodec_find_encoder_by_name("libx264");
-        if (!fb) fb = avcodec_find_encoder(AV_CODEC_ID_H264);
-        if (!openEnc(fb, false)) { Fail("Cannot open the upscaled encoder"); return false; }
-    }
-    vst = avformat_new_stream(fmt, nullptr);
-    if (!vst) { Fail("Cannot add the upscaled video"); return false; }
-    avcodec_parameters_from_context(vst->codecpar, vctx);
-    vst->time_base = vctx->time_base;
-    int astream = -1;
-    if (!videoOnly && avformat_open_input(&rifeAudio, src.c_str(), nullptr, nullptr) == 0 && avformat_find_stream_info(rifeAudio, nullptr) == 0) {
-        for (unsigned i = 0; i < rifeAudio->nb_streams; i++) {
-            if (rifeAudio->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) { astream = (int)i; break; }
-        }
-        if (astream >= 0) {
-            ast = avformat_new_stream(fmt, nullptr);
-            if (ast) {
-                avcodec_parameters_copy(ast->codecpar, rifeAudio->streams[astream]->codecpar);
-                ast->codecpar->codec_tag = 0;
-                ast->time_base = rifeAudio->streams[astream]->time_base;
-            }
-        }
-    }
-    if (avio_open(&fmt->pb, dest.c_str(), AVIO_FLAG_WRITE) < 0) { Fail("Cannot open the upscaled file"); return false; }
-    AVDictionary* opt = nullptr;
-    av_dict_set(&opt, "movflags", "+faststart", 0);
-    if (avformat_write_header(fmt, &opt) < 0) { av_dict_free(&opt); Fail("Cannot write the upscaled header"); return false; }
-    av_dict_free(&opt);
-    headerWritten = true;
-    if (rifeAudio && ast && astream >= 0) {
-        AVPacket* ap = av_packet_alloc();
-        while (ap && av_read_frame(rifeAudio, ap) >= 0) {
-            if (ap->stream_index == astream) {
-                av_packet_rescale_ts(ap, rifeAudio->streams[astream]->time_base, ast->time_base);
-                ap->stream_index = ast->index;
-                av_interleaved_write_frame(fmt, ap);
-            }
-            av_packet_unref(ap);
-        }
-        av_packet_free(&ap);
-        avformat_close_input(&rifeAudio);
-    }
-    vframe = av_frame_alloc();
-    vframe->format = vctx->pix_fmt;
-    vframe->width = w;
-    vframe->height = h;
-    if (av_frame_get_buffer(vframe, 32) < 0) { Fail("Out of memory"); return false; }
-    toYuv = sws_getContext(w, h, AV_PIX_FMT_RGBA, w, h, vctx->pix_fmt, SWS_BILINEAR, nullptr, nullptr, nullptr);
-    if (!toYuv) { Fail("Scaler failed"); return false; }
-    pkt = av_packet_alloc();
-    canvas.assign((size_t)w * (size_t)h * 4, 0);
-    vsrHR.assign(canvas.size(), 0);
-    frameIndex = 0;
-    total = vsrTotal > 0 ? vsrTotal : 1;
-    vsrFrame = 0;
-    vsrPrimed = false;
-    vsrTile = 0;
-    phase = 2;
-    status = VsrProbe().cuda ? "SwinIR GPU" : VsrProbe().detail;
-    previewStatus = status;
-    return true;
-}
-
-void ExportSession::StepVsr() {
-    if (vsrFrame >= vsrTotal) {
-        VsrShutdown();
-        ReleasePassDecoder();
-        if (rifeOn && outFps > baseFps) { BeginRifePass(); return; }
-        Finish(true);
-        return;
-    }
-    if (!vsrPrimed) {
-        if (!PrimeVsrWindow()) return;
-        BuildVsrTiles();
-        if (vsrTiles.empty()) { Fail("SwinIR tile setup failed"); return; }
-        vsrPrimed = true;
-        vsrTile = 0;
-        if (vsrHR.size() != (size_t)fullW * (size_t)fullH * 4) vsrHR.assign((size_t)fullW * (size_t)fullH * 4, 0);
-        status = VsrProbe().cuda ? "SwinIR GPU" : "SwinIR CPU";
-        previewStatus = status;
-        return;
-    }
-    if (vsrTile < (int)vsrTiles.size()) {
-        if (vsrTile == 0 && !vsrHR.empty()) memset(vsrHR.data(), 0, vsrHR.size());
-        const VsrTile& tile = vsrTiles[(size_t)vsrTile];
-        std::vector<uint8_t> hr;
-        int gotScale = 0;
-        std::string err;
-        if (!VsrRunTile(vsrWin, lrW, lrH, tile.x, tile.y, tile.tw, tile.th, hr, gotScale, err)) {
-            if (err.empty()) err = "SwinIR failed on a frame";
-            Fail(err.c_str());
-            return;
-        }
-        if (gotScale != vsrScale) {
-            char b[240];
-            snprintf(b, sizeof(b), "This SwinIR model upscales %dx, but this export used %dx. Put models\\swinir_realsr_x4.onnx next to the program", gotScale, vsrScale);
-            Fail(b);
-            return;
-        }
-        int tileWpx = tile.tw * gotScale;
-        int tileHpx = tile.th * gotScale;
-        if (tileWpx < 1 || tileHpx < 1 || hr.size() < (size_t)tileWpx * (size_t)tileHpx * 4) {
-            Fail("SwinIR returned a short frame");
-            return;
-        }
-        int dx0 = (tile.x + tile.cx) * gotScale;
-        int dy0 = (tile.y + tile.cy) * gotScale;
-        int dw = tile.cw * gotScale;
-        int dh = tile.ch * gotScale;
-        int sx0 = tile.cx * gotScale;
-        int sy0 = tile.cy * gotScale;
-        for (int y = 0; y < dh; y++) {
-            int dy = dy0 + y;
-            int sy = sy0 + y;
-            if (dy < 0 || dy >= fullH || sy < 0 || sy >= tileHpx) continue;
-            int copyW = dw;
-            int dx = dx0;
-            int sx = sx0;
-            if (dx < 0) { copyW += dx; sx -= dx; dx = 0; }
-            if (dx + copyW > fullW) copyW = fullW - dx;
-            if (sx + copyW > tileWpx) copyW = tileWpx - sx;
-            if (copyW <= 0) continue;
-            memcpy(vsrHR.data() + ((size_t)dy * (size_t)fullW + (size_t)dx) * 4,
-                   hr.data() + ((size_t)sy * (size_t)tileWpx + (size_t)sx) * 4,
-                   (size_t)copyW * 4);
-        }
-        vsrTile++;
-        int pct = vsrTotal ? (vsrFrame * 100) / vsrTotal : 0;
-        char buf[192];
-        const char* dev = VsrProbe().cuda ? "GPU" : "CPU";
-        if ((int)vsrTiles.size() > 1)
-            snprintf(buf, sizeof(buf), "SwinIR %s %d%%  (%d/%d)  tile %d/%d", dev, pct, vsrFrame, vsrTotal, vsrTile, (int)vsrTiles.size());
-        else
-            snprintf(buf, sizeof(buf), "SwinIR %s %d%%  (%d/%d)", dev, pct, vsrFrame, vsrTotal);
-        status = buf;
-        previewStatus = status;
-        return;
-    }
-    if (canvas.size() != vsrHR.size()) canvas.assign(vsrHR.size(), 0);
-    if (!vsrHR.empty()) memcpy(canvas.data(), vsrHR.data(), vsrHR.size());
-    double when = (double)vsrFrame / (double)std::max(1, fps);
-    if (burnSubs && !rifeOn) BurnSubtitles(canvas.data(), w, h, (float)when);
-    if (!vframe || av_frame_make_writable(vframe) < 0) { Fail("Video frame failed"); return; }
-    uint8_t* data[1] = { canvas.data() };
-    int lines[1] = { w * 4 };
-    sws_scale(toYuv, data, lines, 0, h, vframe->data, vframe->linesize);
-    vframe->pts = vsrFrame;
-    if (avcodec_send_frame(vctx, vframe) < 0) { Fail("Video encode failed"); return; }
-    if (!WriteEncoded(vctx, vst)) { Fail("Video write failed"); return; }
-    vsrFrame++;
-    frameIndex = vsrFrame;
-    if (vsrFrame < vsrTotal) {
-        std::vector<uint8_t> hold = vsrWin.empty() ? std::vector<uint8_t>() : vsrWin.back();
-        if (!vsrWin.empty()) vsrWin.erase(vsrWin.begin());
-        std::vector<uint8_t> nxt;
-        if (vsrDecoded < vsrTotal && ReadVsrFrame(nxt) && nxt.size() == hold.size()) {
-            vsrDecoded++;
-            vsrWin.push_back(std::move(nxt));
-        } else if (!hold.empty()) {
-            vsrWin.push_back(std::move(hold));
-        }
-        vsrTile = 0;
-    }
 }
 
 bool ExportSession::BeginRifePass() {
@@ -9090,9 +8649,6 @@ int main(int argc, char* argv[]) {
             ImGui::Separator();
             ImGui::Text("Output: %d x %d   @ %d fps", ew, eh, fps);
             if (exRes == 3 || exRes == 4) ImGui::TextDisabled("4K and 8K take a long time.");
-            ImGui::Checkbox("SwinIR", &exVsr);
-            ImGui::TextDisabled("High quality. Renders at 1/4, then SwinIR restores this resolution before frame interpolation.");
-            ImGui::TextDisabled("%s", VsrProbe().detail.c_str());
             ImGui::Checkbox("Frame interpolation", &exRife);
             ImGui::TextDisabled("Renders the movie first, then fills frames on the GPU. 50 or 60 fps. Subtitles are added after.");
             ImGui::TextDisabled("%s", RifeProbe().detail.c_str());
@@ -9112,7 +8668,7 @@ int main(int argc, char* argv[]) {
                         previewStatus = WriteSrt(srt) ? "SRT written" : "No subtitles for SRT";
                     }
 #ifdef HAVE_FFMPEG
-                    gExport.Begin(out, ew, eh, fps, exRife, exSubMode != 1, exVsr);
+                    gExport.Begin(out, ew, eh, fps, exRife, exSubMode != 1);
 #else
                     previewStatus = "FFmpeg not linked";
 #endif
@@ -9134,7 +8690,7 @@ int main(int argc, char* argv[]) {
             ImGui::TextUnformatted(gExport.status.c_str());
             if (ImGui::Button("Cancel export")) gExport.Cancel();
             ImGui::End();
-            bool gpu = gExport.phase == 1 || gExport.phase == 2;
+            bool gpu = gExport.phase == 1;
             Uint32 slice = SDL_GetTicks();
             int guard = 0;
             int limit = gpu ? 16 : (gExport.w * gExport.h >= 3840 * 2160 ? 1 : (gExport.w * gExport.h <= 1280 * 720 ? 4 : 2));

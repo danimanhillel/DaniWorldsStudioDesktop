@@ -295,20 +295,7 @@ void FromPlanar(const float* src, int stride, int planeH, int w, int h, uint8_t*
     }
 }
 
-bool PrepareCudaForVsr(std::string& why) {
-#ifdef _WIN32
-    return PreloadCuda(ExeDir(), why);
-#else
-    why = "CUDA is available on Windows";
-    return false;
-#endif
-}
-
 }  // namespace
-
-bool RifePrepareCuda(std::string& why) {
-    return PrepareCudaForVsr(why);
-}
 
 const RifeInfo& RifeProbe() {
 #ifndef _WIN32
