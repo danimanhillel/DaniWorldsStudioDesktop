@@ -430,6 +430,7 @@ int SolidKindFromPath(const std::string& path);
 bool IsSolidPath(const std::string& path);
 bool SolidHasAlpha(const std::string& path);
 void EnsureSolidThumbs();
+static GLuint gSolidTex[3] = {0, 0, 0};
 
 class VideoPlayer {
 public:
@@ -2856,6 +2857,7 @@ bool ExportSession::Begin(const std::string& outPath, int width, int height, int
 
 bool TransitionForClip(int clip, float t, int& a, int& b, float& progress, std::string& id);
 float ClipLocalTime(int clipIdx, float timelineT);
+int ClipBelow(int above, float t);
 
 static float Clamp01(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); }
 
@@ -5294,7 +5296,6 @@ bool SolidHasAlpha(const std::string& path) { return path == "solid:bars"; }
 
 static const char* kSolidId[] = {"solid:black", "solid:bars", "solid:green"};
 static const char* kSolidName[] = {"Black", "Letterbox", "Green"};
-static GLuint gSolidTex[3] = {0, 0, 0};
 
 void EnsureSolidThumbs() {
     for (int k = 0; k < 3; k++) {
