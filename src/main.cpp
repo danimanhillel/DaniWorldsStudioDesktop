@@ -250,6 +250,13 @@ bool busGradeOpen = false;
 bool busPanelHoldsMouse = false;
 ImVec4 busPanelRect(0, 0, 0, 0);
 int selectedSub = -1;
+std::vector<int> subSelection;
+int marqueeKind = 0;
+ImVec2 marqueeStart(0, 0);
+bool marqueeLive = false;
+bool marqueeMoved = false;
+ImVec2 trackLanePos[6];
+float tlTrackH = 42.0f;
 int editingSub = -1;
 char subEditBuf[512] = {0};
 bool subEditorOpen = false;
@@ -3346,6 +3353,11 @@ static float ClipPixelAspect(int clip) {
     return 16.0f / 9.0f;
 }
 
+static bool ClipLeavesGap(int clip, float effectScale) {
+    if (clip < 0 || clip >= (int)clips.size()) return true;
+    return !ClipCoversFrame(clips[clip], ClipPixelAspect(clip), effectScale);
+}
+
 static bool FrontLeavesGaps(int top, int partner, int plate, int drive, float t, int* bg, int& nb) {
     nb = 0;
     if (top < 0 || top >= (int)clips.size()) return false;
@@ -3360,21 +3372,18 @@ static bool FrontLeavesGaps(int top, int partner, int plate, int drive, float t,
         if (nb < 2) bg[nb++] = c;
     }
     if (nb == 0) return false;
-    int base = top;
-    float effect = 1.0f;
     if (partner >= 0) {
         int a = -1, b = -1;
         float prog = 0;
         std::string id;
         if (TransitionForClip(top, t, a, b, prog, id)) {
-            base = a;
             FxLook look;
             FxEvaluate(id.c_str(), prog, look);
-            effect = look.scaleA;
+            return ClipLeavesGap(a, look.scaleA) || ClipLeavesGap(b, look.scaleB)
+                || ClipLeavesGap(a, 1.0f) || ClipLeavesGap(b, 1.0f);
         }
     }
-    if (base < 0 || base >= (int)clips.size()) return true;
-    return !ClipCoversFrame(clips[base], ClipPixelAspect(base), effect);
+    return ClipLeavesGap(top, 1.0f);
 }
 
 static void FitAspectBox(ImVec2 p0, ImVec2 p1, float aspect, ImVec2& a, ImVec2& b) {
@@ -3794,6 +3803,24 @@ void ExportSession::Step() {
         float tp = 0;
         std::string tid;
         bool useFx = TransitionForClip(top, (float)t, ta, tb, tp, tid);
+        if (useFx) {
+            double nextT = (double)(frameIndex + 1) / (double)fps;
+            int na = -1, nb2 = -1;
+            float np = 0;
+            std::string nid;
+            if (!TransitionForClip(top, (float)nextT, na, nb2, np, nid)) {
+                auto alive = [&](int c) {
+                    if (c < 0 || c >= (int)clips.size()) return false;
+                    float end = clips[c].startTime + clips[c].duration;
+                    return nextT >= (double)clips[c].startTime && nextT < (double)end;
+                };
+                bool aLive = alive(ta);
+                bool bLive = alive(tb);
+                if (bLive && !aLive) tp = 1.0f;
+                else if (aLive && !bLive) tp = 0.0f;
+                else if (bLive && aLive) tp = 1.0f;
+            }
+        }
         auto blitClip = [&](int ci, double when) {
             if (ci < 0 || ci >= (int)clips.size()) return false;
             const Clip& c = clips[ci];
@@ -3853,11 +3880,16 @@ void ExportSession::Step() {
                 auto sample = [&](const std::vector<uint8_t>& img, int x, int y, float scale, int& r, int& g, int& b, int& a) {
                     r = g = b = a = 0;
                     if ((int)img.size() < w * h * 4 || scale < 0.05f) return;
+                    if (std::fabs(scale - 1.0f) <= 0.0008f) {
+                        const uint8_t* p = img.data() + ((size_t)y * (size_t)w + (size_t)x) * 4;
+                        r = p[0]; g = p[1]; b = p[2]; a = p[3];
+                        return;
+                    }
                     float u = ((x + 0.5f) / (float)w - 0.5f) / scale + 0.5f;
                     float v = ((y + 0.5f) / (float)h - 0.5f) / scale + 0.5f;
                     if (u < 0.0f || v < 0.0f || u >= 1.0f || v >= 1.0f) return;
-                    int ix = (int)(u * (float)(w - 1));
-                    int iy = (int)(v * (float)(h - 1));
+                    int ix = (int)(u * (float)w);
+                    int iy = (int)(v * (float)h);
                     if (ix < 0) ix = 0;
                     if (iy < 0) iy = 0;
                     if (ix >= w) ix = w - 1;
@@ -4889,16 +4921,115 @@ void BlitFxPair(ImVec2 p0, ImVec2 p1, GLuint texA, int aw, int ah, GLuint texB, 
     glPushMatrix();
     glLoadIdentity();
     glDisable(GL_BLEND);
-    quad(texA, aw, ah, boxA0, boxA1, 1.0f, look.scaleA, ca);
-    if (haveB) {
-        glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        quad(texB, bw, bh, boxB0, boxB1, look.alphaB, look.scaleB, cb);
+    bool revealed = false;
+    if (haveB && bgShowN > 0 && previewFrameValid) {
+        static int stencilBits = -1;
+        if (stencilBits < 0) {
+            stencilBits = 0;
+            glGetIntegerv(GL_STENCIL_BITS, &stencilBits);
+        }
+        int fbW = (int)io.DisplaySize.x;
+        int fbH = (int)io.DisplaySize.y;
+        int cx = (int)std::floor(std::max(0.0f, previewFrameMin.x));
+        int top = (int)std::floor(std::max(0.0f, previewFrameMin.y));
+        int right = (int)std::ceil(std::min((float)fbW, previewFrameMax.x));
+        int bot = (int)std::ceil(std::min((float)fbH, previewFrameMax.y));
+        int cy = fbH - bot;
+        int cw = right - cx;
+        int ch = bot - top;
+        static GLuint revealTex = 0;
+        static int revealW = 0, revealH = 0;
+        if (stencilBits > 0 && cw > 1 && ch > 1 && cy >= 0 && cx + cw <= fbW && cy + ch <= fbH) {
+            if (!revealTex) glGenTextures(1, &revealTex);
+            glBindTexture(GL_TEXTURE_2D, revealTex);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            if (revealW != cw || revealH != ch) {
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, cw, ch, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+                revealW = cw;
+                revealH = ch;
+            }
+            for (int n = 0; n < 8 && glGetError() != GL_NO_ERROR; n++) {}
+            glReadBuffer(GL_BACK);
+            glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, cx, cy, cw, ch);
+            if (glGetError() == GL_NO_ERROR) revealed = true;
+        }
+        if (revealed) {
+            float wa = 1.0f - look.alphaB;
+            if (wa < 0.0f) wa = 0.0f;
+            if (wa > 1.0f) wa = 1.0f;
+            if (wa > 0.001f) {
+                glEnable(GL_BLEND);
+                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                quad(texA, aw, ah, boxA0, boxA1, wa, look.scaleA, ca);
+            }
+            glEnable(GL_STENCIL_TEST);
+            glStencilMask(0xFF);
+            glClearStencil(0);
+            glClear(GL_STENCIL_BUFFER_BIT);
+            glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+            glStencilFunc(GL_ALWAYS, 1, 0xFF);
+            glStencilOp(GL_REPLACE, GL_REPLACE, GL_REPLACE);
+            if (pglUseProgram) pglUseProgram(0);
+            glDisable(GL_TEXTURE_2D);
+            glDisable(GL_BLEND);
+            float sc = look.scaleB * (cb ? cb->gsScale : 1.0f);
+            float asp = cb ? cb->gsAspect : 1.0f;
+            float ox = cb ? cb->gsX : 0.0f;
+            float oy = cb ? cb->gsY : 0.0f;
+            float rot = cb ? cb->gsRot : 0.0f;
+            ImVec2 bq[4];
+            PictureCorners(boxB0, boxB1, ox, oy, sc, asp, rot, bq);
+            glColor4f(1.f, 1.f, 1.f, 1.f);
+            glBegin(GL_QUADS);
+            glVertex2f(bq[0].x, bq[0].y);
+            glVertex2f(bq[1].x, bq[1].y);
+            glVertex2f(bq[2].x, bq[2].y);
+            glVertex2f(bq[3].x, bq[3].y);
+            glEnd();
+            glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+            glStencilFunc(GL_EQUAL, 1, 0xFF);
+            glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+            glEnable(GL_TEXTURE_2D);
+            glBindTexture(GL_TEXTURE_2D, revealTex);
+            if (pglUseProgram) pglUseProgram(0);
+            glDisable(GL_BLEND);
+            float rx0 = (float)cx;
+            float rx1 = (float)(cx + cw);
+            float ryTop = (float)(fbH - (cy + ch));
+            float ryBot = (float)(fbH - cy);
+            glColor4f(1.f, 1.f, 1.f, 1.f);
+            glBegin(GL_QUADS);
+            glTexCoord2f(0, 1); glVertex2f(rx0, ryTop);
+            glTexCoord2f(1, 1); glVertex2f(rx1, ryTop);
+            glTexCoord2f(1, 0); glVertex2f(rx1, ryBot);
+            glTexCoord2f(0, 0); glVertex2f(rx0, ryBot);
+            glEnd();
+            glDisable(GL_BLEND);
+            quad(texA, aw, ah, boxA0, boxA1, 1.0f, look.scaleA, ca);
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            quad(texB, bw, bh, boxB0, boxB1, look.alphaB, look.scaleB, cb);
+            glDisable(GL_STENCIL_TEST);
+            glStencilMask(0xFF);
+        }
+    }
+    if (!revealed) {
+        quad(texA, aw, ah, boxA0, boxA1, 1.0f, look.scaleA, ca);
+        if (haveB) {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            quad(texB, bw, bh, boxB0, boxB1, look.alphaB, look.scaleB, cb);
+        }
     }
     glPopMatrix();
     glMatrixMode(GL_PROJECTION);
     glPopMatrix();
     glMatrixMode(GL_MODELVIEW);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glDisable(GL_STENCIL_TEST);
     glColor3f(1.f, 1.f, 1.f);
     glDisable(GL_BLEND);
     glDisable(GL_TEXTURE_2D);
@@ -5259,6 +5390,9 @@ static void ClearTimelineDrags() {
     ovDragMode = 0;
     ovDragIndex = -1;
     xformDrag = 0;
+    marqueeLive = false;
+    marqueeKind = 0;
+    marqueeMoved = false;
 }
 
 struct UiShield {
@@ -5384,6 +5518,7 @@ void SelectOnly(int i) {
     selectedClip = i;
     selectedBus = -1;
     selectedSub = -1;
+    subSelection.clear();
 }
 
 void ToggleSelect(int i) {
@@ -5393,6 +5528,73 @@ void ToggleSelect(int i) {
     selectedClip = i;
     selectedBus = -1;
     selectedSub = -1;
+    subSelection.clear();
+}
+
+static bool ScreenHit(ImVec2 a, ImVec2 b, ImVec2 c0, ImVec2 c1) {
+    float x0 = a.x < b.x ? a.x : b.x;
+    float x1 = a.x < b.x ? b.x : a.x;
+    float y0 = a.y < b.y ? a.y : b.y;
+    float y1 = a.y < b.y ? b.y : a.y;
+    return x0 < c1.x && x1 > c0.x && y0 < c1.y && y1 > c0.y;
+}
+
+static void BeginMarquee(int kind, ImVec2 p) {
+    marqueeKind = kind;
+    marqueeStart = p;
+    marqueeLive = true;
+    marqueeMoved = false;
+}
+
+static void ApplyMarquee(ImVec2 m) {
+    if (marqueeKind == 3) {
+        int prev = selectedSub;
+        selection.clear();
+        selectedClip = -1;
+        selectedBus = -1;
+        subSelection.clear();
+        selectedSub = -1;
+        for (int i = 0; i < (int)subs.size(); i++) {
+            float x = subsOriginX + subs[i].start * pixelsPerSecond;
+            float w = std::max(28.0f, subs[i].duration * pixelsPerSecond);
+            ImVec2 c0(x, subsLaneY + 4.0f);
+            ImVec2 c1(x + w, subsLaneY + 4.0f + tlTrackH - 8.0f);
+            if (!ScreenHit(marqueeStart, m, c0, c1)) continue;
+            subSelection.push_back(i);
+        }
+        if (!subSelection.empty()) {
+            selectedSub = subSelection.back();
+            if (subEditorOpen && selectedSub != prev) {
+                editingSub = selectedSub;
+                LoadSubEditor(subs[selectedSub].text);
+            }
+        }
+        return;
+    }
+    bool picture = marqueeKind == 1;
+    selection.clear();
+    selectedClip = -1;
+    selectedBus = -1;
+    selectedSub = -1;
+    subSelection.clear();
+    auto consider = [&](int i, float originX, float originY) {
+        float x = originX + clips[i].startTime * pixelsPerSecond;
+        float w = std::max(24.0f, clips[i].duration * pixelsPerSecond);
+        ImVec2 c0(x, originY);
+        ImVec2 c1(x + w, originY + tlTrackH - 8.0f);
+        if (!ScreenHit(marqueeStart, m, c0, c1)) return;
+        selection.push_back(i);
+    };
+    for (int i = 0; i < (int)clips.size(); i++) {
+        int tr = clips[i].track;
+        if (picture) {
+            if (tr >= 0 && tr < 3) consider(i, trackLanePos[tr].x, trackLanePos[tr].y);
+            else if (tr == kGsTrack) consider(i, gsOriginX, gsLaneY + 4.0f);
+        } else if (tr >= 3 && tr < 6) {
+            consider(i, trackLanePos[tr].x, trackLanePos[tr].y);
+        }
+    }
+    if (!selection.empty()) selectedClip = selection.back();
 }
 
 int ClipBelow(int above, float t) {
@@ -6159,6 +6361,9 @@ void ClearProject() {
     selectedClip = -1;
     selectedBus = -1;
     selectedSub = -1;
+    subSelection.clear();
+    marqueeLive = false;
+    marqueeKind = 0;
     editingSub = -1;
     subEditorOpen = false;
     subStyleOpen = false;
@@ -6567,6 +6772,7 @@ static void ApplyEdit(const EditSnap& e) {
     if (selectedBus >= (int)bus.size()) selectedBus = -1;
     if (contextBus >= (int)bus.size()) contextBus = -1;
     if (selectedSub >= (int)subs.size()) selectedSub = -1;
+    subSelection.erase(std::remove_if(subSelection.begin(), subSelection.end(), [](int i) { return i < 0 || i >= (int)subs.size(); }), subSelection.end());
     if (editingSub < 0 || editingSub >= (int)subs.size()) {
         editingSub = -1;
         subEditorOpen = false;
@@ -6884,6 +7090,7 @@ int main(int argc, char* argv[]) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 2);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+    SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
 
     SDL_Window* window = SDL_CreateWindow("DaniWorldsStudio FFmpeg 56",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 900,
@@ -6974,10 +7181,20 @@ int main(int argc, char* argv[]) {
                         selectedBus = -1;
                         draggingBus = -1;
                         trimmingBus = -1;
-                    } else if (selectedClip >= 0 && selectedClip < (int)clips.size()) {
-                        if (fxEdit == selectedClip) fxEdit = -1;
-                        else if (fxEdit > selectedClip) fxEdit--;
-                        clips.erase(clips.begin() + selectedClip);
+                    } else if ((selectedClip >= 0 || !selection.empty()) && !io.WantTextInput) {
+                        std::vector<int> kill = selection;
+                        if (selectedClip >= 0) kill.push_back(selectedClip);
+                        std::sort(kill.begin(), kill.end());
+                        kill.erase(std::unique(kill.begin(), kill.end()), kill.end());
+                        for (int n = (int)kill.size() - 1; n >= 0; --n) {
+                            int id = kill[n];
+                            if (id < 0 || id >= (int)clips.size()) continue;
+                            if (fxEdit == id) fxEdit = -1;
+                            else if (fxEdit > id) fxEdit--;
+                            if (contextClip == id) contextClip = -1;
+                            else if (contextClip > id) contextClip--;
+                            clips.erase(clips.begin() + id);
+                        }
                         selectedClip = -1;
                         selection.clear();
 #ifdef HAVE_FFMPEG
@@ -6988,13 +7205,28 @@ int main(int argc, char* argv[]) {
                         draggingClip = -1;
                         trimmingClip = -1;
                         dragVolClip = -1;
-                        contextClip = -1;
-                    } else if (selectedSub >= 0 && selectedSub < (int)subs.size() && !io.WantTextInput) {
-                        subs.erase(subs.begin() + selectedSub);
-                        if (editingSub == selectedSub) { editingSub = -1; subEditorOpen = false; }
+                    } else if (!io.WantTextInput && (selectedSub >= 0 || !subSelection.empty())) {
+                        std::vector<int> kill = subSelection;
+                        if (selectedSub >= 0) kill.push_back(selectedSub);
+                        std::sort(kill.begin(), kill.end());
+                        kill.erase(std::unique(kill.begin(), kill.end()), kill.end());
+                        for (int n = (int)kill.size() - 1; n >= 0; --n) {
+                            int id = kill[n];
+                            if (id < 0 || id >= (int)subs.size()) continue;
+                            subs.erase(subs.begin() + id);
+                            if (editingSub == id) { editingSub = -1; subEditorOpen = false; }
+                            else if (editingSub > id) editingSub--;
+                            if (draggingSub == id) draggingSub = -1;
+                            else if (draggingSub > id) draggingSub--;
+                            if (trimmingSub == id) trimmingSub = -1;
+                            else if (trimmingSub > id) trimmingSub--;
+                        }
                         selectedSub = -1;
-                        draggingSub = -1;
-                        trimmingSub = -1;
+                        subSelection.clear();
+                        if (editingSub < 0 || editingSub >= (int)subs.size()) {
+                            editingSub = -1;
+                            subEditorOpen = false;
+                        }
                     }
                 }
             }
@@ -7417,6 +7649,7 @@ int main(int argc, char* argv[]) {
         ImGui::BeginChild("Timeline", ImVec2(0, tlH), true, ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_AlwaysHorizontalScrollbar);
         const char* trackNames[] = {"V1", "V2", "V3", "A1", "A2", "A3"};
         float trackH = 42.0f;
+        tlTrackH = trackH;
         ImVec2 trackPositions[6];
 
         ImGui::BeginChild("ruler", ImVec2(timeW + 90.0f, 26.0f), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
@@ -7586,6 +7819,8 @@ int main(int argc, char* argv[]) {
         gsOriginX = gsStart.x;
         gsLaneY = gsStart.y - 4.0f;
         ImGui::InvisibleButton("gszone", ImVec2(ImGui::GetContentRegionAvail().x, trackH - 4));
+        bool gsZoneClick = ImGui::IsItemClicked(0) && !TimelinePointerBusy();
+        bool ateGs = false;
         if (ImGui::BeginDragDropTarget()) {
             const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("MEDIA");
             const ImGuiPayload* solid = payload ? nullptr : ImGui::AcceptDragDropPayload("SOLID");
@@ -7613,12 +7848,13 @@ int main(int argc, char* argv[]) {
                 ImVec2 cp0(x, gsStart.y);
                 ImVec2 cp1(x + w, gsStart.y + trackH - 8);
                 gdl->AddRectFilled(cp0, cp1, IM_COL32(40, 140, 70, 230), 3.0f);
-                if (i == selectedClip) gdl->AddRect(cp0, cp1, IM_COL32(180, 255, 180, 255), 3.0f, 0, 2.0f);
+                if (i == selectedClip || IsSelected(i)) gdl->AddRect(cp0, cp1, IM_COL32(180, 255, 180, 255), 3.0f, 0, i == selectedClip ? 2.0f : 1.2f);
                 std::string label = "GS";
                 if (clips[i].mediaId >= 0 && clips[i].mediaId < (int)media.size())
                     label = media[clips[i].mediaId].name.substr(0, 16);
                 gdl->AddText(ImVec2(cp0.x + 6, cp0.y + 4), IM_COL32(240, 255, 240, 240), label.c_str());
                 if (!ImGui::IsMouseHoveringRect(cp0, cp1) || TimelinePointerBusy()) continue;
+                if (ImGui::IsMouseClicked(0) || ImGui::IsMouseClicked(1)) ateGs = true;
                 ImVec2 mouse = ImGui::GetMousePos();
                 if (mouse.x < cp0.x + 8 || mouse.x > cp1.x - 8) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
                 if (ImGui::IsMouseClicked(1)) {
@@ -7635,6 +7871,8 @@ int main(int argc, char* argv[]) {
                 }
             }
         }
+        if (gsZoneClick && !ateGs && !marqueeLive && draggingClip < 0 && trimmingClip < 0)
+            BeginMarquee(1, ImGui::GetMousePos());
         ImGui::EndChild();
 
         ImGui::BeginChild("subslane", ImVec2(timeW + 90.0f, trackH), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
@@ -7645,7 +7883,8 @@ int main(int argc, char* argv[]) {
         subsOriginX = subStart.x;
         subsLaneY = subStart.y - 4.0f;
         ImGui::InvisibleButton("subszone", ImVec2(std::max(10.0f, ImGui::GetContentRegionAvail().x), trackH - 4));
-        bool subEmptyClick = ImGui::IsItemClicked(0) && !TimelinePointerBusy();
+        bool subZoneClick = ImGui::IsItemClicked(0) && !TimelinePointerBusy();
+        bool ateSub = false;
         bool subStyleClick = ImGui::IsItemClicked(1) && !TimelinePointerBusy();
         {
             ImDrawList* sdl = ImGui::GetWindowDrawList();
@@ -7655,23 +7894,29 @@ int main(int argc, char* argv[]) {
                 ImVec2 cp0(x, subStart.y);
                 ImVec2 cp1(x + w, subStart.y + trackH - 8);
                 sdl->AddRectFilled(cp0, cp1, IM_COL32(150, 90, 40, 230), 3.0f);
-                if (i == selectedSub) sdl->AddRect(cp0, cp1, IM_COL32(255, 220, 160, 255), 3.0f, 0, 2.0f);
+                if (i == selectedSub || std::find(subSelection.begin(), subSelection.end(), i) != subSelection.end())
+                    sdl->AddRect(cp0, cp1, IM_COL32(255, 220, 160, 255), 3.0f, 0, i == selectedSub ? 2.0f : 1.2f);
                 std::string label = subs[i].text.empty() ? "Text" : subs[i].text.substr(0, 22);
                 if (HasHebrew(label)) label = ReverseUtf8(label);
                 sdl->AddText(ImVec2(cp0.x + 6, cp0.y + 4), IM_COL32(255, 245, 230, 240), label.c_str());
                 if (!ImGui::IsMouseHoveringRect(cp0, cp1) || TimelinePointerBusy()) continue;
-                subEmptyClick = false;
+                ateSub = true;
                 ImVec2 mouse = ImGui::GetMousePos();
                 if (mouse.x < cp0.x + 8 || mouse.x > cp1.x - 8) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
                 if (ImGui::IsMouseClicked(1)) {
                     selectedSub = i;
+                    subSelection.clear();
+                    subSelection.push_back(i);
                     selectedClip = -1;
+                    selection.clear();
                     subStyleOpen = true;
                     openedPanelThisFrame = true;
                     subStyleClick = false;
                 }
                 if (ImGui::IsMouseClicked(0)) {
                     selectedSub = i;
+                    subSelection.clear();
+                    subSelection.push_back(i);
                     selectedClip = -1;
                     selection.clear();
                     if (mouse.x < cp0.x + 8) { trimmingSub = i; trimSubSide = 0; }
@@ -7685,20 +7930,7 @@ int main(int argc, char* argv[]) {
             }
         }
         if (subStyleClick) { subStyleOpen = true; openedPanelThisFrame = true; }
-        if (subEmptyClick) {
-            Subtitle s;
-            float st = (ImGui::GetMousePos().x - subStart.x) / pixelsPerSecond;
-            s.start = SnapTime(-1, st);
-            s.duration = 3.0f;
-            subs.push_back(s);
-            selectedSub = (int)subs.size() - 1;
-            selectedClip = -1;
-            selection.clear();
-            editingSub = selectedSub;
-            LoadSubEditor("");
-            subEditorOpen = true;
-            openedPanelThisFrame = true;
-        }
+        if (subZoneClick && !ateSub && !marqueeLive) BeginMarquee(3, ImGui::GetMousePos());
         ImGui::EndChild();
 
         for (int t = 0; t < 6; t++) {
@@ -7708,6 +7940,7 @@ int main(int argc, char* argv[]) {
             ImGui::SameLine(46.0f);
             ImVec2 trackStart = ImGui::GetCursorScreenPos();
             trackPositions[t] = trackStart;
+            trackLanePos[t] = trackStart;
             float trackW = ImGui::GetContentRegionAvail().x;
             ImGui::InvisibleButton("dropzone", ImVec2(trackW, trackH - 4));
 
@@ -7792,6 +8025,7 @@ int main(int argc, char* argv[]) {
                 }
             }
 
+            bool ateClip = false;
             if (draggingClip < 0 && trimmingClip < 0 && dragVolClip < 0) {
                 for (int i = (int)clips.size() - 1; i >= 0; --i) {
                     if (clips[i].track != t) continue;
@@ -7800,6 +8034,7 @@ int main(int argc, char* argv[]) {
                     ImVec2 cp0(x, trackStart.y);
                     ImVec2 cp1(x + w, trackStart.y + trackH - 8);
                     if (!ImGui::IsMouseHoveringRect(cp0, cp1) || TimelinePointerBusy()) continue;
+                    if (ImGui::IsMouseClicked(0) || ImGui::IsMouseClicked(1) || ImGui::IsMouseDoubleClicked(0)) ateClip = true;
                     ImVec2 mouse = ImGui::GetMousePos();
                     if (ImGui::IsMouseClicked(0) && std::fabs(mouse.x - (trackStart.x + currentTime * pixelsPerSecond)) <= 6.0f) {
                         draggingPlayhead = true;
@@ -7869,11 +8104,65 @@ int main(int argc, char* argv[]) {
                     break;
                 }
             }
+            if (!ateClip && ImGui::IsItemClicked(0) && !TimelinePointerBusy()
+                && draggingClip < 0 && trimmingClip < 0 && dragVolClip < 0 && !marqueeLive) {
+                ImVec2 mouse = ImGui::GetMousePos();
+                float phx = trackStart.x + currentTime * pixelsPerSecond;
+                if (std::fabs(mouse.x - phx) <= 6.0f) {
+                    draggingPlayhead = true;
+                    shownLocal = -1000.0f;
+#ifdef HAVE_FFMPEG
+                    ResetAudioSync();
+                    if (player) player->lastPts = -1;
+#endif
+                } else {
+                    BeginMarquee(t < 3 ? 1 : 2, mouse);
+                }
+            }
             ImGui::EndChild();
             ImGui::PopID();
         }
 
         if (TimelinePointerBusy()) ClearTimelineDrags();
+
+        if (marqueeLive) {
+            if (ImGui::IsMouseDown(0)) {
+                ImVec2 m = ImGui::GetMousePos();
+                float dx = m.x - marqueeStart.x;
+                float dy = m.y - marqueeStart.y;
+                if (dx * dx + dy * dy > 16.0f) marqueeMoved = true;
+                if (marqueeMoved) {
+                    ApplyMarquee(m);
+                    ImDrawList* fg = ImGui::GetForegroundDrawList();
+                    ImVec2 a(std::min(marqueeStart.x, m.x), std::min(marqueeStart.y, m.y));
+                    ImVec2 b(std::max(marqueeStart.x, m.x), std::max(marqueeStart.y, m.y));
+                    fg->AddRectFilled(a, b, IM_COL32(90, 160, 255, 45));
+                    fg->AddRect(a, b, IM_COL32(190, 220, 255, 230), 0.0f, 0, 1.5f);
+                }
+            } else {
+                if (marqueeKind == 3 && !marqueeMoved) {
+                    Subtitle s;
+                    float st = (marqueeStart.x - subsOriginX) / pixelsPerSecond;
+                    if (st < 0) st = 0;
+                    s.start = SnapTime(-1, st);
+                    s.duration = 3.0f;
+                    subs.push_back(s);
+                    selectedSub = (int)subs.size() - 1;
+                    subSelection.clear();
+                    subSelection.push_back(selectedSub);
+                    selectedClip = -1;
+                    selection.clear();
+                    selectedBus = -1;
+                    editingSub = selectedSub;
+                    LoadSubEditor("");
+                    subEditorOpen = true;
+                    openedPanelThisFrame = true;
+                }
+                marqueeLive = false;
+                marqueeKind = 0;
+                marqueeMoved = false;
+            }
+        }
 
         if (dragVolClip >= 0 && dragVolClip < (int)clips.size() && clips[dragVolClip].track >= 0 && clips[dragVolClip].track < 6) {
             if (ImGui::IsMouseDown(0) && dragVolPt >= 0 && dragVolPt < (int)clips[dragVolClip].volume.size()) {

@@ -80,8 +80,8 @@ void SampleScaled(const uint8_t* img, int w, int h, float u, float v, float scal
     u = (u - 0.5f) / scale + 0.5f;
     v = (v - 0.5f) / scale + 0.5f;
     if (u < 0.0f || v < 0.0f || u >= 1.0f || v >= 1.0f) { r = g = b = 0; return; }
-    int x = (int)(u * (float)(w - 1));
-    int y = (int)(v * (float)(h - 1));
+    int x = (int)(u * (float)w);
+    int y = (int)(v * (float)h);
     if (x < 0) x = 0;
     if (y < 0) y = 0;
     if (x >= w) x = w - 1;
