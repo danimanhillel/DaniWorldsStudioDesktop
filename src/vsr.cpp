@@ -78,11 +78,8 @@ void Log(const std::wstring& dir, const std::string& line) {
 
 std::wstring FindModel(const std::wstring& dir) {
     const wchar_t* names[] = {
-        L"models\\basicvsrpp.onnx",
-        L"models\\basicvsr_pp.onnx",
-        L"models\\BasicVSR++.onnx",
-        L"basicvsrpp.onnx",
-        L"basicvsr_pp.onnx"
+        L"models\\swinir_realsr_x4.onnx",
+        L"swinir_realsr_x4.onnx"
     };
     for (const wchar_t* n : names) {
         std::wstring p = dir + n;
@@ -146,18 +143,18 @@ bool ReadSpec(size_t index, bool input, Spec& spec, std::string& err) {
     char* name = nullptr;
     OrtStatus* st = input ? gApi->SessionGetInputName(gSession, index, gAlloc, &name)
                           : gApi->SessionGetOutputName(gSession, index, gAlloc, &name);
-    if (!Ok(st, err, "BasicVSR++")) return false;
+    if (!Ok(st, err, "SwinIR")) return false;
     spec.name = name ? name : "";
     if (name) gAlloc->Free(gAlloc, name);
     OrtTypeInfo* type = nullptr;
     st = input ? gApi->SessionGetInputTypeInfo(gSession, index, &type)
                : gApi->SessionGetOutputTypeInfo(gSession, index, &type);
-    if (!Ok(st, err, "BasicVSR++")) return false;
+    if (!Ok(st, err, "SwinIR")) return false;
     const OrtTensorTypeAndShapeInfo* tensor = nullptr;
     if (type) gApi->CastTypeInfoToTensorInfo(type, &tensor);
     if (!tensor) {
         if (type) gApi->ReleaseTypeInfo(type);
-        err = "BasicVSR++ model input is not a tensor";
+        err = "SwinIR model input is not a tensor";
         return false;
     }
     size_t rank = 0;
@@ -309,7 +306,7 @@ bool AttachCuda(OrtSessionOptions* opt, const std::wstring& dir, std::string& wh
 const VsrInfo& VsrProbe() {
 #ifndef _WIN32
     gInfo.files = false;
-    gInfo.detail = "BasicVSR++ is available on Windows";
+    gInfo.detail = "SwinIR is available on Windows";
     return gInfo;
 #else
     std::wstring dir = ExeDir();
@@ -318,13 +315,13 @@ const VsrInfo& VsrProbe() {
     gInfo.files = !model.empty() && dll;
     if (gInfo.ready) return gInfo;
     if (model.empty() && !dll)
-        gInfo.detail = "Put models\\basicvsrpp.onnx and onnxruntime.dll next to the program";
+        gInfo.detail = "Put models\\swinir_realsr_x4.onnx and onnxruntime.dll next to the program";
     else if (model.empty())
-        gInfo.detail = "Put models\\basicvsrpp.onnx next to the program";
+        gInfo.detail = "Put models\\swinir_realsr_x4.onnx next to the program";
     else if (!dll)
         gInfo.detail = "Put onnxruntime.dll next to the program";
     else
-        gInfo.detail = "BasicVSR++ model found";
+        gInfo.detail = "SwinIR model found";
     return gInfo;
 #endif
 }
@@ -332,11 +329,11 @@ const VsrInfo& VsrProbe() {
 bool VsrStartup(std::string& err) {
     VsrShutdown();
 #ifndef _WIN32
-    err = "BasicVSR++ is available on Windows";
+    err = "SwinIR is available on Windows";
     return false;
 #else
     std::wstring dir = ExeDir();
-    Log(dir, "---- BasicVSR++ load ----");
+    Log(dir, "---- SwinIR load ----");
     std::wstring dll = dir + L"onnxruntime.dll";
     gOrt = LoadLibraryW(dll.c_str());
     if (!gOrt) gOrt = LoadLibraryW(L"onnxruntime.dll");
@@ -369,18 +366,18 @@ bool VsrStartup(std::string& err) {
     }
     std::wstring model = FindModel(dir);
     if (model.empty()) {
-        err = "Put models\\basicvsrpp.onnx next to the program";
+        err = "Put models\\swinir_realsr_x4.onnx next to the program";
         gInfo.detail = err;
         VsrShutdown();
         return false;
     }
     Log(dir, "model " + Narrow(model));
-    if (!Ok(gApi->CreateEnv(ORT_LOGGING_LEVEL_ERROR, "vsr", &gEnv), err, "BasicVSR++")) {
+    if (!Ok(gApi->CreateEnv(ORT_LOGGING_LEVEL_ERROR, "vsr", &gEnv), err, "SwinIR")) {
         VsrShutdown();
         return false;
     }
     OrtSessionOptions* opt = nullptr;
-    if (!Ok(gApi->CreateSessionOptions(&opt), err, "BasicVSR++")) {
+    if (!Ok(gApi->CreateSessionOptions(&opt), err, "SwinIR")) {
         VsrShutdown();
         return false;
     }
@@ -390,11 +387,11 @@ bool VsrStartup(std::string& err) {
     AttachCuda(opt, dir, cudaWhy);
     OrtStatus* created = gApi->CreateSession(gEnv, model.c_str(), opt, &gSession);
     gApi->ReleaseSessionOptions(opt);
-    if (!Ok(created, err, "BasicVSR++ model")) {
+    if (!Ok(created, err, "SwinIR model")) {
         VsrShutdown();
         return false;
     }
-    if (!Ok(gApi->GetAllocatorWithDefaultOptions(&gAlloc), err, "BasicVSR++")) {
+    if (!Ok(gApi->GetAllocatorWithDefaultOptions(&gAlloc), err, "SwinIR")) {
         VsrShutdown();
         return false;
     }
@@ -402,7 +399,7 @@ bool VsrStartup(std::string& err) {
     gApi->SessionGetInputCount(gSession, &nIn);
     gApi->SessionGetOutputCount(gSession, &nOut);
     if (nIn < 1 || nOut < 1) {
-        err = "This ONNX file is not a BasicVSR++ model";
+        err = "This ONNX file is not a SwinIR model";
         VsrShutdown();
         return false;
     }
@@ -435,26 +432,26 @@ bool VsrStartup(std::string& err) {
         }
     }
     if (!haveImage || imageCount != 1 || inputs.size() > (gScaleName.empty() ? 1u : 2u)) {
-        err = "BasicVSR++ inputs were not recognized (" + listed + ")";
+        err = "SwinIR inputs were not recognized (" + listed + ")";
         gInfo.detail = err;
         VsrShutdown();
         return false;
     }
     if (image.type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
-        err = "BasicVSR++ model must use float frames";
+        err = "SwinIR model must use float frames";
         gInfo.detail = err;
         VsrShutdown();
         return false;
     }
     gLayout = Detect(image);
     if (gLayout == LayNone) {
-        err = "BasicVSR++ inputs were not recognized (" + listed + ")";
+        err = "SwinIR inputs were not recognized (" + listed + ")";
         VsrShutdown();
         return false;
     }
     gWindow = WindowOf(gLayout, image);
     if (gWindow > 31) {
-        err = "This BasicVSR++ model wants too many frames at once";
+        err = "This SwinIR model wants too many frames at once";
         gInfo.detail = err;
         VsrShutdown();
         return false;
@@ -478,7 +475,7 @@ bool VsrStartup(std::string& err) {
     gShape.scaleHint = hint;
     gInfo.ready = true;
     gInfo.files = true;
-    gInfo.detail = std::string(gInfo.cuda ? "BasicVSR++ on GPU" : "BasicVSR++ on CPU. See vsr.log");
+    gInfo.detail = std::string(gInfo.cuda ? "SwinIR on GPU" : "SwinIR on CPU. See vsr.log");
     gInfo.detail += " window " + std::to_string(gWindow);
     Log(dir, gInfo.detail + " layout " + LayoutName(gLayout));
     if (hint) Log(dir, "graph scale " + std::to_string(hint));
@@ -502,18 +499,22 @@ bool VsrRunTile(const std::vector<std::vector<uint8_t>>& frames, int w, int h,
                 int x0, int y0, int tw, int th, std::vector<uint8_t>& hrOut, int& scaleOut, std::string& err) {
     scaleOut = 0;
     if (!gApi || !gSession || tw < 2 || th < 2 || w < 2 || h < 2) {
-        err = "BasicVSR++ is not loaded";
+        err = "SwinIR is not loaded";
+        return false;
+    }
+    if ((gShape.fixedW > 0 && tw != gShape.fixedW) || (gShape.fixedH > 0 && th != gShape.fixedH)) {
+        err = "SwinIR only accepts its fixed tile size";
         return false;
     }
     int T = gWindow;
     if ((int)frames.size() < T) {
-        err = "BasicVSR++ did not get enough frames";
+        err = "SwinIR did not get enough frames";
         return false;
     }
     size_t need = (size_t)w * (size_t)h * 4;
     for (int i = 0; i < T; i++) {
         if (frames[(size_t)i].size() < need) {
-            err = "BasicVSR++ frame is the wrong size";
+            err = "SwinIR frame is the wrong size";
             return false;
         }
     }
@@ -539,7 +540,7 @@ bool VsrRunTile(const std::vector<std::vector<uint8_t>>& frames, int w, int h,
     }
     OrtMemoryInfo* mem = nullptr;
     if (gApi->CreateCpuMemoryInfo(OrtDeviceAllocator, OrtMemTypeCPU, &mem)) {
-        err = "BasicVSR++ could not use memory";
+        err = "SwinIR could not use memory";
         return false;
     }
     int64_t shape[5] = {};
@@ -571,7 +572,7 @@ bool VsrRunTile(const std::vector<std::vector<uint8_t>>& frames, int w, int h,
         if (input) gApi->ReleaseValue(input);
         if (scaleVal) gApi->ReleaseValue(scaleVal);
         gApi->ReleaseMemoryInfo(mem);
-        err = "BasicVSR++ could not build the input";
+        err = "SwinIR could not build the input";
         return false;
     }
     const char* names[2] = {gImageName.c_str(), gScaleName.c_str()};
@@ -586,16 +587,16 @@ bool VsrRunTile(const std::vector<std::vector<uint8_t>>& frames, int w, int h,
     if (st || !result) {
         if (st) {
             const char* m = gApi->GetErrorMessage(st);
-            err = std::string("BasicVSR++: ") + (m ? m : "run failed");
+            err = std::string("SwinIR: ") + (m ? m : "run failed");
             gApi->ReleaseStatus(st);
-        } else err = "BasicVSR++ returned nothing";
+        } else err = "SwinIR returned nothing";
         if (result) gApi->ReleaseValue(result);
         return false;
     }
     OrtTensorTypeAndShapeInfo* info = nullptr;
     if (gApi->GetTensorTypeAndShape(result, &info) || !info) {
         gApi->ReleaseValue(result);
-        err = "BasicVSR++ output has no shape";
+        err = "SwinIR output has no shape";
         return false;
     }
     size_t orank = 0;
@@ -622,7 +623,7 @@ bool VsrRunTile(const std::vector<std::vector<uint8_t>>& frames, int w, int h,
     }
     if (!found || hAxis < 0) {
         gApi->ReleaseValue(result);
-        err = "BasicVSR++ output size was not recognized";
+        err = "SwinIR output size was not recognized";
         return false;
     }
     int cAxis = -1, tAxis = -1;
@@ -633,7 +634,7 @@ bool VsrRunTile(const std::vector<std::vector<uint8_t>>& frames, int w, int h,
     }
     if (cAxis < 0) {
         gApi->ReleaseValue(result);
-        err = "BasicVSR++ output is not RGB";
+        err = "SwinIR output is not RGB";
         return false;
     }
     int center = 0;
@@ -645,7 +646,7 @@ bool VsrRunTile(const std::vector<std::vector<uint8_t>>& frames, int w, int h,
     void* raw = nullptr;
     if (gApi->GetTensorMutableData(result, &raw) || !raw) {
         gApi->ReleaseValue(result);
-        err = "BasicVSR++ output is empty";
+        err = "SwinIR output is empty";
         return false;
     }
     auto at = [&](int y, int x, int c) -> float {
@@ -661,7 +662,7 @@ bool VsrRunTile(const std::vector<std::vector<uint8_t>>& frames, int w, int h,
     };
     if (otype != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT && otype != ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8) {
         gApi->ReleaseValue(result);
-        err = "BasicVSR++ output is not a float image";
+        err = "SwinIR output is not a float image";
         return false;
     }
     float peak = 0.0f;
@@ -673,7 +674,7 @@ bool VsrRunTile(const std::vector<std::vector<uint8_t>>& frames, int w, int h,
             }
         }
     }
-    float mul = peak > 1.5f ? (1.0f / 255.0f) : 1.0f;
+    float mul = peak > 16.0f ? (1.0f / 255.0f) : 1.0f;
     hrOut.assign((size_t)ow * (size_t)oh * 4, 255);
     for (int y = 0; y < oh; y++) {
         for (int x = 0; x < ow; x++) {

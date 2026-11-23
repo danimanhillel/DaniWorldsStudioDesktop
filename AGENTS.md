@@ -11,5 +11,5 @@ ripple insert, panels-above-timeline, or the BasicVSR++ → RIFE export order.
 - Git author and committer: `danimanhillel` / `danimanhillel@users.noreply.github.com`,
   set on the `git commit` command itself. Never `git config`.
 - Reply to the user in Hebrew. Do not vendor ONNX weights or `onnxruntime.dll`.
-- The build does not download `models\basicvsrpp.onnx`. There is no official
-  ONNX of that model; a `.pth` renamed to `.onnx` will not load.
+- The build does not download `models\swinir_realsr_x4.onnx`. The export
+  checkbox is SwinIR x4 (64×64 tiles), not BasicVSR++. Same `onnxruntime.dll` as RIFE.

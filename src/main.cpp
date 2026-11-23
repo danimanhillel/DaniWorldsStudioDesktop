@@ -2750,15 +2750,15 @@ bool ExportSession::Begin(const std::string& outPath, int width, int height, int
     }
     if (useVsr) {
         if (rifeOn && (fullW > 3840 || fullH > 3840)) {
-            Fail("Frame interpolation stops above 3840, so it cannot follow BasicVSR++ at this size. Uncheck it.");
+            Fail("Frame interpolation stops above 3840, so it cannot follow SwinIR at this size. Uncheck it.");
             return false;
         }
         if (!VsrProbe().files) { Fail(VsrProbe().detail.c_str()); return false; }
-        int scale = ((fullW % 4) == 0 && (fullH % 4) == 0) ? 4 : 2;
-        if ((fullW % scale) || (fullH % scale) || fullW / scale < 16 || fullH / scale < 16) {
-            Fail("This export size is too small to upscale with BasicVSR++");
+        if ((fullW % 4) || (fullH % 4) || fullW / 4 < 16 || fullH / 4 < 16) {
+            Fail("SwinIR upscales exactly 4x. This export size is too small or not divisible by 4.");
             return false;
         }
+        int scale = 4;
         vsrOn = true;
         vsrScale = scale;
         w = fullW / scale;
@@ -2927,8 +2927,8 @@ bool ExportSession::Begin(const std::string& outPath, int width, int height, int
     int showH = fullH > 0 ? fullH : h;
     int showFps = rifeOn ? outFps : framesPerSec;
     const char* later = "";
-    if (vsrOn && rifeOn) later = " then BasicVSR++ and RIFE";
-    else if (vsrOn) later = " then BasicVSR++";
+    if (vsrOn && rifeOn) later = " then SwinIR and RIFE";
+    else if (vsrOn) later = " then SwinIR";
     else if (rifeOn) later = " then RIFE";
     snprintf(buf, sizeof(buf), "Exporting %dx%d %d fps %s%s%s", showW, showH, showFps, encLabel, videoOnly ? " (no audio)" : "", later);
     status = buf;
@@ -4046,9 +4046,9 @@ void ExportSession::Step() {
     int pct = total ? (frameIndex * 100) / total : 0;
     char buf[192];
     if (vsrOn && rifeOn)
-        snprintf(buf, sizeof(buf), "Rendering %d%%  (%d/%d)  then BasicVSR++ and RIFE", pct, frameIndex, total);
+        snprintf(buf, sizeof(buf), "Rendering %d%%  (%d/%d)  then SwinIR and RIFE", pct, frameIndex, total);
     else if (vsrOn)
-        snprintf(buf, sizeof(buf), "Rendering %d%%  (%d/%d)  then BasicVSR++", pct, frameIndex, total);
+        snprintf(buf, sizeof(buf), "Rendering %d%%  (%d/%d)  then SwinIR", pct, frameIndex, total);
     else if (rifeOn)
         snprintf(buf, sizeof(buf), "Rendering %d%%  (%d/%d)  then RIFE", pct, frameIndex, total);
     else
@@ -4211,8 +4211,9 @@ void ExportSession::BuildVsrTiles() {
         return;
     }
     int overlap = 16;
-    if (overlap * 2 >= tileW) overlap = std::max(0, tileW / 8);
-    if (overlap * 2 >= tileH) overlap = std::max(0, tileH / 8);
+    if (fixed) overlap = std::max(8, std::min(tileW, tileH) / 2);
+    if (overlap >= tileW) overlap = std::max(0, tileW / 2);
+    if (overlap >= tileH) overlap = std::max(0, tileH / 2);
     int strideX = std::max(1, tileW - overlap);
     int strideY = std::max(1, tileH - overlap);
     for (int y = 0;;) {
@@ -4249,14 +4250,14 @@ bool ExportSession::BeginVsrPass() {
     vsrTotal = total;
     std::string src = vsrSrc;
     std::string dest = (rifeOn && !tempPath.empty()) ? tempPath : finalPath;
-    if (src.empty() || dest.empty() || lrW < 2 || lrH < 2) { Fail("BasicVSR++ export is not ready"); return false; }
+    if (src.empty() || dest.empty() || lrW < 2 || lrH < 2) { Fail("SwinIR export is not ready"); return false; }
     SealPass();
     std::string err;
     if (!VsrStartup(err)) { Fail(err.c_str()); return false; }
     VsrShape sh = VsrQuery();
     if (sh.scaleHint > 1 && sh.scaleHint != vsrScale) {
         char b[240];
-        snprintf(b, sizeof(b), "This BasicVSR++ model upscales %dx, but this export used %dx. Put a %dx model in models\\basicvsrpp.onnx", sh.scaleHint, vsrScale, vsrScale);
+        snprintf(b, sizeof(b), "This SwinIR model upscales %dx, but this export used %dx. Put models\\swinir_realsr_x4.onnx next to the program", sh.scaleHint, vsrScale);
         Fail(b);
         return false;
     }
@@ -4393,7 +4394,7 @@ bool ExportSession::BeginVsrPass() {
     vsrPrimed = false;
     vsrTile = 0;
     phase = 2;
-    status = VsrProbe().cuda ? "BasicVSR++ GPU" : VsrProbe().detail;
+    status = VsrProbe().cuda ? "SwinIR GPU" : VsrProbe().detail;
     previewStatus = status;
     return true;
 }
@@ -4409,11 +4410,11 @@ void ExportSession::StepVsr() {
     if (!vsrPrimed) {
         if (!PrimeVsrWindow()) return;
         BuildVsrTiles();
-        if (vsrTiles.empty()) { Fail("BasicVSR++ tile setup failed"); return; }
+        if (vsrTiles.empty()) { Fail("SwinIR tile setup failed"); return; }
         vsrPrimed = true;
         vsrTile = 0;
         if (vsrHR.size() != (size_t)fullW * (size_t)fullH * 4) vsrHR.assign((size_t)fullW * (size_t)fullH * 4, 0);
-        status = VsrProbe().cuda ? "BasicVSR++ GPU" : "BasicVSR++ CPU";
+        status = VsrProbe().cuda ? "SwinIR GPU" : "SwinIR CPU";
         previewStatus = status;
         return;
     }
@@ -4424,20 +4425,20 @@ void ExportSession::StepVsr() {
         int gotScale = 0;
         std::string err;
         if (!VsrRunTile(vsrWin, lrW, lrH, tile.x, tile.y, tile.tw, tile.th, hr, gotScale, err)) {
-            if (err.empty()) err = "BasicVSR++ failed on a frame";
+            if (err.empty()) err = "SwinIR failed on a frame";
             Fail(err.c_str());
             return;
         }
         if (gotScale != vsrScale) {
             char b[240];
-            snprintf(b, sizeof(b), "This BasicVSR++ model upscales %dx, but this export used %dx. Put a %dx model in models\\basicvsrpp.onnx", gotScale, vsrScale, vsrScale);
+            snprintf(b, sizeof(b), "This SwinIR model upscales %dx, but this export used %dx. Put models\\swinir_realsr_x4.onnx next to the program", gotScale, vsrScale);
             Fail(b);
             return;
         }
         int tileWpx = tile.tw * gotScale;
         int tileHpx = tile.th * gotScale;
         if (tileWpx < 1 || tileHpx < 1 || hr.size() < (size_t)tileWpx * (size_t)tileHpx * 4) {
-            Fail("BasicVSR++ returned a short frame");
+            Fail("SwinIR returned a short frame");
             return;
         }
         int dx0 = (tile.x + tile.cx) * gotScale;
@@ -4466,9 +4467,9 @@ void ExportSession::StepVsr() {
         char buf[192];
         const char* dev = VsrProbe().cuda ? "GPU" : "CPU";
         if ((int)vsrTiles.size() > 1)
-            snprintf(buf, sizeof(buf), "BasicVSR++ %s %d%%  (%d/%d)  tile %d/%d", dev, pct, vsrFrame, vsrTotal, vsrTile, (int)vsrTiles.size());
+            snprintf(buf, sizeof(buf), "SwinIR %s %d%%  (%d/%d)  tile %d/%d", dev, pct, vsrFrame, vsrTotal, vsrTile, (int)vsrTiles.size());
         else
-            snprintf(buf, sizeof(buf), "BasicVSR++ %s %d%%  (%d/%d)", dev, pct, vsrFrame, vsrTotal);
+            snprintf(buf, sizeof(buf), "SwinIR %s %d%%  (%d/%d)", dev, pct, vsrFrame, vsrTotal);
         status = buf;
         previewStatus = status;
         return;
@@ -9089,8 +9090,8 @@ int main(int argc, char* argv[]) {
             ImGui::Separator();
             ImGui::Text("Output: %d x %d   @ %d fps", ew, eh, fps);
             if (exRes == 3 || exRes == 4) ImGui::TextDisabled("4K and 8K take a long time.");
-            ImGui::Checkbox("BasicVSR++", &exVsr);
-            ImGui::TextDisabled("Renders smaller, then upscales to this resolution before frame interpolation.");
+            ImGui::Checkbox("SwinIR", &exVsr);
+            ImGui::TextDisabled("High quality. Renders at 1/4, then SwinIR restores this resolution before frame interpolation.");
             ImGui::TextDisabled("%s", VsrProbe().detail.c_str());
             ImGui::Checkbox("Frame interpolation", &exRife);
             ImGui::TextDisabled("Renders the movie first, then fills frames on the GPU. 50 or 60 fps. Subtitles are added after.");

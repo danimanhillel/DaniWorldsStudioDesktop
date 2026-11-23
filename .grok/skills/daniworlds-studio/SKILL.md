@@ -3,10 +3,10 @@ name: daniworlds-studio
 description: >
   DaniWorldsStudioDesktop, the Windows C++/SDL2/ImGui/OpenGL/FFmpeg video editor
   at github.com/danimanhillel/DaniWorldsStudioDesktop (local mirror /tmp/dws).
-  Open this BEFORE any edit, bugfix, export, preview, timeline, RIFE, BasicVSR++,
+  Open this BEFORE any edit, bugfix, export, preview, timeline, RIFE, SwinIR,
   Whisper, green-screen, transform, undo, or build talk about that editor.
   Triggers: DaniWorlds, DaniWorldsStudio, DaniWorldsStudioDesktop, "העורך",
-  טיימליין, ייצוא, RIFE, BasicVSR, onnxruntime, preview jump, ripple, solids.
+  טיימליין, ייצוא, RIFE, SwinIR, BasicVSR, onnxruntime, preview jump, ripple, solids.
 metadata:
   short-description: "DaniWorlds desktop editor: invariants, export, git, build"
 user-invocable: true
@@ -29,7 +29,7 @@ not tell them to rebuild.
 |---|---|
 | Remote | `github.com/danimanhillel/DaniWorldsStudioDesktop`, branch `main` |
 | Local mirror | `/tmp/dws` |
-| Skill written against | `39424d8` — BasicVSR++ upscale before RIFE |
+| Skill written against | SwinIR x4 export upscale (checkbox still `exVsr`) |
 
 Sources: `src/main.cpp` (almost all UI, timeline, preview, export), `effects.cpp`,
 `overlay_fx.cpp`, `rife.cpp` / `rife.h`, `vsr.cpp` / `vsr.h`, `asr.cpp` / `asr.h`,
@@ -71,10 +71,10 @@ new generator or a clean rebuild unless they ask.
 - Do not add a feature they did not ask for. A bugfix does not get a refactor.
 - Do not redo a shipped commit (list at the bottom). Read the code first; the
   summary in chat can be stale relative to `main`.
-- Do not vendor `basicvsrpp.onnx`, RIFE onnx, or ORT DLLs. CMake `POST_BUILD`
+- Do not vendor `swinir_realsr_x4.onnx`, RIFE onnx, or ORT DLLs. CMake `POST_BUILD`
   copies **only** `models/mel80.bin` and `models/multilingual.tiktoken` next to
   the exe. The build does **not** download models or DLLs.
-- Do not silently bilinear-upscale when BasicVSR++ or the DLL is missing.
+- Do not silently bilinear-upscale when SwinIR or the DLL is missing.
 - Declare functions and globals **before** use. MSVC is not gcc: `C2065` /
   `C3861` (`gSolidTex`, `ClipBelow` — fixed in `33115fc`). `AddClipOnTrack` must
   **not** call `SelectOnly` (defined later). Callers `SelectOnly` after the drop.
@@ -320,15 +320,15 @@ Phases:
 1. RIFE (`BeginRifePass` / `StepRife`), only if `exRife` and fps `>= 48` and even.
    The render is at `fps/2` into `outPath + ".rife-tmp.mp4"`, then RIFE writes
    the final file at `outFps`. `RifeRun` **refuses** `w` or `h` `> 3840`.
-2. BasicVSR++ (`BeginVsrPass` / `StepVsr`) when `exVsr`. This phase runs
-   **before** phase 1. UI treats `phase == 1 || phase == 2` as the GPU step
-   (max 16 steps / 80ms).
+2. SwinIR (`BeginVsrPass` / `StepVsr`) when `exVsr`. The checkbox label is
+   **SwinIR**. This phase runs **before** phase 1. UI treats
+   `phase == 1 || phase == 2` as the GPU step (max 16 steps / 80ms).
 
 Order when both checkboxes are on:
 
-1. Render **small** (scale 4 if both full dims `% 4 == 0`, else scale 2;
-   fail if a side would be `< 16`).
-2. Phase 2 upscales those frames to the chosen `ExportDims`.
+1. Render at **exactly 1/4**. Fail up front if either full side is not divisible
+   by 4 or the low-res side would be `< 16`. There is no 2× fallback.
+2. Phase 2 runs `swinir_realsr_x4.onnx` and writes the chosen `ExportDims`.
 3. `VsrShutdown` + `ReleasePassDecoder`, **then** `BeginRifePass` if `exRife`.
 4. Subtitles burn on the **last full-resolution encode**, never on the low-res
    render.
@@ -345,7 +345,7 @@ before `RifeStartup`.
 
 8K **and** both options is rejected in `Begin`, before the long render:
 
-> Frame interpolation stops above 3840, so it cannot follow BasicVSR++ at this size. Uncheck it.
+> Frame interpolation stops above 3840, so it cannot follow SwinIR at this size. Uncheck it.
 
 8K encoder inside `BeginVsrPass` uses `hevc_nvenc` / `libx265` when `w` or `h`
 `> 4096`. `BeginRifePass` itself is still h264. 8K+RIFE without VSR was
@@ -356,23 +356,26 @@ pattern as `BeginRifePass`), then RIFE copies it again.
 
 Missing model or DLL: fail **immediately** with `VsrProbe().detail`. Do not
 start the render. If the graph's scale hint (or the first tile's measured
-scale) is not the render scale, fail with a message to put a matching-scale
-model in `models\basicvsrpp.onnx`. **No bilinear fallback.**
+scale) is not 4, fail and tell the user to put `models\swinir_realsr_x4.onnx`
+next to the exe. **No bilinear fallback.**
 
-Tiling (`BuildVsrTiles`): if an LR side is `> 640` or the area is `> 640*360`,
-tiles of 256 (multiple of 4) with overlap 16. Otherwise one tile, padded to a
-multiple of 4 and cropped back. One UI step is one tile.
+The published SwinIR file is fixed **64×64 NCHW float RGB in `[0, 1]`** →
+**256×256**, input name `image`, output name `upscaled`, batch is the only
+dynamic axis. `BuildVsrTiles` must feed that exact tile. Fixed-graph tiles use
+overlap `tile/2` (32 on a 64 tile) and keep the inner half so seams stay inside
+the window border. Do not pass a 256 tile into this file. Rank-4 NCHW means
+`T = 1` (one frame at a time). Edge pixels outside the frame are clamped.
+A float peak above **16** is treated as 0–255; SwinIR overshoot just above 1
+must stay in the 0–1 path and be clipped per pixel.
 
-Temporal window: the model's fixed `T` if the graph has one (reject `T > 31`
-at startup), otherwise 7. Keep the center frame (`T/2`). Pad the edges by
-repeating the first or last frame.
-
-Checkbox order in the export popup: **BasicVSR++** immediately **before**
+Checkbox order in the export popup: **SwinIR** immediately **before**
 "Frame interpolation", and the checkbox shows `VsrProbe().detail`.
 
 ### ONNX layout the loader accepts (`vsr.cpp`)
 
-One float image tensor, rank 4 or 5, optional scalar scale.
+One float image tensor, rank 4 or 5, optional scalar scale. SwinIR is rank 4
+NCHW. The older rank-5 layouts are still recognized, but the checkbox looks
+only for the SwinIR filename.
 
 | Rank | Test | Layout |
 |---|---|---|
@@ -385,21 +388,20 @@ One float image tensor, rank 4 or 5, optional scalar scale.
 
 Output spatial size is the axis pair that is the same integer multiple (1–8)
 of the tile. Center time index is `T/2` when the output has a time axis.
-Float peak `> 1.5` is treated as 0–255.
 
 Files probed **next to the exe** (not in the repo):
 
-- `models\basicvsrpp.onnx`
-- `models\basicvsr_pp.onnx`
-- `models\BasicVSR++.onnx`
-- `basicvsrpp.onnx`
-- `basicvsr_pp.onnx`
+- `models\swinir_realsr_x4.onnx`
+- `swinir_realsr_x4.onnx`
 - `onnxruntime.dll`
+
+Do not look for `basicvsrpp.onnx` anymore. There is still no official
+BasicVSR++ ONNX; do not switch the checkbox back to it unless the user asks.
 
 Log: `vsr.log` next to the exe. CUDA preload goes through `RifePrepareCuda`
 → `PreloadCuda` and also writes `rife.log`. Do not `FreeLibrary` RIFE's
 `gKeep`. If CUDA fails, the session falls back to CPU and the status says CPU.
-Linux stubs say "BasicVSR++ is available on Windows".
+Linux stubs say "SwinIR is available on Windows".
 
 ### Models and DLLs — what is actually downloadable
 
@@ -407,17 +409,11 @@ Linux stubs say "BasicVSR++ is available on Windows".
 - If RIFE already runs, **reuse** the `onnxruntime.dll` already next to the
   exe (and `onnxruntime_providers_cuda.dll` /
   `onnxruntime_providers_shared.dll` if they placed them). No second DLL.
-- There is **no** official `basicvsrpp.onnx`. Do not invent a Hugging Face or
-  GitHub link for one.
-- The published weights are PyTorch `.pth` (input `lqs` `[n,t,3,h,w]`, output
-  4×). Renaming `.pth` to `.onnx` does **not** work. The editor only loads ONNX.
-- Verified weight file (HTTP 200, **not** loadable by the checkbox):
-  `https://github.com/HolyWu/vs-basicvsrpp/releases/download/model/basicvsr_plusplus_c64n7_8x1_600k_reds4_20210217-db622b2f.pth`
-- Do **not** send guessed ONNX Runtime zip URLs. `v1.30.1` win-x64
-  `gpu_cuda13` and the matching CPU zip both 404'd, and
-  `api.github.com/repos/microsoft/onnxruntime/releases/latest` also 404'd.
-  The user already has CUDA 13 + cuDNN + `zlibwapi` working for RIFE.
-- Do not start a `.pth` → ONNX conversion unless they ask.
+- SwinIR file (HTTP 200, about 122MB, **not** vendored):
+  `https://huggingface.co/Heliosoph/swinir-onnx/resolve/main/swinir_realsr_x4.onnx`
+  Put it in `models\swinir_realsr_x4.onnx` next to the exe.
+- Do **not** send guessed ONNX Runtime zip URLs. The user already has CUDA 13
+  + cuDNN + `zlibwapi` working for RIFE.
 
 ### RIFE (already shipped)
 
