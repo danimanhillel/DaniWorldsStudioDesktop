@@ -425,6 +425,12 @@ static AVFrame* DownloadFrame(HwDec* hw, AVFrame* frame) {
     return hw->sw;
 }
 
+void BuildSolidPixels(int kind, std::vector<uint8_t>& px, int W, int H);
+int SolidKindFromPath(const std::string& path);
+bool IsSolidPath(const std::string& path);
+bool SolidHasAlpha(const std::string& path);
+void EnsureSolidThumbs();
+
 class VideoPlayer {
 public:
     AVFormatContext* fmtCtx = nullptr;
@@ -439,6 +445,7 @@ public:
     int srcW = 0, srcH = 0;
     GLuint texture = 0;
     bool hasFrame = false;
+    bool still = false;
     double lastPts = -1;
     AVPixelFormat swsFmt = AV_PIX_FMT_NONE;
     const char* decName = "CPU";
@@ -448,6 +455,18 @@ public:
 
     bool Open(const std::string& path) {
         Close();
+        if (path.rfind("solid:", 0) == 0) {
+            int kind = 0;
+            if (path == "solid:bars") kind = 1;
+            else if (path == "solid:green") kind = 2;
+            std::vector<uint8_t> px;
+            BuildSolidPixels(kind, px, 640, 360);
+            still = true;
+            decName = "Solid";
+            lastPts = 0;
+            lastError.clear();
+            return ShowRGBA(px.data(), 640, 360);
+        }
         if (avformat_open_input(&fmtCtx, path.c_str(), nullptr, nullptr) < 0) {
             lastError = "Cannot open file"; return false;
         }
@@ -531,6 +550,7 @@ public:
     }
 
     void Seek(float seconds) {
+        if (still) { lastPts = 0; return; }
         if (!fmtCtx || videoStream < 0 || !codecCtx) return;
         int64_t ts = (int64_t)(seconds / av_q2d(fmtCtx->streams[videoStream]->time_base));
         av_seek_frame(fmtCtx, videoStream, ts, AVSEEK_FLAG_BACKWARD);
@@ -539,6 +559,7 @@ public:
     }
 
     bool GrabFrame() {
+        if (still) { lastPts = 0; return hasFrame; }
         if (!fmtCtx || !codecCtx) return false;
         AVPacket* packet = av_packet_alloc();
         int reads = 0;
@@ -608,6 +629,7 @@ public:
         lastPts = -1;
         swsFmt = AV_PIX_FMT_NONE;
         decName = "CPU";
+        still = false;
     }
 };
 
@@ -972,6 +994,7 @@ struct PreviewRam {
             if (c.track >= 3 && c.track != kGsTrack) continue;
             if (c.mediaId < 0 || c.mediaId >= (int)media.size()) continue;
             if (media[c.mediaId].type == "audio") continue;
+            if (IsSolidPath(media[c.mediaId].path)) continue;
             float clipEnd = c.startTime + c.duration;
             bool image = media[c.mediaId].type == "image";
             float speed = std::max(0.05f, c.speed);
@@ -1163,6 +1186,16 @@ float ProbeDuration(const std::string& path) {
 }
 
 void MakeThumbnail(MediaItem& m) {
+    int solid = SolidKindFromPath(m.path);
+    if (solid >= 0) {
+        EnsureSolidThumbs();
+        m.thumb = gSolidTex[solid];
+        m.thumbW = 320;
+        m.thumbH = 180;
+        m.aspect = 16.0f / 9.0f;
+        if (m.duration < 0.2f) m.duration = 5.0f;
+        return;
+    }
     if (m.type != "video" && m.type != "image") return;
     AVFormatContext* fmt = nullptr;
     if (avformat_open_input(&fmt, m.path.c_str(), nullptr, nullptr) < 0) return;
@@ -2326,6 +2359,15 @@ int ExportSession::OpenDec(int mediaId) {
         if (decs[i].mediaId == mediaId) return i;
     ExpDec d;
     d.mediaId = mediaId;
+    if (mediaId >= 0 && mediaId < (int)media.size() && IsSolidPath(media[mediaId].path)) {
+        BuildSolidPixels(SolidKindFromPath(media[mediaId].path), d.rgba, 640, 360);
+        d.rw = 640;
+        d.rh = 360;
+        d.lastPts = 0;
+        d.imageDone = true;
+        decs.push_back(std::move(d));
+        return (int)decs.size() - 1;
+    }
     if (mediaId < 0 || mediaId >= (int)media.size() ||
         avformat_open_input(&d.fmt, media[mediaId].path.c_str(), nullptr, nullptr) < 0 ||
         avformat_find_stream_info(d.fmt, nullptr) < 0) {
@@ -2396,7 +2438,10 @@ bool ExportSession::ReadOne(ExpDec& d) {
 
 bool ExportSession::EnsureFrame(int mediaId, double mediaTime) {
     int idx = OpenDec(mediaId);
+    if (idx < 0 || idx >= (int)decs.size()) return false;
     ExpDec& d = decs[idx];
+    if (mediaId >= 0 && mediaId < (int)media.size() && IsSolidPath(media[mediaId].path))
+        return d.rw > 0 && !d.rgba.empty();
     if (d.failed || !d.fmt) return false;
     bool isImage = media[mediaId].type == "image";
     if (isImage && d.imageDone) return d.rw > 0;
@@ -2560,9 +2605,22 @@ void ExportSession::BlitToCanvas(int idx, const Clip* place) {
             && std::fabs(place->gsRot) < 0.05f);
     if (plain) {
         for (int y = 0; y < fh; y++) {
-            size_t dst = ((size_t)(oy + y) * (size_t)w + (size_t)ox) * 4;
-            if (dst + (size_t)fw * 4 > canvas.size()) break;
-            memcpy(canvas.data() + dst, d.fitted.data() + (size_t)y * (size_t)fw * 4, (size_t)fw * 4);
+            size_t dstOff = ((size_t)(oy + y) * (size_t)w + (size_t)ox) * 4;
+            const uint8_t* src = d.fitted.data() + (size_t)y * (size_t)fw * 4;
+            if (dstOff + (size_t)fw * 4 > canvas.size()) break;
+            for (int x = 0; x < fw; x++) {
+                const uint8_t* s = src + (size_t)x * 4;
+                uint8_t* dst = canvas.data() + dstOff + (size_t)x * 4;
+                unsigned a = s[3];
+                if (a >= 250) {
+                    dst[0] = s[0]; dst[1] = s[1]; dst[2] = s[2]; dst[3] = 255;
+                } else if (a > 0) {
+                    dst[0] = (uint8_t)((s[0] * a + dst[0] * (255 - a)) / 255);
+                    dst[1] = (uint8_t)((s[1] * a + dst[1] * (255 - a)) / 255);
+                    dst[2] = (uint8_t)((s[2] * a + dst[2] * (255 - a)) / 255);
+                    dst[3] = 255;
+                }
+            }
         }
         return;
     }
@@ -2591,10 +2649,15 @@ void ExportSession::BlitToCanvas(int idx, const Clip* place) {
             if (sx < 0 || sy < 0 || sx >= fw || sy >= fh) continue;
             const uint8_t* s = src + ((size_t)sy * fw + sx) * 4;
             uint8_t* dst = canvas.data() + ((size_t)y * w + x) * 4;
-            dst[0] = s[0];
-            dst[1] = s[1];
-            dst[2] = s[2];
-            dst[3] = 255;
+            unsigned a = s[3];
+            if (a >= 250) {
+                dst[0] = s[0]; dst[1] = s[1]; dst[2] = s[2]; dst[3] = 255;
+            } else if (a > 0) {
+                dst[0] = (uint8_t)((s[0] * a + dst[0] * (255 - a)) / 255);
+                dst[1] = (uint8_t)((s[1] * a + dst[1] * (255 - a)) / 255);
+                dst[2] = (uint8_t)((s[2] * a + dst[2] * (255 - a)) / 255);
+                dst[3] = 255;
+            }
         }
     }
 }
@@ -3652,6 +3715,12 @@ void ExportSession::Step() {
         if (t < clips[i].startTime || t >= clips[i].startTime + clips[i].duration) continue;
         if (clips[i].track <= bestTrack) { bestTrack = clips[i].track; top = i; }
     }
+    int plate = -1;
+    if (top >= 0 && clips[top].mediaId >= 0 && clips[top].mediaId < (int)media.size()
+        && SolidHasAlpha(media[clips[top].mediaId].path)) {
+        plate = top;
+        top = ClipBelow(plate, (float)t);
+    }
     if (top >= 0) {
         int ta = -1, tb = -1;
         float tp = 0;
@@ -3702,6 +3771,11 @@ void ExportSession::Step() {
             BusSegment cg = ClipGradeOf(clips[top]);
             if (BusActive(cg)) GradeCanvas(canvas.data(), w, h, cg, frameIndex);
         }
+    }
+    if (plate >= 0) {
+        const Clip& c = clips[plate];
+        int idx = OpenDec(c.mediaId);
+        if (EnsureFrame(c.mediaId, 0)) BlitToCanvas(idx, &c);
     }
     int gs = FindGsClip((float)t);
     if (gs >= 0) {
@@ -4020,6 +4094,7 @@ void SyncPreview(int topClip, float dt) {
         return;
     }
     if (!player->fmtCtx) {
+        if (player->still && player->hasFrame) previewStatus = "Solid";
         PumpAudio();
         return;
     }
@@ -4068,9 +4143,11 @@ void SyncSide(int clipIdx, float timelineT) {
         playingClipB = clipIdx;
         playingMediaIdB = mid;
         shownLocalB = mediaT;
-        return;
+        bool close = image || std::fabs((float)playerB->lastPts - mediaT) <= 0.045f;
+        if (close) return;
     }
-    if (playingClipB != clipIdx || playingMediaIdB != mid || !playerB->fmtCtx) {
+    bool sideReady = playerB->fmtCtx || (playerB->still && playerB->hasFrame);
+    if (playingClipB != clipIdx || playingMediaIdB != mid || !sideReady) {
         if (playerNext && nextClipIdx == clipIdx && nextMediaId == mid && playerNext->fmtCtx && playerNext->hasFrame) {
             VideoPlayer* old = playerB;
             playerB = playerNext;
@@ -4095,15 +4172,15 @@ void SyncSide(int clipIdx, float timelineT) {
         }
         return;
     }
-    bool ahead = playerB->lastPts >= 0.0 && mediaT + 0.12f < (float)playerB->lastPts;
-    if (playerB->lastPts < 0.0 || ahead) {
-        playerB->Seek(std::max(0.0f, mediaT));
+    bool ahead = playerB->lastPts >= 0.0 && mediaT + 0.08f < (float)playerB->lastPts;
+    bool behind = playerB->lastPts < 0.0 || (float)playerB->lastPts + 0.08f < mediaT;
+    if (ahead || behind) {
+        if (playerB->lastPts < 0.0 || ahead || (float)playerB->lastPts + 0.20f < mediaT)
+            playerB->Seek(std::max(0.0f, mediaT));
         playerB->GrabFrame();
     }
-    int limit = 2;
-    if (playerB->lastPts < 0.0 || (float)playerB->lastPts + 0.08f < mediaT) limit = 400;
     int guard = 0;
-    while (playerB->lastPts >= 0.0 && (float)playerB->lastPts + 0.0005f < mediaT && guard < limit) {
+    while (playerB->lastPts >= 0.0 && (float)playerB->lastPts + 0.0005f < mediaT && guard < 400) {
         if (!playerB->GrabFrame()) break;
         guard++;
     }
@@ -4345,7 +4422,7 @@ static void PictureCorners(ImVec2 a, ImVec2 b, float ox, float oy, float scale, 
 }
 
 void BlitVideo(ImVec2 p0, ImVec2 p1, GLuint tex, int vw, int vh, ImVec2 clip0, ImVec2 clip1,
-               float ox = 0.0f, float oy = 0.0f, float scale = 1.0f, float aspect = 1.0f, float rot = 0.0f) {
+               float ox = 0.0f, float oy = 0.0f, float scale = 1.0f, float aspect = 1.0f, float rot = 0.0f, bool blendAlpha = false) {
     if (!tex || vw <= 0 || vh <= 0) return;
     float areaW = p1.x - p0.x;
     float areaH = p1.y - p0.y;
@@ -4372,12 +4449,23 @@ void BlitVideo(ImVec2 p0, ImVec2 p1, GLuint tex, int vw, int vh, ImVec2 clip0, I
     float sy0 = std::max(moved ? clip0.y : a.y, std::max(0.0f, clip0.y));
     float sx1 = std::min(moved ? clip1.x : b.x, std::min(io.DisplaySize.x, clip1.x));
     float sy1 = std::min(moved ? clip1.y : b.y, std::min(io.DisplaySize.y, clip1.y));
+    if (previewFrameValid) {
+        sx0 = std::max(sx0, previewFrameMin.x);
+        sy0 = std::max(sy0, previewFrameMin.y);
+        sx1 = std::min(sx1, previewFrameMax.x);
+        sy1 = std::min(sy1, previewFrameMax.y);
+    }
     if (sx1 - sx0 < 1.0f || sy1 - sy0 < 1.0f) return;
 
     bool graded = activeGrade && BindGrade(*activeGrade, vw, vh, 1.0f);
     if (!graded && pglUseProgram) pglUseProgram(0);
-    glDisable(GL_BLEND);
     glDisable(GL_DEPTH_TEST);
+    if (blendAlpha) {
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    } else {
+        glDisable(GL_BLEND);
+    }
     glEnable(GL_SCISSOR_TEST);
     glScissor((int)sx0, (int)(io.DisplaySize.y - sy1), std::max(1, (int)(sx1 - sx0)), std::max(1, (int)(sy1 - sy0)));
     glEnable(GL_TEXTURE_2D);
@@ -4408,6 +4496,7 @@ void BlitVideo(ImVec2 p0, ImVec2 p1, GLuint tex, int vw, int vh, ImVec2 clip0, I
     glPopMatrix();
     glMatrixMode(GL_MODELVIEW);
     glDisable(GL_TEXTURE_2D);
+    glDisable(GL_BLEND);
     glDisable(GL_SCISSOR_TEST);
     if (graded && pglUseProgram) pglUseProgram(0);
 }
@@ -4435,6 +4524,12 @@ void BlitFxPair(ImVec2 p0, ImVec2 p1, GLuint texA, int aw, int ah, GLuint texB, 
     float sy0 = std::max(p0.y, 0.0f);
     float sx1 = std::min(p1.x, io.DisplaySize.x);
     float sy1 = std::min(p1.y, io.DisplaySize.y);
+    if (previewFrameValid) {
+        sx0 = std::max(sx0, previewFrameMin.x);
+        sy0 = std::max(sy0, previewFrameMin.y);
+        sx1 = std::min(sx1, previewFrameMax.x);
+        sy1 = std::min(sy1, previewFrameMax.y);
+    }
     if (sx1 - sx0 < 1.0f || sy1 - sy0 < 1.0f) return;
     auto quad = [&](GLuint tex, int tw, int th, float alpha, float effectScale, const Clip* clip) {
         float sc = effectScale * (clip ? clip->gsScale : 1.0f);
@@ -4566,6 +4661,14 @@ void DrawPreviewSubs(ImVec2 pic0, ImVec2 pic1) {
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glEnable(GL_TEXTURE_2D);
     glBindTexture(GL_TEXTURE_2D, (GLuint)(intptr_t)io.Fonts->TexID);
+    if (previewFrameValid) {
+        glEnable(GL_SCISSOR_TEST);
+        float sx0 = std::max(0.0f, previewFrameMin.x);
+        float sy0 = std::max(0.0f, previewFrameMin.y);
+        float sx1 = std::min(io.DisplaySize.x, previewFrameMax.x);
+        float sy1 = std::min(io.DisplaySize.y, previewFrameMax.y);
+        glScissor((int)sx0, (int)(io.DisplaySize.y - sy1), std::max(1, (int)(sx1 - sx0)), std::max(1, (int)(sy1 - sy0)));
+    }
     glMatrixMode(GL_PROJECTION);
     glPushMatrix();
     glLoadIdentity();
@@ -4623,6 +4726,7 @@ void DrawPreviewSubs(ImVec2 pic0, ImVec2 pic1) {
     glColor3f(1, 1, 1);
     glDisable(GL_BLEND);
     glDisable(GL_TEXTURE_2D);
+    glDisable(GL_SCISSOR_TEST);
 }
 
 float SnapTime(int ignore, float proposed) {
@@ -4731,10 +4835,17 @@ void CopyBusGrade() {
     previewStatus = n > 0 ? "Bus grade copied" : "No other bus segments";
 }
 
+bool panelPointerLock = false;
+
+static bool ForeignName(const char* n) {
+    return n && strncmp(n, "Editor", 6) != 0 && strcmp(n, "Debug##Default") != 0;
+}
+
 bool TimelinePointerBusy() {
+    if (panelPointerLock) return true;
     ImVec2 m = ImGui::GetMousePos();
     auto inside = [&](const ImVec4& r) {
-        return m.x >= r.x && m.y >= r.y && m.x <= r.z && m.y <= r.w;
+        return r.z > r.x + 1.0f && m.x >= r.x - 8.0f && m.y >= r.y - 8.0f && m.x <= r.z + 8.0f && m.y <= r.w + 8.0f;
     };
     if (busPanelHoldsMouse || (busGradeOpen && inside(busPanelRect))) return true;
     if (gsPanelHolds || (gsPanelOpen && inside(gsPanelRect))) return true;
@@ -4745,7 +4856,151 @@ bool TimelinePointerBusy() {
     if (floatMediaOpen && inside(floatMediaRect)) return true;
     if (colorHolds || (colorOpen && inside(colorRect))) return true;
     if (ovPanelHolds || (ovPanelOpen && inside(ovPanelRect))) return true;
+    ImGuiContext& g = *GImGui;
+    for (int wi = 0; wi < g.Windows.Size; wi++) {
+        ImGuiWindow* w = g.Windows[wi];
+        if (!w || !w->WasActive) continue;
+        if (w->Flags & (ImGuiWindowFlags_ChildWindow | ImGuiWindowFlags_Tooltip)) continue;
+        if (!ForeignName(w->Name)) continue;
+        if (m.x < w->Pos.x - 6.0f || m.y < w->Pos.y - 6.0f) continue;
+        if (m.x > w->Pos.x + w->Size.x + 6.0f || m.y > w->Pos.y + w->Size.y + 6.0f) continue;
+        return true;
+    }
+    if (g.ActiveIdWindow && ForeignName(g.ActiveIdWindow->Name)) return true;
+    if (g.HoveredWindow && ForeignName(g.HoveredWindow->Name)) return true;
     return false;
+}
+
+static void ClearTimelineDrags() {
+    draggingClip = -1;
+    draggingBus = -1;
+    trimmingClip = -1;
+    trimmingBus = -1;
+    dragVolClip = -1;
+    dragVolPt = -1;
+    draggingOv = -1;
+    trimmingOv = -1;
+    draggingSub = -1;
+    trimmingSub = -1;
+    draggingPlayhead = false;
+    ovDragMode = 0;
+    ovDragIndex = -1;
+}
+
+struct UiShield {
+    bool on = false;
+    struct C {
+        float start, dur, off, gsX, gsY, gsSc, gsAsp, gsRot;
+        int track;
+        std::vector<VolPoint> vol;
+    };
+    std::vector<C> clips;
+    std::vector<float> bS, bD, sS, sD, oS, oD, oX, oY, oSc, oRot;
+};
+
+static UiShield uiShield;
+
+static void CaptureUiShield() {
+    uiShield.on = true;
+    uiShield.clips.clear();
+    uiShield.clips.reserve(clips.size());
+    for (const Clip& c : clips) {
+        UiShield::C s;
+        s.start = c.startTime;
+        s.dur = c.duration;
+        s.off = c.sourceOffset;
+        s.track = c.track;
+        s.gsX = c.gsX;
+        s.gsY = c.gsY;
+        s.gsSc = c.gsScale;
+        s.gsAsp = c.gsAspect;
+        s.gsRot = c.gsRot;
+        s.vol = c.volume;
+        uiShield.clips.push_back(std::move(s));
+    }
+    uiShield.bS.clear();
+    uiShield.bD.clear();
+    for (const auto& b : bus) { uiShield.bS.push_back(b.start); uiShield.bD.push_back(b.duration); }
+    uiShield.sS.clear();
+    uiShield.sD.clear();
+    for (const auto& s : subs) { uiShield.sS.push_back(s.start); uiShield.sD.push_back(s.duration); }
+    uiShield.oS.clear();
+    uiShield.oD.clear();
+    uiShield.oX.clear();
+    uiShield.oY.clear();
+    uiShield.oSc.clear();
+    uiShield.oRot.clear();
+    for (const auto& o : gOverlays) {
+        uiShield.oS.push_back(o.start);
+        uiShield.oD.push_back(o.duration);
+        uiShield.oX.push_back(o.x);
+        uiShield.oY.push_back(o.y);
+        uiShield.oSc.push_back(o.scale);
+        uiShield.oRot.push_back(o.rot);
+    }
+}
+
+static bool PanelUnderPointer(bool& keepOv, bool& keepGs) {
+    keepOv = false;
+    keepGs = false;
+    ImGuiContext& g = *GImGui;
+    if (!g.ActiveId || !g.ActiveIdWindow || !ForeignName(g.ActiveIdWindow->Name)) return false;
+    const char* n = g.ActiveIdWindow->Name;
+    if (!strcmp(n, "Overlay")) { keepOv = true; return true; }
+    if (!strcmp(n, "Transform") || !strcmp(n, "Green screen")) { keepGs = true; return true; }
+    if (!strcmp(n, "Bus grade") || !strcmp(n, "Subtitle") || !strcmp(n, "Subtitle style")
+        || !strcmp(n, "Audio Effects") || !strcmp(n, "Clip color") || !strcmp(n, "Library clip"))
+        return true;
+    return false;
+}
+
+static void RestoreUiShield() {
+    bool keepOv = false, keepGs = false;
+    bool panel = PanelUnderPointer(keepOv, keepGs);
+    if (panel && ImGui::IsMouseDown(0)) panelPointerLock = true;
+    if (!panel || !uiShield.on) return;
+    if (uiShield.clips.size() == clips.size()) {
+        for (size_t i = 0; i < clips.size(); i++) {
+            const auto& s = uiShield.clips[i];
+            clips[i].startTime = s.start;
+            clips[i].duration = s.dur;
+            clips[i].sourceOffset = s.off;
+            clips[i].track = s.track;
+            clips[i].volume = s.vol;
+            if (!keepGs) {
+                clips[i].gsX = s.gsX;
+                clips[i].gsY = s.gsY;
+                clips[i].gsScale = s.gsSc;
+                clips[i].gsAspect = s.gsAsp;
+                clips[i].gsRot = s.gsRot;
+            }
+        }
+    }
+    if (uiShield.bS.size() == bus.size()) {
+        for (size_t i = 0; i < bus.size(); i++) {
+            bus[i].start = uiShield.bS[i];
+            bus[i].duration = uiShield.bD[i];
+        }
+    }
+    if (uiShield.sS.size() == subs.size()) {
+        for (size_t i = 0; i < subs.size(); i++) {
+            subs[i].start = uiShield.sS[i];
+            subs[i].duration = uiShield.sD[i];
+        }
+    }
+    if (uiShield.oS.size() == gOverlays.size()) {
+        for (size_t i = 0; i < gOverlays.size(); i++) {
+            gOverlays[i].start = uiShield.oS[i];
+            gOverlays[i].duration = uiShield.oD[i];
+            if (!keepOv) {
+                gOverlays[i].x = uiShield.oX[i];
+                gOverlays[i].y = uiShield.oY[i];
+                gOverlays[i].scale = uiShield.oSc[i];
+                gOverlays[i].rot = uiShield.oRot[i];
+            }
+        }
+    }
+    ClearTimelineDrags();
 }
 
 void SelectOnly(int i) {
@@ -4764,6 +5019,19 @@ void ToggleSelect(int i) {
     selectedClip = i;
     selectedBus = -1;
     selectedSub = -1;
+}
+
+int ClipBelow(int above, float t) {
+    if (above < 0 || above >= (int)clips.size()) return -1;
+    int track = clips[above].track;
+    int best = -1;
+    int bestTrack = 99;
+    for (int i = 0; i < (int)clips.size(); i++) {
+        if (i == above || clips[i].track >= 3 || clips[i].track <= track) continue;
+        if (t < clips[i].startTime || t >= clips[i].startTime + clips[i].duration) continue;
+        if (clips[i].track < bestTrack) { bestTrack = clips[i].track; best = i; }
+    }
+    return best;
 }
 
 int OverlapPartner(int i) {
@@ -4990,6 +5258,78 @@ void ImportFiles(HWND owner) {
 #endif
 }
 
+void BuildSolidPixels(int kind, std::vector<uint8_t>& px, int W, int H) {
+    if (W < 2) W = 2;
+    if (H < 2) H = 2;
+    px.assign((size_t)W * (size_t)H * 4, 0);
+    auto put = [&](int x, int y, unsigned char r, unsigned char g, unsigned char b, unsigned char a) {
+        size_t i = ((size_t)y * (size_t)W + (size_t)x) * 4;
+        px[i] = r; px[i + 1] = g; px[i + 2] = b; px[i + 3] = a;
+    };
+    if (kind == 1) {
+        int bar = std::max(2, H * 12 / 100);
+        for (int y = 0; y < H; y++) {
+            bool stripe = y < bar || y >= H - bar;
+            for (int x = 0; x < W; x++)
+                put(x, y, 0, 0, 0, stripe ? 255 : 0);
+        }
+    } else if (kind == 2) {
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++) put(x, y, 0, 255, 0, 255);
+    } else {
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++) put(x, y, 0, 0, 0, 255);
+    }
+}
+
+int SolidKindFromPath(const std::string& path) {
+    if (path == "solid:bars") return 1;
+    if (path == "solid:green") return 2;
+    if (path == "solid:black") return 0;
+    return -1;
+}
+
+bool IsSolidPath(const std::string& path) { return SolidKindFromPath(path) >= 0; }
+bool SolidHasAlpha(const std::string& path) { return path == "solid:bars"; }
+
+static const char* kSolidId[] = {"solid:black", "solid:bars", "solid:green"};
+static const char* kSolidName[] = {"Black", "Letterbox", "Green"};
+static GLuint gSolidTex[3] = {0, 0, 0};
+
+void EnsureSolidThumbs() {
+    for (int k = 0; k < 3; k++) {
+        if (gSolidTex[k]) continue;
+        std::vector<uint8_t> px;
+        BuildSolidPixels(k, px, 320, 180);
+        glGenTextures(1, &gSolidTex[k]);
+        glBindTexture(GL_TEXTURE_2D, gSolidTex[k]);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 320, 180, 0, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+    }
+}
+
+static int EnsureSolidMedia(int kind) {
+    if (kind < 0 || kind > 2) kind = 0;
+    for (int i = 0; i < (int)media.size(); i++)
+        if (media[i].path == kSolidId[kind]) return i;
+    EnsureSolidThumbs();
+    MediaItem m;
+    m.path = kSolidId[kind];
+    m.name = kSolidName[kind];
+    m.type = "image";
+    m.duration = 5.0f;
+    m.aspect = 16.0f / 9.0f;
+    m.thumb = gSolidTex[kind];
+    m.thumbW = 320;
+    m.thumbH = 180;
+    media.push_back(m);
+    return (int)media.size() - 1;
+}
+
 void AddMedia(const std::string& path) {
     if (path.empty()) return;
     MediaItem m;
@@ -5032,8 +5372,11 @@ void EnsurePlayerForClip(int clipIdx) {
     if (clipIdx < 0 || clipIdx >= (int)clips.size()) return;
     int mid = clips[clipIdx].mediaId;
     if (mid < 0 || mid >= (int)media.size()) return;
-    if (clipIdx == playingClip && mid == playingMediaId && player && player->fmtCtx) return;
-    if (playerB && playerB != player && playingClipB == clipIdx && playingMediaIdB == mid && playerB->fmtCtx && playerB->hasFrame) {
+    auto ready = [](VideoPlayer* p) {
+        return p && p->hasFrame && (p->fmtCtx || p->still);
+    };
+    if (clipIdx == playingClip && mid == playingMediaId && ready(player)) return;
+    if (playerB && playerB != player && ready(playerB) && playingClipB == clipIdx && playingMediaIdB == mid) {
         VideoPlayer* previous = player;
         player = playerB;
         playerB = previous;
@@ -5416,10 +5759,10 @@ void ClearProject() {
 
 void RemoveMedia(int id) {
     if (id < 0 || id >= (int)media.size()) return;
-    if (media[id].thumb) {
+    if (media[id].thumb && !IsSolidPath(media[id].path)) {
         glDeleteTextures(1, &media[id].thumb);
-        media[id].thumb = 0;
     }
+    media[id].thumb = 0;
     for (int i = (int)clips.size() - 1; i >= 0; --i) {
         if (clips[i].mediaId == id) clips.erase(clips.begin() + i);
         else if (clips[i].mediaId > id) clips[i].mediaId--;
@@ -6097,6 +6440,7 @@ int main(int argc, char* argv[]) {
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
+    io.ConfigWindowsMoveFromTitleBarOnly = true;
     ImGui::StyleColorsDark();
     {
         static const ImWchar ranges[] = { 0x0020, 0x00FF, 0x0590, 0x05FF, 0 };
@@ -6120,6 +6464,8 @@ int main(int argc, char* argv[]) {
     bool running = true;
     SDL_Event event;
     int topClip = -1;
+    int driveClip = -1;
+    int previewPlate = -1;
 
     while (running) {
         while (SDL_PollEvent(&event)) {
@@ -6200,6 +6546,8 @@ int main(int argc, char* argv[]) {
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplSDL2_NewFrame();
         ImGui::NewFrame();
+        if (!ImGui::IsMouseDown(0)) panelPointerLock = false;
+        uiShield.on = false;
         openedPanelThisFrame = false;
         if (fontAtlas.empty() && ImGui::GetIO().Fonts->TexPixelsAlpha8 && ImGui::GetIO().Fonts->TexWidth > 1) {
             fontAtlasW = ImGui::GetIO().Fonts->TexWidth;
@@ -6210,7 +6558,7 @@ int main(int argc, char* argv[]) {
 
         ImGui::SetNextWindowPos(ImVec2(0, 0));
         ImGui::SetNextWindowSize(io.DisplaySize);
-        ImGui::Begin("Editor", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_MenuBar);
+        ImGui::Begin("Editor", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_MenuBar | ImGuiWindowFlags_NoBringToFrontOnFocus);
 
         if (ImGui::BeginMenuBar()) {
         if (ImGui::BeginMenu("Project")) {
@@ -6285,9 +6633,12 @@ int main(int argc, char* argv[]) {
         float gap = 6.0f;
         float cellW = std::max(70.0f, (ImGui::GetContentRegionAvail().x - gap * 2.0f) / 3.0f);
         float thumbH = cellW * 9.0f / 16.0f;
+        int shown = 0;
         for (int i = 0; i < (int)media.size(); i++) {
             const auto& m = media[i];
-            if (i % 3 != 0) ImGui::SameLine(0, gap);
+            if (IsSolidPath(m.path)) continue;
+            if (shown % 3 != 0) ImGui::SameLine(0, gap);
+            shown++;
             ImGui::PushID(i);
             ImGui::BeginGroup();
             ImGui::InvisibleButton("##dragitem", ImVec2(cellW, thumbH));
@@ -6364,6 +6715,33 @@ int main(int argc, char* argv[]) {
             }
             ImGui::EndTabItem();
         }
+        if (ImGui::BeginTabItem("Solids")) {
+            EnsureSolidThumbs();
+            ImGui::TextDisabled("Drag onto a video track");
+            float gap = 6.0f;
+            float cellW = std::max(70.0f, (ImGui::GetContentRegionAvail().x - gap * 2.0f) / 3.0f);
+            float thumbH = cellW * 9.0f / 16.0f;
+            for (int k = 0; k < 3; k++) {
+                if (k % 3 != 0) ImGui::SameLine(0, gap);
+                ImGui::PushID(5000 + k);
+                ImGui::BeginGroup();
+                ImGui::InvisibleButton("##solid", ImVec2(cellW, thumbH));
+                ImDrawList* sdl = ImGui::GetWindowDrawList();
+                ImVec2 sp0 = ImGui::GetItemRectMin();
+                ImVec2 sp1 = ImGui::GetItemRectMax();
+                if (gSolidTex[k]) DrawThumb(sdl, sp0, sp1, sp0, sp1, gSolidTex[k], 320, 180);
+                ImGui::TextUnformatted(kSolidName[k]);
+                ImGui::TextUnformatted("Solid");
+                ImGui::EndGroup();
+                if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID | ImGuiDragDropFlags_SourceNoPreviewTooltip)) {
+                    int kind = k;
+                    ImGui::SetDragDropPayload("SOLID", &kind, sizeof(int));
+                    ImGui::EndDragDropSource();
+                }
+                ImGui::PopID();
+            }
+            ImGui::EndTabItem();
+        }
         ImGui::EndTabBar();
         }
         ImGui::EndChild();
@@ -6384,11 +6762,15 @@ int main(int argc, char* argv[]) {
         previewMax = p1;
         FitAspectBox(p0, p1, AspectValue(exAspect), previewFrameMin, previewFrameMax);
         previewFrameValid = true;
-        dl->AddRect(previewFrameMin, previewFrameMax, IM_COL32(70, 70, 70, 255));
-        if (ovDragMode == 0 || !ImGui::IsMouseDown(0)) {
+        dl->AddRect(previewFrameMin, previewFrameMax, IM_COL32(230, 230, 230, 255), 0.0f, 0, 2.0f);
+        if (ImGui::IsMouseDown(0)) CaptureUiShield();
+        if (TimelinePointerBusy()) {
+            ovDragMode = 0;
+            ovDragIndex = -1;
+        } else if (ovDragMode == 0 || !ImGui::IsMouseDown(0)) {
             if (!ImGui::IsMouseDown(0)) { ovDragMode = 0; ovDragIndex = -1; }
         }
-        if (ImGui::IsMouseClicked(0) && ovDragMode == 0) {
+        if (!TimelinePointerBusy() && ImGui::IsMouseClicked(0) && ovDragMode == 0) {
             ImVec2 m = ImGui::GetMousePos();
             if (m.x >= previewFrameMin.x && m.y >= previewFrameMin.y && m.x <= previewFrameMax.x && m.y <= previewFrameMax.y) {
                 for (int i = (int)gOverlays.size() - 1; i >= 0; --i) {
@@ -6403,7 +6785,7 @@ int main(int argc, char* argv[]) {
                     if (m.x >= ax && m.x <= bx && m.y >= ay && m.y <= by) { gOverlaySel = i; ovDragMode = 1; ovDragIndex = i; break; }
                 }
             }
-        } else if (ovDragMode && ImGui::IsMouseDown(0) && ovDragIndex >= 0 && ovDragIndex < (int)gOverlays.size()) {
+        } else if (!TimelinePointerBusy() && ovDragMode && ImGui::IsMouseDown(0) && ovDragIndex >= 0 && ovDragIndex < (int)gOverlays.size()) {
             OverlayFx& o = gOverlays[ovDragIndex];
             float fw = std::max(1.0f, previewFrameMax.x - previewFrameMin.x);
             float fh = std::max(1.0f, previewFrameMax.y - previewFrameMin.y);
@@ -6460,7 +6842,30 @@ int main(int argc, char* argv[]) {
                 topClip = i;
             }
         }
-        if (topClip >= 0) EnsurePlayerForClip(topClip);
+        previewPlate = -1;
+        if (topClip >= 0) {
+            int mid = clips[topClip].mediaId;
+            if (mid >= 0 && mid < (int)media.size() && SolidHasAlpha(media[mid].path)) {
+                previewPlate = topClip;
+                topClip = ClipBelow(previewPlate, currentTime);
+            }
+        }
+        driveClip = topClip;
+        fxOther = -1;
+        fxActiveId.clear();
+        fxProgress = 0;
+        if (topClip >= 0) {
+            int ta = -1, tb = -1;
+            float prog = 0;
+            std::string tid;
+            if (TransitionForClip(topClip, currentTime, ta, tb, prog, tid)) {
+                driveClip = tb;
+                fxOther = ta;
+                fxProgress = prog;
+                fxActiveId = tid;
+            }
+        }
+        if (driveClip >= 0) EnsurePlayerForClip(driveClip);
         else {
             dl->AddText(ImVec2(p0.x + 12, p0.y + 12), IM_COL32(140, 140, 140, 255), "No video on timeline");
             previewStatus = "No video";
@@ -6613,13 +7018,7 @@ int main(int argc, char* argv[]) {
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(1, 0));
         ImGui::BeginGroup();
         ImGui::TextUnformatted("BUS");
-        if (ImGui::SmallButton("+")) {
-            float end = 0.0f;
-            for (const auto& c : clips) end = std::max(end, c.startTime + c.duration);
-            if (end < 0.5f) end = 5.0f;
-            AddBusSegment(0.0f, end);
-        }
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Segment for the whole project");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Click the empty lane for the whole project");
         ImGui::EndGroup();
         ImGui::PopStyleVar();
         ImGui::SetCursorScreenPos(ImVec2(lane0.x + 46.0f, lane0.y));
@@ -6627,6 +7026,7 @@ int main(int argc, char* argv[]) {
         busOriginX = busStart.x;
         float busW = ImGui::GetContentRegionAvail().x;
         ImGui::InvisibleButton("buszone", ImVec2(std::max(8.0f, busW), 34.0f));
+        bool busEmptyClick = ImGui::IsItemClicked(0) && !TimelinePointerBusy();
         if (ImGui::IsItemHovered()) {
             busHover = true;
             busHoverTime = (ImGui::GetMousePos().x - busStart.x) / pixelsPerSecond;
@@ -6644,6 +7044,7 @@ int main(int argc, char* argv[]) {
             snprintf(lab, sizeof(lab), "BUS %.1fs%s", bus[i].duration, BusActive(bus[i]) ? " FX" : "");
             bdl->AddText(ImVec2(cp0.x + 6, cp0.y + 4), IM_COL32(255, 245, 220, 240), lab);
             if (!ImGui::IsMouseHoveringRect(cp0, cp1) || TimelinePointerBusy()) continue;
+            busEmptyClick = false;
             busHover = true;
             busHoverTime = (ImGui::GetMousePos().x - busStart.x) / pixelsPerSecond;
             ImVec2 mouse = ImGui::GetMousePos();
@@ -6665,6 +7066,12 @@ int main(int argc, char* argv[]) {
                 else if (mouse.x > cp1.x - 8) { trimmingBus = i; trimBusSide = 1; }
                 else { draggingBus = i; busDragOffset = mouse.x - cp0.x; trimmingBus = -1; }
             }
+        }
+        if (busEmptyClick) {
+            float end = 0.0f;
+            for (const auto& c : clips) end = std::max(end, c.startTime + c.duration);
+            if (end < 0.5f) end = 5.0f;
+            AddBusSegment(0.0f, end);
         }
         ImGui::EndChild();
 
@@ -6740,18 +7147,20 @@ int main(int argc, char* argv[]) {
         gsLaneY = gsStart.y - 4.0f;
         ImGui::InvisibleButton("gszone", ImVec2(ImGui::GetContentRegionAvail().x, trackH - 4));
         if (ImGui::BeginDragDropTarget()) {
-            if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("MEDIA")) {
-                int mid = *(const int*)payload->Data;
-                if (mid >= 0 && mid < (int)media.size() && (media[mid].type == "video" || media[mid].type == "image")) {
-                    Clip c;
-                    c.mediaId = mid;
-                    c.duration = media[mid].duration;
-                    float localX = ImGui::GetMousePos().x - gsStart.x;
-                    c.startTime = SnapStart(-1, c.duration, localX / pixelsPerSecond);
-                    c.track = kGsTrack;
-                    clips.push_back(c);
-                    SelectOnly((int)clips.size() - 1);
-                }
+            const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("MEDIA");
+            const ImGuiPayload* solid = payload ? nullptr : ImGui::AcceptDragDropPayload("SOLID");
+            int mid = -1;
+            if (payload) mid = *(const int*)payload->Data;
+            else if (solid) mid = EnsureSolidMedia(*(const int*)solid->Data);
+            if (mid >= 0 && mid < (int)media.size() && (media[mid].type == "video" || media[mid].type == "image")) {
+                Clip c;
+                c.mediaId = mid;
+                c.duration = media[mid].duration;
+                float localX = ImGui::GetMousePos().x - gsStart.x;
+                c.startTime = SnapStart(-1, c.duration, localX / pixelsPerSecond);
+                c.track = kGsTrack;
+                clips.push_back(c);
+                SelectOnly((int)clips.size() - 1);
             }
             ImGui::EndDragDropTarget();
         }
@@ -6863,12 +7272,15 @@ int main(int argc, char* argv[]) {
             ImGui::InvisibleButton("dropzone", ImVec2(trackW, trackH - 4));
 
             if (ImGui::BeginDragDropTarget()) {
-                if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("MEDIA")) {
-                    int mid = *(const int*)payload->Data;
-                    if (mid >= 0 && mid < (int)media.size()) {
-                        bool isVideo = (media[mid].type == "video" || media[mid].type == "image");
-                        bool isAudio = (media[mid].type == "audio");
-                        if ((t < 3 && isVideo) || (t >= 3 && isAudio)) {
+                const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("MEDIA");
+                const ImGuiPayload* solid = payload ? nullptr : ImGui::AcceptDragDropPayload("SOLID");
+                int mid = -1;
+                if (payload) mid = *(const int*)payload->Data;
+                else if (solid) mid = EnsureSolidMedia(*(const int*)solid->Data);
+                if (mid >= 0 && mid < (int)media.size()) {
+                    bool isVideo = (media[mid].type == "video" || media[mid].type == "image");
+                    bool isAudio = (media[mid].type == "audio");
+                    if ((t < 3 && isVideo) || (t >= 3 && isAudio)) {
                             Clip c;
                             c.mediaId = mid;
                             c.duration = media[mid].duration;
@@ -6878,7 +7290,6 @@ int main(int argc, char* argv[]) {
                             c.track = t;
                             clips.push_back(c);
                             SelectOnly((int)clips.size() - 1);
-                        }
                     }
                 }
                 ImGui::EndDragDropTarget();
@@ -7022,14 +7433,7 @@ int main(int argc, char* argv[]) {
             ImGui::PopID();
         }
 
-        if (TimelinePointerBusy()) {
-            draggingClip = -1;
-            draggingBus = -1;
-            trimmingClip = -1;
-            trimmingBus = -1;
-            dragVolClip = -1;
-            dragVolPt = -1;
-        }
+        if (TimelinePointerBusy()) ClearTimelineDrags();
 
         if (dragVolClip >= 0 && dragVolClip < (int)clips.size() && clips[dragVolClip].track >= 0 && clips[dragVolClip].track < 6) {
             if (ImGui::IsMouseDown(0) && dragVolPt >= 0 && dragVolPt < (int)clips[dragVolClip].volume.size()) {
@@ -7443,18 +7847,28 @@ int main(int argc, char* argv[]) {
                 guard++;
             } while (gExport.active && guard < limit && (!gpu || SDL_GetTicks() - slice < 80));
         } else if (!asrOn) {
-            SyncPreview(topClip, io.DeltaTime);
+            int shown = driveClip >= 0 ? driveClip : topClip;
+            SyncPreview(shown, io.DeltaTime);
             SyncGreen();
-            fxOther = -1;
-            fxActiveId.clear();
-            fxProgress = 0;
             int ta = -1, tb = -1;
-            if (TransitionForClip(topClip, currentTime, ta, tb, fxProgress, fxActiveId)) {
-                fxOther = (topClip == ta) ? tb : ta;
-                SyncSide(fxOther, currentTime);
+            float prog = 0;
+            std::string tid;
+            if (topClip >= 0 && TransitionForClip(topClip, currentTime, ta, tb, prog, tid)) {
+                fxProgress = prog;
+                fxActiveId = tid;
+                fxOther = ta;
+                if (playingClip != tb) {
+                    EnsurePlayerForClip(tb);
+                    driveClip = tb;
+                }
+                SyncSide(ta, currentTime);
                 ClipEffect* fx = FxFind(fxActiveId.c_str());
                 if (fx) previewStatus += std::string(" | ") + fx->label();
             } else {
+                fxOther = -1;
+                fxActiveId.clear();
+                fxProgress = 0;
+                if (topClip >= 0 && playingClip != topClip) EnsurePlayerForClip(topClip);
                 PrefetchUpcoming(topClip);
                 ReleaseSidePlayer();
             }
@@ -7752,6 +8166,7 @@ int main(int argc, char* argv[]) {
                 if (!open) { floatMediaOpen = false; libPlayId = -1; }
             }
         }
+        RestoreUiShield();
         if (fontAtlas.empty()) {
             ImGuiIO& fio = ImGui::GetIO();
             unsigned char* px = fio.Fonts->TexPixelsAlpha8;
@@ -7786,23 +8201,41 @@ int main(int argc, char* argv[]) {
             if (TransitionForClip(topClip, currentTime, drawA, drawB, prog, id)) {
                 FxLook look;
                 FxEvaluate(id.c_str(), prog, look);
-                bool aIsMain = (topClip == drawA);
-                GLuint texA = aIsMain ? player->texture : playerB->texture;
-                GLuint texB = aIsMain ? playerB->texture : player->texture;
-                int aw = aIsMain ? player->width : playerB->width;
-                int ah = aIsMain ? player->height : playerB->height;
-                int bw = aIsMain ? playerB->width : player->width;
-                int bh = aIsMain ? playerB->height : player->height;
-                BlitFxPair(view0, view1, texA, aw, ah, texB, bw, bh, look,
-                           (drawA >= 0 && drawA < (int)clips.size()) ? &clips[drawA] : nullptr,
-                           (drawB >= 0 && drawB < (int)clips.size()) ? &clips[drawB] : nullptr);
+                auto take = [&](int clip, GLuint& tex, int& w, int& h) -> bool {
+                    if (clip >= 0 && playingClip == clip && player && player->hasFrame && player->texture) {
+                        tex = player->texture; w = player->width; h = player->height; return true;
+                    }
+                    if (clip >= 0 && playingClipB == clip && playerB && playerB->hasFrame && playerB->texture) {
+                        tex = playerB->texture; w = playerB->width; h = playerB->height; return true;
+                    }
+                    return false;
+                };
+                GLuint texA = 0, texB = 0;
+                int aw = 0, ah = 0, bw = 0, bh = 0;
+                bool gotA = take(drawA, texA, aw, ah);
+                bool gotB = take(drawB, texB, bw, bh);
+                if (!gotA && player && player->hasFrame && player->texture && playingClip != drawB) {
+                    texA = player->texture; aw = player->width; ah = player->height; gotA = true;
+                }
+                if (!gotB && playerB && playerB->hasFrame && playerB->texture && playingClipB != drawA) {
+                    texB = playerB->texture; bw = playerB->width; bh = playerB->height; gotB = playerB->texture != 0;
+                }
+                if (gotA) {
+                    BlitFxPair(view0, view1, texA, aw, ah, texB, bw, bh, look,
+                               (drawA >= 0 && drawA < (int)clips.size()) ? &clips[drawA] : nullptr,
+                               (drawB >= 0 && drawB < (int)clips.size()) ? &clips[drawB] : nullptr);
+                }
             } else if (player && player->hasFrame && player->texture) {
-                const Clip* pc = (topClip >= 0 && topClip < (int)clips.size()) ? &clips[topClip] : nullptr;
+                const Clip* pc = nullptr;
+                int pic = (playingClip >= 0 && playingClip < (int)clips.size()) ? playingClip : topClip;
+                if (pic >= 0 && pic < (int)clips.size()) pc = &clips[pic];
                 BlitVideo(view0, view1, player->texture, player->width, player->height, view0, view1,
                           pc ? pc->gsX : 0, pc ? pc->gsY : 0, pc ? pc->gsScale : 1, pc ? pc->gsAspect : 1, pc ? pc->gsRot : 0);
             }
         } else if (player && player->hasFrame && player->texture) {
-            const Clip* pc = (topClip >= 0 && topClip < (int)clips.size()) ? &clips[topClip] : nullptr;
+            const Clip* pc = nullptr;
+            int pic = (playingClip >= 0 && playingClip < (int)clips.size()) ? playingClip : topClip;
+            if (pic >= 0 && pic < (int)clips.size()) pc = &clips[pic];
             BlitVideo(view0, view1, player->texture, player->width, player->height, view0, view1,
                       pc ? pc->gsX : 0, pc ? pc->gsY : 0, pc ? pc->gsScale : 1, pc ? pc->gsAspect : 1, pc ? pc->gsRot : 0);
         }
@@ -7836,7 +8269,57 @@ int main(int argc, char* argv[]) {
         if (pglUseProgram) pglUseProgram(0);
         OverlayDrawGL(view0.x, view0.y, view1.x, view1.y, currentTime, (int)io.DisplaySize.x, (int)io.DisplaySize.y);
         if (pglUseProgram) pglUseProgram(0);
+        if (previewPlate >= 0 && previewPlate < (int)clips.size()) {
+            int mid = clips[previewPlate].mediaId;
+            if (mid >= 0 && mid < (int)media.size() && media[mid].thumb) {
+                const Clip& pc = clips[previewPlate];
+                BlitVideo(view0, view1, media[mid].thumb, media[mid].thumbW, media[mid].thumbH, view0, view1,
+                          pc.gsX, pc.gsY, pc.gsScale, pc.gsAspect, pc.gsRot, true);
+            }
+        }
         DrawPreviewSubs(view0, view1);
+        if (previewFrameValid) {
+            if (pglUseProgram) pglUseProgram(0);
+            glDisable(GL_TEXTURE_2D);
+            glDisable(GL_DEPTH_TEST);
+            glDisable(GL_BLEND);
+            glDisable(GL_SCISSOR_TEST);
+            glMatrixMode(GL_PROJECTION);
+            glPushMatrix();
+            glLoadIdentity();
+            glOrtho(0, io.DisplaySize.x, io.DisplaySize.y, 0, -1, 1);
+            glMatrixMode(GL_MODELVIEW);
+            glPushMatrix();
+            glLoadIdentity();
+            glColor3f(0.f, 0.f, 0.f);
+            auto fill = [](float x0, float y0, float x1, float y1) {
+                if (x1 - x0 < 0.5f || y1 - y0 < 0.5f) return;
+                glBegin(GL_QUADS);
+                glVertex2f(x0, y0);
+                glVertex2f(x1, y0);
+                glVertex2f(x1, y1);
+                glVertex2f(x0, y1);
+                glEnd();
+            };
+            fill(previewMin.x, previewMin.y, previewFrameMin.x, previewMax.y);
+            fill(previewFrameMax.x, previewMin.y, previewMax.x, previewMax.y);
+            fill(std::max(previewMin.x, previewFrameMin.x), previewMin.y, std::min(previewMax.x, previewFrameMax.x), previewFrameMin.y);
+            fill(std::max(previewMin.x, previewFrameMin.x), previewFrameMax.y, std::min(previewMax.x, previewFrameMax.x), previewMax.y);
+            glColor3f(0.86f, 0.86f, 0.86f);
+            glLineWidth(2.0f);
+            glBegin(GL_LINE_LOOP);
+            glVertex2f(previewFrameMin.x, previewFrameMin.y);
+            glVertex2f(previewFrameMax.x, previewFrameMin.y);
+            glVertex2f(previewFrameMax.x, previewFrameMax.y);
+            glVertex2f(previewFrameMin.x, previewFrameMax.y);
+            glEnd();
+            glLineWidth(1.0f);
+            glColor3f(1, 1, 1);
+            glPopMatrix();
+            glMatrixMode(GL_PROJECTION);
+            glPopMatrix();
+            glMatrixMode(GL_MODELVIEW);
+        }
 #endif
         RenderFloatingOnTop();
         if (undoRequest > 0) PerformUndo();

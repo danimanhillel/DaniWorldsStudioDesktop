@@ -549,11 +549,12 @@ void OverlayDrawGL(float x0, float y0, float x1, float y1, float time, int scree
     }
     if (pUse) pUse(0);
     glDisable(GL_TEXTURE_2D);
-    glDisable(GL_SCISSOR_TEST);
     if (selectedLive >= 0) {
         const OverlayFx& o = gOverlays[selectedLive];
         float ax, ay, bx, by;
         OverlayBox(o, x0, y0, x1, y1, ax, ay, bx, by, time);
+        glEnable(GL_SCISSOR_TEST);
+        glScissor(rx, gy, rw, rh);
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
         glColor4f(1, 1, 1, 0.95f);
@@ -571,6 +572,7 @@ void OverlayDrawGL(float x0, float y0, float x1, float y1, float time, int scree
         glDisable(GL_BLEND);
         glColor4f(1, 1, 1, 1);
     }
+    glDisable(GL_SCISSOR_TEST);
     glPopMatrix();
     glMatrixMode(GL_PROJECTION);
     glPopMatrix();
