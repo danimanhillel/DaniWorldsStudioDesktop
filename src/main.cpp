@@ -256,6 +256,7 @@ int gsPanelClip = -1;
 bool gsPanelOpen = false;
 int xformClip = -1;
 bool xformOpen = false;
+int xformDrag = 0;
 bool openedPanelThisFrame = false;
 bool gsPanelHolds = false;
 bool xformHolds = false;
@@ -3160,6 +3161,7 @@ static bool ClickOutsidePanels() {
     if (busGradeOpen && RectHit(busPanelRect, m)) return false;
     if (gsPanelOpen && RectHit(gsPanelRect, m)) return false;
     if (xformOpen && RectHit(xformRect, m)) return false;
+    if (xformOpen && m.x >= previewPanelMin.x && m.y >= previewPanelMin.y && m.x <= previewPanelMax.x && m.y <= previewPanelMax.y) return false;
     if (subEditorOpen && RectHit(subPanelRect, m)) return false;
     if (subStyleOpen && RectHit(subStyleRect, m)) return false;
     if (mediaPanelOpen && RectHit(mediaPanelRect, m)) return false;
@@ -4423,6 +4425,191 @@ static void PictureCorners(ImVec2 a, ImVec2 b, float ox, float oy, float scale, 
     }
 }
 
+#ifdef HAVE_FFMPEG
+static float ShownAspect(int clip) {
+    if (clip >= 0) {
+        if (playingClip == clip && player && player->width > 0 && player->height > 0)
+            return (float)player->width / (float)player->height;
+        if (playingClipB == clip && playerB && playerB->width > 0 && playerB->height > 0)
+            return (float)playerB->width / (float)playerB->height;
+    }
+    if (clip >= 0 && clip < (int)clips.size()) {
+        int mid = clips[clip].mediaId;
+        if (mid >= 0 && mid < (int)media.size()) {
+            if (media[mid].thumbW > 0 && media[mid].thumbH > 0)
+                return (float)media[mid].thumbW / (float)media[mid].thumbH;
+            if (media[mid].aspect > 0.01f) return media[mid].aspect;
+        }
+    }
+    return 16.0f / 9.0f;
+}
+
+static float XformEffectScale(int clip, int top) {
+    if (clip < 0 || fxOther < 0 || fxActiveId.empty() || top < 0) return 1.0f;
+    int a = -1, b = -1;
+    float prog = 0;
+    std::string id;
+    if (!TransitionForClip(top, currentTime, a, b, prog, id)) return 1.0f;
+    FxLook look;
+    FxEvaluate(id.c_str(), prog, look);
+    if (clip == a) return look.scaleA;
+    if (clip == b) return look.scaleB;
+    return 1.0f;
+}
+
+static bool XformOnScreen(int clip, int top, int plate) {
+    if (clip < 0 || clip >= (int)clips.size()) return false;
+    if (clip == top || clip == plate || clip == gsDrawClip || clip == playingClip) return true;
+    if (fxOther >= 0 && clip == playingClipB) return true;
+    return false;
+}
+
+struct XformGeom {
+    ImVec2 q[4];
+    ImVec2 box0, box1;
+    ImVec2 center, top, right, rot;
+    float hw = 0, hh = 0;
+    bool ok = false;
+};
+
+static XformGeom MakeXformGeom(int clip, int top) {
+    XformGeom g;
+    if (!previewFrameValid || clip < 0 || clip >= (int)clips.size()) return g;
+    if (clip == gsDrawClip) {
+        g.box0 = fitValid ? fitA : previewFrameMin;
+        g.box1 = fitValid ? fitB : previewFrameMax;
+    } else {
+        FitAspectBox(previewFrameMin, previewFrameMax, ShownAspect(clip), g.box0, g.box1);
+    }
+    const Clip& c = clips[clip];
+    PictureCorners(g.box0, g.box1, c.gsX, c.gsY, c.gsScale * XformEffectScale(clip, top), c.gsAspect, c.gsRot, g.q);
+    g.center = ImVec2((g.q[0].x + g.q[2].x) * 0.5f, (g.q[0].y + g.q[2].y) * 0.5f);
+    g.top = ImVec2((g.q[0].x + g.q[1].x) * 0.5f, (g.q[0].y + g.q[1].y) * 0.5f);
+    g.right = ImVec2((g.q[1].x + g.q[2].x) * 0.5f, (g.q[1].y + g.q[2].y) * 0.5f);
+    float dx = g.top.x - g.center.x;
+    float dy = g.top.y - g.center.y;
+    g.hh = std::sqrt(dx * dx + dy * dy);
+    float len = g.hh < 1.0f ? 1.0f : g.hh;
+    g.rot = ImVec2(g.top.x + dx / len * 18.0f, g.top.y + dy / len * 18.0f);
+    float rx = g.right.x - g.center.x;
+    float ry = g.right.y - g.center.y;
+    g.hw = std::sqrt(rx * rx + ry * ry);
+    g.ok = true;
+    return g;
+}
+
+static int HitXform(int clip, int top, ImVec2 m) {
+    XformGeom g = MakeXformGeom(clip, top);
+    if (!g.ok) return 0;
+    auto nearP = [&](ImVec2 p, float r) {
+        float x = m.x - p.x, y = m.y - p.y;
+        return x * x + y * y <= r * r;
+    };
+    if (nearP(g.rot, 14.0f)) return 3;
+    if (nearP(g.q[2], 14.0f)) return 2;
+    if (nearP(g.right, 12.0f)) return 4;
+    float rad = clips[clip].gsRot * 0.01745329252f;
+    float cs = std::cos(rad), sn = std::sin(rad);
+    float dx = m.x - g.center.x, dy = m.y - g.center.y;
+    float lx = dx * cs + dy * sn;
+    float ly = -dx * sn + dy * cs;
+    if (std::fabs(lx) <= g.hw + 4.0f && std::fabs(ly) <= g.hh + 4.0f) return 1;
+    return 0;
+}
+
+static void DragXform(int clip, int top) {
+    if (xformDrag == 0 || clip < 0 || clip >= (int)clips.size()) return;
+    XformGeom g = MakeXformGeom(clip, top);
+    if (!g.ok) return;
+    Clip& c = clips[clip];
+    ImGuiIO& pio = ImGui::GetIO();
+    float pw = std::max(1.0f, g.box1.x - g.box0.x);
+    float ph = std::max(1.0f, g.box1.y - g.box0.y);
+    float rad = c.gsRot * 0.01745329252f;
+    float cs = std::cos(rad), sn = std::sin(rad);
+    if (xformDrag == 1) {
+        c.gsX += pio.MouseDelta.x / (pw * 0.5f);
+        c.gsY += pio.MouseDelta.y / (ph * 0.5f);
+    } else if (xformDrag == 2) {
+        c.gsScale += (pio.MouseDelta.x * (cs - sn) + pio.MouseDelta.y * (sn + cs)) / std::max(40.0f, pw * 0.25f);
+    } else if (xformDrag == 3) {
+        float a0 = std::atan2((pio.MousePos.y - pio.MouseDelta.y) - g.center.y, (pio.MousePos.x - pio.MouseDelta.x) - g.center.x);
+        float a1 = std::atan2(pio.MousePos.y - g.center.y, pio.MousePos.x - g.center.x);
+        c.gsRot += (a1 - a0) * 57.2957795f;
+    } else if (xformDrag == 4) {
+        float along = pio.MouseDelta.x * cs + pio.MouseDelta.y * sn;
+        c.gsAspect += along / (pw * 0.5f * std::max(0.05f, c.gsScale));
+    }
+    if (c.gsX < -1.0f) c.gsX = -1.0f;
+    if (c.gsX > 1.0f) c.gsX = 1.0f;
+    if (c.gsY < -1.0f) c.gsY = -1.0f;
+    if (c.gsY > 1.0f) c.gsY = 1.0f;
+    if (c.gsScale < 0.05f) c.gsScale = 0.05f;
+    if (c.gsScale > 4.0f) c.gsScale = 4.0f;
+    if (c.gsAspect < 0.25f) c.gsAspect = 0.25f;
+    if (c.gsAspect > 4.0f) c.gsAspect = 4.0f;
+    while (c.gsRot > 180.0f) c.gsRot -= 360.0f;
+    while (c.gsRot < -180.0f) c.gsRot += 360.0f;
+}
+
+static void DrawXformChrome(int top, int plate) {
+    if (!xformOpen || !XformOnScreen(xformClip, top, plate)) return;
+    XformGeom g = MakeXformGeom(xformClip, top);
+    if (!g.ok) return;
+    ImGuiIO& io = ImGui::GetIO();
+    float sx0 = std::max(0.0f, previewFrameMin.x);
+    float sy0 = std::max(0.0f, previewFrameMin.y);
+    float sx1 = std::min(io.DisplaySize.x, previewFrameMax.x);
+    float sy1 = std::min(io.DisplaySize.y, previewFrameMax.y);
+    if (sx1 - sx0 < 1.0f || sy1 - sy0 < 1.0f) return;
+    if (pglUseProgram) pglUseProgram(0);
+    glDisable(GL_TEXTURE_2D);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_BLEND);
+    glEnable(GL_SCISSOR_TEST);
+    glScissor((int)sx0, (int)(io.DisplaySize.y - sy1), std::max(1, (int)(sx1 - sx0)), std::max(1, (int)(sy1 - sy0)));
+    glMatrixMode(GL_PROJECTION);
+    glPushMatrix();
+    glLoadIdentity();
+    glOrtho(0, io.DisplaySize.x, io.DisplaySize.y, 0, -1, 1);
+    glMatrixMode(GL_MODELVIEW);
+    glPushMatrix();
+    glLoadIdentity();
+    glLineWidth(1.5f);
+    glColor3f(0.95f, 0.82f, 0.25f);
+    glBegin(GL_LINE_LOOP);
+    glVertex2f(g.q[0].x, g.q[0].y);
+    glVertex2f(g.q[1].x, g.q[1].y);
+    glVertex2f(g.q[2].x, g.q[2].y);
+    glVertex2f(g.q[3].x, g.q[3].y);
+    glEnd();
+    glBegin(GL_LINES);
+    glVertex2f(g.top.x, g.top.y);
+    glVertex2f(g.rot.x, g.rot.y);
+    glEnd();
+    auto knob = [](ImVec2 p, float r) {
+        glBegin(GL_QUADS);
+        glVertex2f(p.x - r, p.y - r);
+        glVertex2f(p.x + r, p.y - r);
+        glVertex2f(p.x + r, p.y + r);
+        glVertex2f(p.x - r, p.y + r);
+        glEnd();
+    };
+    glColor3f(1.0f, 1.0f, 1.0f);
+    knob(g.q[2], 5.0f);
+    knob(g.right, 4.5f);
+    glColor3f(0.35f, 0.82f, 1.0f);
+    knob(g.rot, 5.0f);
+    glLineWidth(1.0f);
+    glColor3f(1.0f, 1.0f, 1.0f);
+    glPopMatrix();
+    glMatrixMode(GL_PROJECTION);
+    glPopMatrix();
+    glMatrixMode(GL_MODELVIEW);
+    glDisable(GL_SCISSOR_TEST);
+}
+#endif
+
 void BlitVideo(ImVec2 p0, ImVec2 p1, GLuint tex, int vw, int vh, ImVec2 clip0, ImVec2 clip1,
                float ox = 0.0f, float oy = 0.0f, float scale = 1.0f, float aspect = 1.0f, float rot = 0.0f, bool blendAlpha = false) {
     if (!tex || vw <= 0 || vh <= 0) return;
@@ -4509,19 +4696,27 @@ void BlitFxPair(ImVec2 p0, ImVec2 p1, GLuint texA, int aw, int ah, GLuint texB, 
     float areaW = p1.x - p0.x;
     float areaH = p1.y - p0.y;
     if (areaW < 4 || areaH < 4) return;
-    float aspect = (float)aw / (float)ah;
-    float areaAspect = areaW / areaH;
-    ImVec2 a = p0, b = p1;
-    if (aspect > areaAspect) {
-        float h = areaW / aspect;
-        float off = (areaH - h) * 0.5f;
-        a.y += off; b.y -= off;
-    } else {
-        float w = areaH * aspect;
-        float off = (areaW - w) * 0.5f;
-        a.x += off; b.x -= off;
-    }
-    if (recordFit) { fitA = a; fitB = b; fitValid = true; }
+    auto letterbox = [&](int tw, int th, ImVec2& a, ImVec2& b) {
+        a = p0;
+        b = p1;
+        if (tw <= 0 || th <= 0) return;
+        float aspect = (float)tw / (float)th;
+        float areaAspect = areaW / areaH;
+        if (aspect > areaAspect) {
+            float h = areaW / aspect;
+            float off = (areaH - h) * 0.5f;
+            a.y += off; b.y -= off;
+        } else {
+            float w = areaH * aspect;
+            float off = (areaW - w) * 0.5f;
+            a.x += off; b.x -= off;
+        }
+    };
+    ImVec2 boxA0, boxA1, boxB0, boxB1;
+    letterbox(aw, ah, boxA0, boxA1);
+    bool haveB = texB && bw > 0 && bh > 0 && look.alphaB > 0.001f;
+    if (haveB) letterbox(bw, bh, boxB0, boxB1);
+    if (recordFit) { fitA = boxA0; fitB = boxA1; fitValid = true; }
     float sx0 = std::max(p0.x, 0.0f);
     float sy0 = std::max(p0.y, 0.0f);
     float sx1 = std::min(p1.x, io.DisplaySize.x);
@@ -4533,7 +4728,7 @@ void BlitFxPair(ImVec2 p0, ImVec2 p1, GLuint texA, int aw, int ah, GLuint texB, 
         sy1 = std::min(sy1, previewFrameMax.y);
     }
     if (sx1 - sx0 < 1.0f || sy1 - sy0 < 1.0f) return;
-    auto quad = [&](GLuint tex, int tw, int th, float alpha, float effectScale, const Clip* clip) {
+    auto quad = [&](GLuint tex, int tw, int th, ImVec2 a, ImVec2 b, float alpha, float effectScale, const Clip* clip) {
         float sc = effectScale * (clip ? clip->gsScale : 1.0f);
         float asp = clip ? clip->gsAspect : 1.0f;
         float ox = clip ? clip->gsX : 0.0f;
@@ -4566,11 +4761,11 @@ void BlitFxPair(ImVec2 p0, ImVec2 p1, GLuint texA, int aw, int ah, GLuint texB, 
     glPushMatrix();
     glLoadIdentity();
     glDisable(GL_BLEND);
-    quad(texA, aw, ah, 1.0f, look.scaleA, ca);
-    if (texB && bw > 0 && bh > 0 && look.alphaB > 0.001f) {
+    quad(texA, aw, ah, boxA0, boxA1, 1.0f, look.scaleA, ca);
+    if (haveB) {
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        quad(texB, bw, bh, look.alphaB, look.scaleB, cb);
+        quad(texB, bw, bh, boxB0, boxB1, look.alphaB, look.scaleB, cb);
     }
     glPopMatrix();
     glMatrixMode(GL_PROJECTION);
@@ -4887,6 +5082,7 @@ static void ClearTimelineDrags() {
     draggingPlayhead = false;
     ovDragMode = 0;
     ovDragIndex = -1;
+    xformDrag = 0;
 }
 
 struct UiShield {
@@ -5034,6 +5230,45 @@ int ClipBelow(int above, float t) {
         if (clips[i].track < bestTrack) { bestTrack = clips[i].track; best = i; }
     }
     return best;
+}
+
+static int TopPictureAt(float t, int& plate) {
+    plate = -1;
+    int top = -1;
+    int bestTrack = 99;
+    for (int i = 0; i < (int)clips.size(); i++) {
+        if (clips[i].track >= 3) continue;
+        if (t < clips[i].startTime || t >= clips[i].startTime + clips[i].duration) continue;
+        if (clips[i].track <= bestTrack) {
+            bestTrack = clips[i].track;
+            top = i;
+        }
+    }
+    if (top >= 0) {
+        int mid = clips[top].mediaId;
+        if (mid >= 0 && mid < (int)media.size() && SolidHasAlpha(media[mid].path)) {
+            plate = top;
+            top = ClipBelow(plate, t);
+        }
+    }
+    return top;
+}
+
+static void RoutePreviewClip(float t, int& top, int& plate, int& drive) {
+    top = TopPictureAt(t, plate);
+    drive = top;
+    fxOther = -1;
+    fxActiveId.clear();
+    fxProgress = 0;
+    if (top < 0) return;
+    int ta = -1, tb = -1;
+    float prog = 0;
+    std::string tid;
+    if (!TransitionForClip(top, t, ta, tb, prog, tid)) return;
+    drive = tb;
+    fxOther = ta;
+    fxProgress = prog;
+    fxActiveId = tid;
 }
 
 int OverlapPartner(int i) {
@@ -6768,10 +7003,12 @@ int main(int argc, char* argv[]) {
         if (TimelinePointerBusy()) {
             ovDragMode = 0;
             ovDragIndex = -1;
+            xformDrag = 0;
         } else if (ovDragMode == 0 || !ImGui::IsMouseDown(0)) {
-            if (!ImGui::IsMouseDown(0)) { ovDragMode = 0; ovDragIndex = -1; }
+            if (!ImGui::IsMouseDown(0)) { ovDragMode = 0; ovDragIndex = -1; xformDrag = 0; }
         }
-        if (!TimelinePointerBusy() && ImGui::IsMouseClicked(0) && ovDragMode == 0) {
+        if (!xformOpen) xformDrag = 0;
+        if (!TimelinePointerBusy() && ImGui::IsMouseClicked(0) && ovDragMode == 0 && xformDrag == 0) {
             ImVec2 m = ImGui::GetMousePos();
             if (m.x >= previewFrameMin.x && m.y >= previewFrameMin.y && m.x <= previewFrameMax.x && m.y <= previewFrameMax.y) {
                 for (int i = (int)gOverlays.size() - 1; i >= 0; --i) {
@@ -6785,6 +7022,12 @@ int main(int argc, char* argv[]) {
                     if (std::fabs(m.x - bx) < 12.0f && std::fabs(m.y - by) < 12.0f) { gOverlaySel = i; ovDragMode = 2; ovDragIndex = i; break; }
                     if (m.x >= ax && m.x <= bx && m.y >= ay && m.y <= by) { gOverlaySel = i; ovDragMode = 1; ovDragIndex = i; break; }
                 }
+#ifdef HAVE_FFMPEG
+                if (ovDragMode == 0 && xformOpen && XformOnScreen(xformClip, topClip, previewPlate)) {
+                    int hit = HitXform(xformClip, topClip, m);
+                    if (hit) xformDrag = hit;
+                }
+#endif
             }
         } else if (!TimelinePointerBusy() && ovDragMode && ImGui::IsMouseDown(0) && ovDragIndex >= 0 && ovDragIndex < (int)gOverlays.size()) {
             OverlayFx& o = gOverlays[ovDragIndex];
@@ -6832,40 +7075,13 @@ int main(int argc, char* argv[]) {
                 else if (ovDragMode == 3) OverlayWrite(o, 3, br, o.rot, currentTime);
             }
         }
+#ifdef HAVE_FFMPEG
+        else if (!TimelinePointerBusy() && xformOpen && xformDrag && ImGui::IsMouseDown(0)) {
+            DragXform(xformClip, topClip);
+        }
+#endif
 
-        topClip = -1;
-        int bestTrack = 99;
-        for (int i = 0; i < (int)clips.size(); i++) {
-            if (clips[i].track >= 3) continue;
-            if (currentTime < clips[i].startTime || currentTime >= clips[i].startTime + clips[i].duration) continue;
-            if (clips[i].track <= bestTrack) {
-                bestTrack = clips[i].track;
-                topClip = i;
-            }
-        }
-        previewPlate = -1;
-        if (topClip >= 0) {
-            int mid = clips[topClip].mediaId;
-            if (mid >= 0 && mid < (int)media.size() && SolidHasAlpha(media[mid].path)) {
-                previewPlate = topClip;
-                topClip = ClipBelow(previewPlate, currentTime);
-            }
-        }
-        driveClip = topClip;
-        fxOther = -1;
-        fxActiveId.clear();
-        fxProgress = 0;
-        if (topClip >= 0) {
-            int ta = -1, tb = -1;
-            float prog = 0;
-            std::string tid;
-            if (TransitionForClip(topClip, currentTime, ta, tb, prog, tid)) {
-                driveClip = tb;
-                fxOther = ta;
-                fxProgress = prog;
-                fxActiveId = tid;
-            }
-        }
+        RoutePreviewClip(currentTime, topClip, previewPlate, driveClip);
         if (driveClip >= 0) EnsurePlayerForClip(driveClip);
         else {
             dl->AddText(ImVec2(p0.x + 12, p0.y + 12), IM_COL32(140, 140, 140, 255), "No video on timeline");
@@ -7848,27 +8064,17 @@ int main(int argc, char* argv[]) {
                 guard++;
             } while (gExport.active && guard < limit && (!gpu || SDL_GetTicks() - slice < 80));
         } else if (!asrOn) {
-            int shown = driveClip >= 0 ? driveClip : topClip;
-            SyncPreview(shown, io.DeltaTime);
+            RoutePreviewClip(currentTime, topClip, previewPlate, driveClip);
+            if (driveClip >= 0 && playingClip != driveClip) EnsurePlayerForClip(driveClip);
+            SyncPreview(driveClip >= 0 ? driveClip : topClip, io.DeltaTime);
             SyncGreen();
-            int ta = -1, tb = -1;
-            float prog = 0;
-            std::string tid;
-            if (topClip >= 0 && TransitionForClip(topClip, currentTime, ta, tb, prog, tid)) {
-                fxProgress = prog;
-                fxActiveId = tid;
-                fxOther = ta;
-                if (playingClip != tb) {
-                    EnsurePlayerForClip(tb);
-                    driveClip = tb;
-                }
-                SyncSide(ta, currentTime);
+            RoutePreviewClip(currentTime, topClip, previewPlate, driveClip);
+            if (fxOther >= 0) {
+                if (playingClip != driveClip) EnsurePlayerForClip(driveClip);
+                SyncSide(fxOther, currentTime);
                 ClipEffect* fx = FxFind(fxActiveId.c_str());
                 if (fx) previewStatus += std::string(" | ") + fx->label();
             } else {
-                fxOther = -1;
-                fxActiveId.clear();
-                fxProgress = 0;
                 if (topClip >= 0 && playingClip != topClip) EnsurePlayerForClip(topClip);
                 PrefetchUpcoming(topClip);
                 ReleaseSidePlayer();
@@ -7917,26 +8123,27 @@ int main(int argc, char* argv[]) {
         }
         xformHolds = false;
         if (xformOpen) {
-            if (xformClip < 0 || xformClip >= (int)clips.size()) xformOpen = false;
+            if (xformClip < 0 || xformClip >= (int)clips.size()) { xformOpen = false; xformDrag = 0; }
             else {
                 int mid = clips[xformClip].mediaId;
                 bool picture = mid >= 0 && mid < (int)media.size() && media[mid].type != "audio";
-                if (!picture) xformOpen = false;
+                if (!picture) { xformOpen = false; xformDrag = 0; }
                 else {
                     PlaceAtCursor();
                     bool open = true;
                     if (ClickOutsidePanels()) open = false;
                     if (ImGui::Begin("Transform", &open, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse)) {
                         ImGui::TextUnformatted("Transform");
+                        ImGui::TextDisabled("Drag in the preview. Corner sizes, top handle rotates, right edge changes aspect.");
                         ImGui::Separator();
                         DrawPictureControls(clips[xformClip]);
                         ImVec2 w0 = ImGui::GetWindowPos();
                         xformRect = ImVec4(w0.x, w0.y, w0.x + ImGui::GetWindowSize().x, w0.y + ImGui::GetWindowSize().y);
                         xformHolds = ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem)
-                            || (ImGui::IsWindowFocused() && ImGui::IsAnyItemActive());
+                            || (GImGui->ActiveIdWindow == ImGui::GetCurrentWindow() && ImGui::IsAnyItemActive());
                     }
                     ImGui::End();
-                    if (!open) xformOpen = false;
+                    if (!open) { xformOpen = false; xformDrag = 0; }
                 }
             }
         }
@@ -8321,6 +8528,7 @@ int main(int argc, char* argv[]) {
             glPopMatrix();
             glMatrixMode(GL_MODELVIEW);
         }
+        DrawXformChrome(topClip, previewPlate);
 #endif
         RenderFloatingOnTop();
         if (undoRequest > 0) PerformUndo();
