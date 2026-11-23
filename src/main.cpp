@@ -3394,6 +3394,81 @@ static void BakeLoadedGsImages() {
     }
 }
 
+static int PictureSlot(int track) {
+    if (track == kGsTrack) return 0;
+    if (track >= 0 && track < 3) return track + 1;
+    return -1;
+}
+
+static int SlotToPicture(int slot) {
+    if (slot == 0) return kGsTrack;
+    if (slot >= 1 && slot <= 3) return slot - 1;
+    return -1;
+}
+
+static int AudioSlot(int track) {
+    if (track >= 3 && track <= 5) return track - 3;
+    return -1;
+}
+
+static int SlotToAudio(int slot) {
+    if (slot >= 0 && slot <= 2) return slot + 3;
+    return -1;
+}
+
+static void MoveClipTrack(int idx, int dest) {
+    if (idx < 0 || idx >= (int)clips.size() || dest < 0) return;
+    Clip& c = clips[idx];
+    if (c.track == dest) return;
+    int prev = c.track;
+    c.track = dest;
+    if (dest == kGsTrack && prev != kGsTrack) {
+        if (c.gsFit != 2 && GsScaleIdentity(c)) ContainGsImage(c);
+    } else if (prev == kGsTrack && dest != kGsTrack) {
+        ReleaseGsImageContain(c);
+    }
+}
+
+static int ShiftedTrack(int track, int delta) {
+    int pic = PictureSlot(track);
+    if (pic >= 0) return SlotToPicture(pic + delta);
+    int aud = AudioSlot(track);
+    if (aud >= 0) return SlotToAudio(aud + delta);
+    return -1;
+}
+
+static void NudgeSelectionChannel(int dir) {
+    if (dir == 0) return;
+    struct Move { int idx; int dest; };
+    std::vector<Move> moves;
+    for (int i : selection) {
+        if (i < 0 || i >= (int)clips.size()) continue;
+        int dest = ShiftedTrack(clips[i].track, dir);
+        if (dest >= 0 && dest != clips[i].track) moves.push_back({i, dest});
+    }
+    for (const auto& m : moves) MoveClipTrack(m.idx, m.dest);
+}
+
+static void FollowLeaderChannel(int leader, int prevTrack) {
+    if (leader < 0 || leader >= (int)clips.size()) return;
+    int now = clips[leader].track;
+    if (now == prevTrack) return;
+    int delta = 0;
+    int ps = PictureSlot(prevTrack), ns = PictureSlot(now);
+    if (ps >= 0 && ns >= 0) delta = ns - ps;
+    else if (AudioSlot(prevTrack) >= 0 && AudioSlot(now) >= 0) delta = now - prevTrack;
+    else return;
+    if (delta == 0) return;
+    struct Move { int idx; int dest; };
+    std::vector<Move> moves;
+    for (int i : selection) {
+        if (i == leader || i < 0 || i >= (int)clips.size()) continue;
+        int dest = ShiftedTrack(clips[i].track, delta);
+        if (dest >= 0 && dest != clips[i].track) moves.push_back({i, dest});
+    }
+    for (const auto& m : moves) MoveClipTrack(m.idx, m.dest);
+}
+
 static bool ClipCoversFrame(const Clip& c, float picAspect, float effectScale) {
     if (std::fabs(c.gsX) > 0.002f || std::fabs(c.gsY) > 0.002f || std::fabs(c.gsRot) > 0.4f) return false;
     float frameAspect = AspectValue(exAspect);
@@ -5500,6 +5575,11 @@ void AddBusSegment(float start, float dur) {
     selectedBus = (int)bus.size() - 1;
     selectedClip = -1;
     selection.clear();
+    contextClip = -1;
+    selectedSub = -1;
+    subSelection.clear();
+    mediaSel.clear();
+    gOverlaySel = -1;
 }
 
 void CopyBusGrade() {
@@ -5699,6 +5779,39 @@ static void RestoreUiShield() {
     ClearTimelineDrags();
 }
 
+static void ClearLaneRivals() {
+    selectedBus = -1;
+    mediaSel.clear();
+    gOverlaySel = -1;
+}
+
+static void FocusOverlay(int i) {
+    gOverlaySel = i;
+    selectedClip = -1;
+    selection.clear();
+    contextClip = -1;
+    selectedBus = -1;
+    selectedSub = -1;
+    subSelection.clear();
+    mediaSel.clear();
+}
+
+static void DeleteOverlayIndex(int id) {
+    if (id < 0 || id >= (int)gOverlays.size()) return;
+    gOverlays.erase(gOverlays.begin() + id);
+    if (gOverlaySel == id) gOverlaySel = -1;
+    else if (gOverlaySel > id) gOverlaySel--;
+    if (ovPanel == id) { ovPanel = -1; ovPanelOpen = false; }
+    else if (ovPanel > id) ovPanel--;
+    if (draggingOv == id) draggingOv = -1;
+    else if (draggingOv > id) draggingOv--;
+    if (trimmingOv == id) trimmingOv = -1;
+    else if (trimmingOv > id) trimmingOv--;
+    if (ovDragIndex == id) { ovDragIndex = -1; ovDragMode = 0; }
+    else if (ovDragIndex > id) ovDragIndex--;
+    fxHover = -1;
+}
+
 void SelectOnly(int i) {
     selection.clear();
     mediaSel.clear();
@@ -5707,6 +5820,7 @@ void SelectOnly(int i) {
     selectedBus = -1;
     selectedSub = -1;
     subSelection.clear();
+    gOverlaySel = -1;
 }
 
 void ToggleSelect(int i) {
@@ -5717,6 +5831,8 @@ void ToggleSelect(int i) {
     selectedBus = -1;
     selectedSub = -1;
     subSelection.clear();
+    mediaSel.clear();
+    gOverlaySel = -1;
 }
 
 static bool ScreenHit(ImVec2 a, ImVec2 b, ImVec2 c0, ImVec2 c1) {
@@ -5738,7 +5854,7 @@ static void ApplyMarquee(ImVec2 m) {
     int prev = selectedSub;
     selection.clear();
     selectedClip = -1;
-    selectedBus = -1;
+    ClearLaneRivals();
     subSelection.clear();
     selectedSub = -1;
     auto consider = [&](int i, float originX, float originY) {
@@ -7336,33 +7452,22 @@ int main(int argc, char* argv[]) {
                     ImportFiles(hwnd);
                 if (event.key.keysym.sym == SDLK_z && (event.key.keysym.mod & KMOD_CTRL) && !(event.key.keysym.mod & KMOD_SHIFT) && !io.WantTextInput)
                     undoRequest++;
-                if (event.key.keysym.sym == SDLK_DELETE && !event.key.repeat && fxHover >= 0 && fxHover < (int)gOverlays.size() && !io.WantTextInput) {
-                    gOverlays.erase(gOverlays.begin() + fxHover);
-                    if (gOverlaySel == fxHover) gOverlaySel = -1;
-                    else if (gOverlaySel > fxHover) gOverlaySel--;
-                    if (ovPanel == fxHover) { ovPanel = -1; ovPanelOpen = false; }
-                    else if (ovPanel > fxHover) ovPanel--;
-                    if (draggingOv == fxHover) draggingOv = -1;
-                    else if (draggingOv > fxHover) draggingOv--;
-                    if (trimmingOv == fxHover) trimmingOv = -1;
-                    else if (trimmingOv > fxHover) trimmingOv--;
-                    if (ovDragIndex == fxHover) { ovDragIndex = -1; ovDragMode = 0; }
-                    else if (ovDragIndex > fxHover) ovDragIndex--;
-                    fxHover = -1;
-                } else if (event.key.keysym.sym == SDLK_DELETE && !event.key.repeat && !mediaSel.empty() && !io.WantTextInput) {
-                    DeleteSelectedMedia();
-                } else if (event.key.keysym.sym == SDLK_DELETE || event.key.keysym.sym == SDLK_BACKSPACE) {
-                    if (selectedBus >= 0 && selectedBus < (int)bus.size() && !io.WantTextInput) {
+                if ((event.key.keysym.sym == SDLK_DELETE || event.key.keysym.sym == SDLK_BACKSPACE) && !io.WantTextInput) {
+                    bool clipsOn = selectedClip >= 0 || !selection.empty();
+                    bool subsOn = selectedSub >= 0 || !subSelection.empty();
+                    if (selectedBus >= 0 && selectedBus < (int)bus.size()) {
                         bus.erase(bus.begin() + selectedBus);
                         if (contextBus == selectedBus) contextBus = -1;
                         else if (contextBus > selectedBus) contextBus--;
                         selectedBus = -1;
                         draggingBus = -1;
                         trimmingBus = -1;
-                    } else if (!io.WantTextInput &&
-                               ((selectedClip >= 0 || !selection.empty()) ||
-                                (selectedSub >= 0 || !subSelection.empty()))) {
-                        if (selectedClip >= 0 || !selection.empty()) {
+                    } else if (!mediaSel.empty()) {
+                        DeleteSelectedMedia();
+                    } else if (!clipsOn && !subsOn && gOverlaySel >= 0 && gOverlaySel < (int)gOverlays.size()) {
+                        DeleteOverlayIndex(gOverlaySel);
+                    } else if (clipsOn || subsOn) {
+                        if (clipsOn) {
                         std::vector<int> kill = selection;
                         if (selectedClip >= 0) kill.push_back(selectedClip);
                         std::sort(kill.begin(), kill.end());
@@ -7387,7 +7492,7 @@ int main(int argc, char* argv[]) {
                         trimmingClip = -1;
                         dragVolClip = -1;
                         }
-                        if (selectedSub >= 0 || !subSelection.empty()) {
+                        if (subsOn) {
                         std::vector<int> kill = subSelection;
                         if (selectedSub >= 0) kill.push_back(selectedSub);
                         std::sort(kill.begin(), kill.end());
@@ -7535,6 +7640,13 @@ int main(int argc, char* argv[]) {
             ImVec2 g0 = ImGui::GetItemRectMin();
             ImVec2 g1 = ImGui::GetItemRectMax();
             if (ImGui::IsMouseHoveringRect(g0, g1) && ImGui::IsMouseClicked(0) && !ImGui::IsMouseDragging(0)) {
+                selectedClip = -1;
+                selection.clear();
+                contextClip = -1;
+                selectedBus = -1;
+                selectedSub = -1;
+                subSelection.clear();
+                gOverlaySel = -1;
                 if (ImGui::GetIO().KeyShift) {
                     auto it = std::find(mediaSel.begin(), mediaSel.end(), i);
                     if (it == mediaSel.end()) mediaSel.push_back(i);
@@ -7545,6 +7657,13 @@ int main(int argc, char* argv[]) {
                 }
             }
             if (ImGui::IsMouseHoveringRect(g0, g1) && ImGui::IsMouseClicked(1)) {
+                selectedClip = -1;
+                selection.clear();
+                contextClip = -1;
+                selectedBus = -1;
+                selectedSub = -1;
+                subSelection.clear();
+                gOverlaySel = -1;
                 mediaSel.clear();
                 mediaSel.push_back(i);
                 floatMedia = i;
@@ -7657,9 +7776,9 @@ int main(int argc, char* argv[]) {
                     OverlayBox(o, previewFrameMin.x, previewFrameMin.y, previewFrameMax.x, previewFrameMax.y, ax, ay, bx, by, currentTime);
                     float hx = (ax + bx) * 0.5f;
                     float hy = ay + 16.0f;
-                    if (std::fabs(m.x - hx) < 10.0f && std::fabs(m.y - hy) < 10.0f) { gOverlaySel = i; ovDragMode = 3; ovDragIndex = i; break; }
-                    if (std::fabs(m.x - bx) < 12.0f && std::fabs(m.y - by) < 12.0f) { gOverlaySel = i; ovDragMode = 2; ovDragIndex = i; break; }
-                    if (m.x >= ax && m.x <= bx && m.y >= ay && m.y <= by) { gOverlaySel = i; ovDragMode = 1; ovDragIndex = i; break; }
+                    if (std::fabs(m.x - hx) < 10.0f && std::fabs(m.y - hy) < 10.0f) { FocusOverlay(i); ovDragMode = 3; ovDragIndex = i; break; }
+                    if (std::fabs(m.x - bx) < 12.0f && std::fabs(m.y - by) < 12.0f) { FocusOverlay(i); ovDragMode = 2; ovDragIndex = i; break; }
+                    if (m.x >= ax && m.x <= bx && m.y >= ay && m.y <= by) { FocusOverlay(i); ovDragMode = 1; ovDragIndex = i; break; }
                 }
 #ifdef HAVE_FFMPEG
                 if (ovDragMode == 0 && xformOpen && XformOnScreen(xformClip, topClip, previewPlate)) {
@@ -7912,6 +8031,11 @@ int main(int argc, char* argv[]) {
                 selectedBus = i;
                 selectedClip = -1;
                 selection.clear();
+                contextClip = -1;
+                selectedSub = -1;
+                subSelection.clear();
+                mediaSel.clear();
+                gOverlaySel = -1;
                 openBusMenu = true;
                 busGradeOpen = true;
                 openedPanelThisFrame = true;
@@ -7920,6 +8044,11 @@ int main(int argc, char* argv[]) {
                 selectedBus = i;
                 selectedClip = -1;
                 selection.clear();
+                contextClip = -1;
+                selectedSub = -1;
+                subSelection.clear();
+                mediaSel.clear();
+                gOverlaySel = -1;
                 if (mouse.x < cp0.x + 8) { trimmingBus = i; trimBusSide = 0; }
                 else if (mouse.x > cp1.x - 8) { trimmingBus = i; trimBusSide = 1; }
                 else { draggingBus = i; busDragOffset = mouse.x - cp0.x; trimmingBus = -1; }
@@ -7947,10 +8076,10 @@ int main(int argc, char* argv[]) {
                 float st = localX / pixelsPerSecond;
                 if (st < 0) st = 0;
                 OverlayAdd(kind, SnapTime(-1, st));
+                FocusOverlay(gOverlaySel);
                 ovPanel = gOverlaySel;
                 ovPanelOpen = true;
                 openedPanelThisFrame = true;
-                selectedClip = -1;
             }
             ImGui::EndDragDropTarget();
         }
@@ -7980,15 +8109,13 @@ int main(int argc, char* argv[]) {
             ImVec2 mouse = ImGui::GetMousePos();
             if (mouse.x < cp0.x + 8 || mouse.x > cp1.x - 8) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
             if (ImGui::IsMouseClicked(1)) {
-                gOverlaySel = i;
+                FocusOverlay(i);
                 ovPanel = i;
                 ovPanelOpen = true;
                 openedPanelThisFrame = true;
-                selectedClip = -1;
             }
             if (ImGui::IsMouseClicked(0)) {
-                gOverlaySel = i;
-                selectedClip = -1;
+                FocusOverlay(i);
                 if (mouse.x < cp0.x + 8) { trimmingOv = i; trimOvSide = 0; draggingOv = -1; }
                 else if (mouse.x > cp1.x - 8) { trimmingOv = i; trimOvSide = 1; draggingOv = -1; }
                 else { draggingOv = i; ovDragOffset = mouse.x - cp0.x; trimmingOv = -1; }
@@ -8043,13 +8170,16 @@ int main(int argc, char* argv[]) {
                 ImVec2 mouse = ImGui::GetMousePos();
                 if (mouse.x < cp0.x + 8 || mouse.x > cp1.x - 8) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
                 if (ImGui::IsMouseClicked(1)) {
-                    SelectOnly(i);
+                    if (!IsSelected(i)) SelectOnly(i);
+                    else { selectedClip = i; ClearLaneRivals(); }
+                    contextClip = i;
                     gsPanelClip = i;
                     gsPanelOpen = true;
+                    openClipMenu = true;
                     openedPanelThisFrame = true;
                 }
                 if (ImGui::IsMouseClicked(0)) {
-                    if (IsSelected(i)) selectedClip = i;
+                    if (IsSelected(i)) { selectedClip = i; ClearLaneRivals(); }
                     else SelectOnly(i);
                     if (mouse.x < cp0.x + 8) { trimmingClip = i; trimSide = 0; trimAnchorX = mouse.x; trimOrigStart = clips[i].startTime; trimOrigDur = clips[i].duration; trimOrigOffset = clips[i].sourceOffset; }
                     else if (mouse.x > cp1.x - 8) { trimmingClip = i; trimSide = 1; trimAnchorX = mouse.x; trimOrigStart = clips[i].startTime; trimOrigDur = clips[i].duration; trimOrigOffset = clips[i].sourceOffset; }
@@ -8095,12 +8225,15 @@ int main(int argc, char* argv[]) {
                     subSelection.push_back(i);
                     selectedClip = -1;
                     selection.clear();
+                    contextClip = -1;
+                    ClearLaneRivals();
                     subStyleOpen = true;
                     openedPanelThisFrame = true;
                     subStyleClick = false;
                 }
                 if (ImGui::IsMouseClicked(0)) {
                     bool keep = std::find(subSelection.begin(), subSelection.end(), i) != subSelection.end();
+                    ClearLaneRivals();
                     if (keep) selectedSub = i;
                     else {
                         selectedSub = i;
@@ -8236,7 +8369,7 @@ int main(int argc, char* argv[]) {
                     }
                     if (ImGui::IsMouseClicked(1)) {
                         if (!IsSelected(i)) SelectOnly(i);
-                        else selectedClip = i;
+                        else { selectedClip = i; ClearLaneRivals(); }
                         contextClip = i;
                         EnsureEnvelope(clips[i]);
                         openClipMenu = true;
@@ -8262,7 +8395,7 @@ int main(int argc, char* argv[]) {
                         ToggleSelect(i);
                         break;
                     }
-                    if (IsSelected(i)) selectedClip = i;
+                    if (IsSelected(i)) { selectedClip = i; ClearLaneRivals(); }
                     else SelectOnly(i);
                     EnsureEnvelope(clips[i]);
                     int hit = -1;
@@ -8433,6 +8566,7 @@ int main(int argc, char* argv[]) {
                     } else if (prevTrack == kGsTrack) {
                         ReleaseGsImageContain(clips[draggingClip]);
                     }
+                    FollowLeaderChannel(draggingClip, prevTrack);
                 }
             } else { draggingClip = -1; ClearGroupDrag(); }
         }
@@ -8566,22 +8700,33 @@ int main(int argc, char* argv[]) {
                 ImGui::TextUnformatted("Clip");
                 ImGui::Separator();
                 if (ImGui::MenuItem("Fade In", nullptr, &c.fadeIn)) {
+                    bool v = c.fadeIn;
+                    for (int i : selection)
+                        if (i >= 0 && i < (int)clips.size()) clips[i].fadeIn = v;
                     shownLocal = -1000.0f;
 #ifdef HAVE_FFMPEG
                     ResetAudioSync();
 #endif
                 }
                 if (ImGui::MenuItem("Fade Out", nullptr, &c.fadeOut)) {
+                    bool v = c.fadeOut;
+                    for (int i : selection)
+                        if (i >= 0 && i < (int)clips.size()) clips[i].fadeOut = v;
                     shownLocal = -1000.0f;
 #ifdef HAVE_FFMPEG
                     ResetAudioSync();
 #endif
                 }
                 if (ImGui::MenuItem("Mute", nullptr, &c.muted)) {
+                    bool v = c.muted;
+                    for (int i : selection)
+                        if (i >= 0 && i < (int)clips.size()) clips[i].muted = v;
 #ifdef HAVE_FFMPEG
                     ResetAudioSync();
 #endif
                 }
+                if (ImGui::MenuItem("Channel up")) NudgeSelectionChannel(-1);
+                if (ImGui::MenuItem("Channel down")) NudgeSelectionChannel(1);
                 if (c.mediaId >= 0 && c.mediaId < (int)media.size() && media[c.mediaId].type != "audio") {
                     if (ImGui::MenuItem("Transform")) {
                         xformClip = contextClip;
@@ -8599,8 +8744,10 @@ int main(int argc, char* argv[]) {
                     const char* labels[] = {"1.0x", "1.1x", "1.25x", "1.5x", "1.75x", "2x"};
                     for (int s = 0; s < 6; s++) {
                         bool on = std::fabs(c.speed - speeds[s]) < 0.02f;
-                        if (ImGui::MenuItem(labels[s], nullptr, on))
-                            SetClipSpeed(c, speeds[s]);
+                        if (ImGui::MenuItem(labels[s], nullptr, on)) {
+                            for (int i : selection)
+                                if (i >= 0 && i < (int)clips.size()) SetClipSpeed(clips[i], speeds[s]);
+                        }
                     }
                     ImGui::EndMenu();
                 }

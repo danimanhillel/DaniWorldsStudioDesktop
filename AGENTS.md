@@ -15,3 +15,7 @@ ripple insert, or panels-above-timeline.
   RIFE stays. The `swinir_realsr_x4.onnx` file beside the exe is unused.
 - Imported images that enter the GS channel keep their aspect (`ContainGsImage`,
   `gsFit`). Video GS and solids still fill. Do not rebake every frame.
+- A multi-selection moves up or down a channel together when that channel
+  exists. Mute, fade, and speed from the clip menu apply to every selected
+  clip. Clicking an effect clears the clip selection, so Delete removes the
+  effect and not a leftover clip.

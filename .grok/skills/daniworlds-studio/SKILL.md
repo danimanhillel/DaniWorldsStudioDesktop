@@ -29,7 +29,7 @@ not tell them to rebuild.
 |---|---|
 | Remote | `github.com/danimanhillel/DaniWorldsStudioDesktop`, branch `main` |
 | Local mirror | `/tmp/dws` |
-| Skill written against | GS imported images keep their aspect; SwinIR stays removed; RIFE remains |
+| Skill written against | Multi-select can change channel; click selects one kind; SwinIR stays removed |
 
 Sources: `src/main.cpp` (almost all UI, timeline, preview, export), `effects.cpp`,
 `overlay_fx.cpp`, `rife.cpp` / `rife.h`, `asr.cpp` / `asr.h`,
@@ -274,18 +274,30 @@ post-step top clip is not stale. Do **not** call `SyncPreview` twice. Do
 One `selection` vector plus `selectedClip` for video, audio, **and** GS.
 Subtitles: `selectedSub` plus `subSelection`.
 
-- Clicking an **already selected** item must **not** `SelectOnly` (that was
-  breaking group drag).
-- Clicking an unselected item still selects only that one.
+- Clicking an **already selected** clip must **not** `SelectOnly` (that was
+  breaking group drag). Clicking a clip that is not in the selection still
+  selects only that one.
+- Clicking a different kind clears the others. An FX click (`FocusOverlay`)
+  clears clips, subs, bus, and media. A clip, sub, bus, or media click clears
+  `gOverlaySel`. Delete follows that selection, **not** `fxHover`. A selected
+  effect deletes even if the pointer has left it; a selected clip is not
+  deleted just because the pointer is over an effect.
 - Trim stays single-item.
-- A vertical track change applies only to the grabbed clip (`draggingClip`).
+- A vertical drag moves the **whole clip selection** by the same channel step
+  as the grabbed clip (`FollowLeaderChannel`), and only when that step lands
+  on a real channel. Picture ladder, top to bottom: GS, V1, V2, V3. Audio:
+  A1, A2, A3. A clip whose next channel does not exist stays. Right-click
+  **Channel up** / **Channel down** is one step of the same ladder.
 - `SnapTime` / `SnapStart` skip indices in `groupSkip`.
 - Clamp the group so nothing starts before 0 (`ApplyGroupDelta`).
 - Empty SUBS click **without** a drag still creates a subtitle.
-- Delete removes selected **clips and** selected subs. `WantTextInput` blocks
-  delete. Media-panel delete still wins over timeline delete.
-- If `selectedBus >= 0`, the bus wins (do not also delete clips).
-- Right-click a GS clip: `SelectOnly` and open the GS panel.
+- Delete removes the selected kind. Bus still wins over clips. Media still
+  wins over clips. `WantTextInput` blocks delete.
+- Right-click menu **Mute**, **Fade In**, **Fade Out**, and **Speed** write
+  the clicked clip's new value onto every clip in `selection`. Transform,
+  Color, and Audio Effects still open one clip.
+- Right-click a GS clip: if it is already in the multi-selection, keep that
+  selection; otherwise `SelectOnly`. Open the GS panel and the clip menu.
 - Right-click a subtitle: single-select and open style.
 - Shift-click `ToggleSelect` still clears `subSelection`. Leave that.
 
