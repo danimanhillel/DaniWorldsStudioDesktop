@@ -338,6 +338,7 @@ struct AudioSrc {
     int stream = -1;
     bool failed = false;
     bool noAudio = false;
+    bool atEnd = false;
     double nextTime = -1;
     std::vector<int16_t> fifo;
 };
@@ -1159,7 +1160,14 @@ struct PreviewRam {
         pct = want <= 0.01 ? 100 : (int)std::lround(got / want * 100.0);
         if (pct > 100) pct = 100;
         int best = -1;
+        auto nearReady = [&](const R& r) {
+            if (r.image) return Has(r.media, 0.0f);
+            float head = std::min(r.b, r.a + 1.0f);
+            float ahead = std::min(r.b, head + 1.5f);
+            return Has(r.media, head) && Has(r.media, ahead);
+        };
         for (int i = 0; i < (int)merged.size(); i++) {
+            if (merged[i].rank < 0.0f && nearReady(merged[i])) continue;
             if (!Covered(merged[i].media, merged[i].a, merged[i].b)) { best = i; break; }
         }
         if (best < 0) { pct = merged.empty() ? 0 : 100; return; }
@@ -1180,9 +1188,10 @@ struct PreviewRam {
                 if (r.media != activeMedia) continue;
                 if (r.b >= af - 0.25f && r.a <= at + 0.25f) useful = true;
             }
-            bool frontFirst = !merged.empty() && merged[0].rank < 0.0f && activeMedia != merged[0].media
-                && !Covered(merged[0].media, merged[0].a, merged[0].b);
-            if (!useful || frontFirst) gen.fetch_add(1);
+            bool frontNeeds = false;
+            if (!merged.empty() && merged[0].rank < 0.0f && activeMedia != merged[0].media && !nearReady(merged[0]))
+                frontNeeds = true;
+            if (!useful || frontNeeds) gen.fetch_add(1);
             return;
         }
         Task task;
@@ -1382,7 +1391,9 @@ void PullSamples(AudioSrc& a, double mediaTime, int count, int16_t* dst) {
         return;
     }
     if (mediaTime < 0) mediaTime = 0;
-    if (a.nextTime < 0 || std::fabs(a.nextTime - mediaTime) > 0.25) {
+    bool rewind = a.nextTime < 0 || mediaTime + 0.25 < a.nextTime;
+    bool drift = !a.atEnd && a.nextTime >= 0 && std::fabs(a.nextTime - mediaTime) > 0.25;
+    if (rewind || drift) {
         int64_t ts = (int64_t)(mediaTime / av_q2d(a.fmt->streams[a.stream]->time_base));
         av_seek_frame(a.fmt, a.stream, ts, AVSEEK_FLAG_BACKWARD);
         avcodec_flush_buffers(a.codec);
@@ -1390,6 +1401,7 @@ void PullSamples(AudioSrc& a, double mediaTime, int count, int16_t* dst) {
         if (a.swr) swr_init(a.swr);
         a.fifo.clear();
         a.nextTime = -1;
+        a.atEnd = false;
     }
     auto takeFrames = [&]() {
         while (avcodec_receive_frame(a.codec, a.frame) == 0) {
@@ -1415,11 +1427,11 @@ void PullSamples(AudioSrc& a, double mediaTime, int count, int16_t* dst) {
     };
     int spins = 0;
     bool eof = false;
-    while ((int)a.fifo.size() < count * 2 && spins < 20000) {
+    while (!a.atEnd && (int)a.fifo.size() < count * 2 && spins < 1500) {
         spins++;
         takeFrames();
         if ((int)a.fifo.size() >= count * 2) break;
-        if (av_read_frame(a.fmt, a.packet) < 0) { eof = true; break; }
+        if (av_read_frame(a.fmt, a.packet) < 0) { a.atEnd = true; eof = true; break; }
         if (a.packet->stream_index == a.stream) {
             int send = avcodec_send_packet(a.codec, a.packet);
             if (send == AVERROR(EAGAIN)) {
@@ -1446,6 +1458,11 @@ void PullSamples(AudioSrc& a, double mediaTime, int count, int16_t* dst) {
         a.fifo.erase(a.fifo.begin(), a.fifo.begin() + n * 2);
         if (a.nextTime < 0) a.nextTime = mediaTime;
         a.nextTime += n / 48000.0;
+    }
+    if (a.atEnd) {
+        double step = count / 48000.0;
+        if (a.nextTime < 0) a.nextTime = mediaTime;
+        if (a.nextTime < mediaTime + step) a.nextTime = mediaTime + step;
     }
     if (n < count) memset(dst + n * 2, 0, (size_t)(count - n) * 2 * sizeof(int16_t));
 }
@@ -4527,13 +4544,19 @@ static void SyncHeld(VideoPlayer*& slot, int& slotClip, int& slotMedia, float& s
     }
     bool ahead = slot->lastPts >= 0.0 && mediaT + 0.08f < (float)slot->lastPts;
     bool behind = slot->lastPts < 0.0 || (float)slot->lastPts + 0.08f < mediaT;
-    if (ahead || behind) {
+    if (isPlaying) {
+        if (slot->lastPts < 0.0 || ahead || (float)slot->lastPts + 1.0f < mediaT) {
+            slot->Seek(std::max(0.0f, mediaT));
+            slot->GrabFrame();
+        }
+    } else if (ahead || behind) {
         if (slot->lastPts < 0.0 || ahead || (float)slot->lastPts + 0.20f < mediaT)
             slot->Seek(std::max(0.0f, mediaT));
         slot->GrabFrame();
     }
     int guard = 0;
-    while (slot->lastPts >= 0.0 && (float)slot->lastPts + 0.0005f < mediaT && guard < 400) {
+    int cap = isPlaying ? 4 : 80;
+    while (slot->lastPts >= 0.0 && (float)slot->lastPts + 0.0005f < mediaT && guard < cap) {
         if (!slot->GrabFrame()) break;
         guard++;
     }
@@ -6384,6 +6407,7 @@ void EnsurePlayerForClip(int clipIdx) {
         }
         int guard = 0;
         int limit = behind ? 100 : 8;
+        if (isPlaying) limit = 4;
         while (p->lastPts >= 0.0 && (float)p->lastPts + 0.0005f < mediaT && guard < limit) {
             if (!p->GrabFrame()) break;
             guard++;
@@ -6444,7 +6468,8 @@ void EnsurePlayerForClip(int clipIdx) {
         if (!player->still) player->Seek(mediaT);
         if (player->GrabFrame()) {
             int guard = 0;
-            while (!image && !player->still && player->lastPts >= 0.0 && (float)player->lastPts + 0.0005f < mediaT && guard < 100) {
+            int walk = isPlaying ? 2 : 100;
+            while (!image && !player->still && player->lastPts >= 0.0 && (float)player->lastPts + 0.0005f < mediaT && guard < walk) {
                 if (!player->GrabFrame()) break;
                 guard++;
             }
@@ -6489,10 +6514,22 @@ static int NextVisibleClip(int currentTop, float from, float horizon, float& cha
 void PrefetchUpcoming(int top) {
 #ifdef HAVE_FFMPEG
     if (!isPlaying || draggingPlayhead) return;
+    for (int i = 0; i < (int)clips.size(); i++) {
+        int am = clips[i].mediaId;
+        if (am < 0 || am >= (int)media.size()) continue;
+        if (media[am].type == "image" || media[am].type == "audio") continue;
+        float start = clips[i].startTime;
+        if (start < currentTime - 0.2f || start > currentTime + 5.0f) continue;
+        int ai = EnsureAudio(am);
+        if (ai < 0 || ai >= (int)audioSrcs.size()) continue;
+        if (audioSrcs[ai].nextTime >= 0 || audioSrcs[ai].failed || audioSrcs[ai].noAudio || audioSrcs[ai].atEnd) continue;
+        int16_t junk[64];
+        PullSamples(audioSrcs[ai], std::max(0.0f, clips[i].sourceOffset), 32, junk);
+    }
     int ignored = -1;
     int nowTop = (top >= 0 && top < (int)clips.size()) ? top : TopPictureAt(currentTime, ignored);
     float changeAt = -1.0f;
-    int best = NextVisibleClip(nowTop, currentTime, 3.0f, changeAt);
+    int best = NextVisibleClip(nowTop, currentTime, 5.0f, changeAt);
     if (best < 0) {
         if (playerNext && nextClipIdx >= 0) {
             playerNext->Close();
@@ -6505,30 +6542,18 @@ void PrefetchUpcoming(int top) {
     if (mid < 0 || mid >= (int)media.size()) return;
     if (media[mid].type == "audio" || IsSolidPath(media[mid].path)) return;
     if (playingClip == best || playingClipUnder == best || playingClipB == best) return;
-    float when = currentTime;
-    if (when < clips[best].startTime) when = clips[best].startTime;
     float end = clips[best].startTime + clips[best].duration;
-    if (when > end) when = clips[best].startTime;
     bool image = media[mid].type == "image";
     float speed = std::max(0.05f, clips[best].speed);
-    float mediaT = image ? 0.0f : clips[best].sourceOffset + ClipLocalTime(best, when) * speed;
-    if (mediaT < 0) mediaT = 0;
     float cutWhen = changeAt;
     if (cutWhen < clips[best].startTime) cutWhen = clips[best].startTime;
     if (cutWhen > end) cutWhen = clips[best].startTime;
     float cutMedia = image ? 0.0f : clips[best].sourceOffset + ClipLocalTime(best, cutWhen) * speed;
+    if (cutWhen < clips[best].startTime) cutWhen = clips[best].startTime;
+    if (cutWhen > end) cutWhen = clips[best].startTime;
+    float cutMedia = image ? 0.0f : clips[best].sourceOffset + ClipLocalTime(best, cutWhen) * speed;
     if (cutMedia < 0) cutMedia = 0;
-    if (clips[best].startTime >= currentTime - 0.05f) {
-        int ai = EnsureAudio(mid);
-        if (ai >= 0 && ai < (int)audioSrcs.size() && audioSrcs[ai].nextTime < 0 && !audioSrcs[ai].failed && !audioSrcs[ai].noAudio) {
-            int16_t junk[64];
-            PullSamples(audioSrcs[ai], cutMedia, 32, junk);
-        }
-    }
-    float lo = std::min(mediaT, cutMedia);
-    float hi = std::max(mediaT, cutMedia);
-    bool cached = image ? gRam.Has(mid, 0.0f) : (gRam.Has(mid, cutMedia) || (hi - lo >= 0.05f && gRam.Covered(mid, lo, hi)));
-    if (cached) return;
+    if (image ? gRam.Has(mid, 0.0f) : gRam.Has(mid, cutMedia)) return;
     if (mid == playingMediaId && playerFileId == mid && player && player->fmtCtx && nowTop >= 0
         && nowTop < (int)clips.size() && clips[nowTop].mediaId >= 0 && clips[nowTop].mediaId < (int)media.size()) {
         float curSpeed = std::max(0.05f, clips[nowTop].speed);
@@ -6548,15 +6573,14 @@ void PrefetchUpcoming(int top) {
         if (playerNext->hasFrame) nextClipIdx = best;
         return;
     }
-    bool ahead = playerNext->lastPts >= 0.0 && mediaT + 0.20f < (float)playerNext->lastPts;
-    bool behind = playerNext->lastPts < 0.0 || (float)playerNext->lastPts + 2.5f < mediaT;
-    if (ahead || behind) {
-        playerNext->Seek(mediaT);
+    float park = cutMedia;
+    bool ahead = playerNext->lastPts >= 0.0 && park + 0.12f < (float)playerNext->lastPts;
+    if (playerNext->lastPts < 0.0 || ahead) {
+        playerNext->Seek(park);
         playerNext->GrabFrame();
     }
     int guard = 0;
-    int limit = (playerNext->lastPts >= 0.0 && (float)playerNext->lastPts + 0.25f < mediaT) ? 3 : 1;
-    while (playerNext->lastPts >= 0.0 && (float)playerNext->lastPts + 0.03f < mediaT && guard < limit) {
+    while (playerNext->lastPts >= 0.0 && (float)playerNext->lastPts + 0.03f < park && guard < 3) {
         if (!playerNext->GrabFrame()) break;
         guard++;
     }

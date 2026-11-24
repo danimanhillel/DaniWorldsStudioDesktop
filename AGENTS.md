@@ -19,10 +19,9 @@ ripple insert, or panels-above-timeline.
   exists. Mute, fade, and speed from the clip menu apply to every selected
   clip. Clicking an effect clears the clip selection, so Delete removes the
   effect and not a leftover clip.
-- A cut to a clip on another channel uses the cached frame or a decoder that
-  was already parked at that media time. Do not seek to the start of the file
-  and do not decode hundreds of frames on the cut. While playing, catch up at
-  most 4 frames per tick, and cache the visible clip before the one under it.
+- A cut between channels must not open a decoder or seek audio on that frame.
+  Cache the next clip once the one on screen has ~1.5s ahead. An audio clip
+  that reaches its end stays at the end and does not seek again.
 - Preview keeps more seconds ahead (small clips 14s, large clips 9s / 11s
   source). An empty click unselects only when more than one object is
   selected. Dropping an effect does not open its side panel.
