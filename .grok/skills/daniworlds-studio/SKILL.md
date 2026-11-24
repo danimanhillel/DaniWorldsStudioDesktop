@@ -29,7 +29,7 @@ not tell them to rebuild.
 |---|---|
 | Remote | `github.com/danimanhillel/DaniWorldsStudioDesktop`, branch `main` |
 | Local mirror | `/tmp/dws` |
-| Skill written against | Longer preview lookahead; empty multi-click unselects; FX drop does not open the panel; SwinIR stays removed |
+| Skill written against | Channel handoff stays on the cached or prefetched frame; empty multi-click unselects; FX drop does not open the panel; SwinIR stays removed |
 
 Sources: `src/main.cpp` (almost all UI, timeline, preview, export), `effects.cpp`,
 `overlay_fx.cpp`, `rife.cpp` / `rife.h`, `asr.cpp` / `asr.h`,
@@ -162,8 +162,17 @@ the `K` line. Old projects omit it.
 - Solids are not cached. Audio tracks are not cached.
 - `gRam.Tick` is skipped while export or ASR is running. Export does **not**
   use this cache, and it must not buffer full-resolution frames.
-- `PrefetchUpcoming` opens the next video clip when **3s** remain (it still
-  holds one decoded frame).
+- `PrefetchUpcoming` looks 3s ahead for the next picture change on any channel
+  (the clip underneath when this one ends, or a clip that cuts in on top).
+  It parks that decoder at the **media time of the handoff**, not at
+  `sourceOffset`, and keeps it within a frame. If `gRam` already covers that
+  moment, it does not open a second decoder.
+- At the cut, `EnsurePlayerForClip` shows the cached frame, or promotes
+  `playerUnder` / `playerB` / `playerNext` when that player is already on the
+  clip. It does **not** walk hundreds of frames on the UI thread, and it does
+  **not** `GrabFrame` a decoder that is still the previous file
+  (`playerFileId`). A same-file cut seeks only when the source times do not
+  meet. Audio for a clip that starts at the cut is opened before the cut.
 - `ExportSession::EnsureFrame` seeks forward only when the decoder is more
   than **1.25s** behind, then walks up to **160** frames. A short sequential
   gap must decode through, not keyframe-seek. A real backward jump still seeks.

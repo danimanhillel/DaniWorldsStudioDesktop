@@ -986,6 +986,25 @@ struct PreviewRam {
         return true;
     }
 
+    bool Has(int media, float mediaT) {
+        if (media < 0) return false;
+        std::lock_guard<std::mutex> lk(mu);
+        auto it = slots.find(media);
+        if (it == slots.end() || it->second.frames.empty()) return false;
+        const Slot& s = it->second;
+        int best = 0;
+        if (s.frames.size() > 1) {
+            int lo = 0, hi = (int)s.frames.size() - 1, ans = 0;
+            while (lo <= hi) {
+                int midI = (lo + hi) / 2;
+                if (s.frames[midI].pts <= mediaT + 0.02f) { ans = midI; lo = midI + 1; }
+                else hi = midI - 1;
+            }
+            best = ans;
+        }
+        return std::fabs(s.frames[best].pts - mediaT) <= 0.20f;
+    }
+
     int Percent() const { return pct.load(); }
     bool MemoryFull() const { return stalled.load() && pct.load() < 99; }
 
@@ -1175,6 +1194,7 @@ PreviewRam gRam;
 VideoPlayer* player = nullptr;
 int playingMediaId = -1;
 int playingClip = -1;
+int playerFileId = -1;
 VideoPlayer* playerB = nullptr;
 int playingMediaIdB = -1;
 int playingClipB = -1;
@@ -4376,6 +4396,8 @@ void ExportSession::Cancel() {
 
 ExportSession gExport;
 
+void EnsurePlayerForClip(int clipIdx);
+
 void SyncPreview(int topClip, float dt) {
     bool playing = isPlaying && !draggingPlayhead;
     if (topClip < 0 || !player) {
@@ -4398,6 +4420,18 @@ void SyncPreview(int topClip, float dt) {
         previewStatus = buf;
         PumpAudio();
         return;
+    }
+    if (playerFileId != mid) {
+        EnsurePlayerForClip(topClip);
+        if (player && gRam.Present(player, mid, mediaT)) {
+            shownLocal = mediaT;
+            PumpAudio();
+            return;
+        }
+        if (playerFileId != mid || !player || (!player->fmtCtx && !player->still)) {
+            PumpAudio();
+            return;
+        }
     }
     if (!player->fmtCtx) {
         if (player->still && player->hasFrame) previewStatus = "Solid";
@@ -6304,63 +6338,107 @@ void EnsurePlayerForClip(int clipIdx) {
     auto ready = [](VideoPlayer* p) {
         return p && p->hasFrame && (p->fmtCtx || p->still);
     };
-    if (clipIdx == playingClip && mid == playingMediaId && ready(player)) return;
-    if (playerB && playerB != player && ready(playerB) && playingClipB == clipIdx && playingMediaIdB == mid) {
+    bool image = media[mid].type == "image";
+    float speed = std::max(0.05f, clips[clipIdx].speed);
+    float mediaT = image ? 0.0f : clips[clipIdx].sourceOffset + ClipLocalTime(clipIdx, currentTime) * speed;
+    if (mediaT < 0) mediaT = 0;
+    if (clipIdx == playingClip && mid == playingMediaId && playerFileId == mid && ready(player)) return;
+    auto takeSlot = [&](VideoPlayer*& slot, int& slotClip, int& slotMedia, float& slotShown) -> bool {
+        if (!slot || slot == player || slotClip != clipIdx || slotMedia != mid) return false;
+        if (!ready(slot)) return false;
         VideoPlayer* previous = player;
-        player = playerB;
-        playerB = previous;
+        player = slot;
+        slot = previous;
         playingMediaId = mid;
         playingClip = clipIdx;
-        playingMediaIdB = -1;
-        playingClipB = -1;
-        shownLocalB = -1000.0f;
-        shownLocal = player->lastPts >= 0.0 ? (float)player->lastPts : shownLocal;
-        return;
-    }
-    auto land = [&](VideoPlayer* p) {
-        float mediaT = clips[clipIdx].sourceOffset + ClipLocalTime(clipIdx, currentTime) * std::max(0.05f, clips[clipIdx].speed);
-        if (media[mid].type == "image") mediaT = 0.0f;
-        if (mediaT < 0) mediaT = 0;
-        if (!p->hasFrame || p->lastPts < 0.0 || std::fabs((float)p->lastPts - mediaT) > 0.08f) {
-            if (p->lastPts < 0.0 || mediaT + 0.12f < (float)p->lastPts)
-                p->Seek(mediaT);
+        playerFileId = mid;
+        slotMedia = -1;
+        slotClip = -1;
+        slotShown = -1000.0f;
+        shownLocal = (player->lastPts >= 0.0) ? (float)player->lastPts : mediaT;
+        return true;
+    };
+    auto catchUp = [&](VideoPlayer* p) {
+        if (!p || p->still || image) {
+            shownLocal = mediaT;
+            return;
+        }
+        bool ahead = p->lastPts >= 0.0 && mediaT + 0.12f < (float)p->lastPts;
+        bool far = p->lastPts < 0.0 || (float)p->lastPts + 0.45f < mediaT;
+        if (!p->hasFrame || ahead || far) {
+            if (p->lastPts < 0.0 || ahead || far) p->Seek(mediaT);
             p->GrabFrame();
-            int guard = 0;
-            while (p->lastPts >= 0.0 && (float)p->lastPts + 0.0005f < mediaT && guard < 400) {
-                if (!p->GrabFrame()) break;
-                guard++;
-            }
+        }
+        int guard = 0;
+        int limit = far ? 100 : 8;
+        while (p->lastPts >= 0.0 && (float)p->lastPts + 0.0005f < mediaT && guard < limit) {
+            if (!p->GrabFrame()) break;
+            guard++;
         }
         shownLocal = p->lastPts >= 0.0 ? (float)p->lastPts : mediaT;
-        playingClip = clipIdx;
-        playingMediaId = mid;
     };
-    if (playerNext && nextClipIdx == clipIdx && nextMediaId == mid && playerNext->fmtCtx && playerNext->hasFrame) {
+    if (takeSlot(playerB, playingClipB, playingMediaIdB, shownLocalB)) {
+        if (std::fabs(shownLocal - mediaT) > 0.20f) catchUp(player);
+        return;
+    }
+    if (takeSlot(playerUnder, playingClipUnder, playingMediaIdUnder, shownLocalUnder)) {
+        if (std::fabs(shownLocal - mediaT) > 0.20f) catchUp(player);
+        return;
+    }
+    bool nextClose = playerNext && nextClipIdx == clipIdx && nextMediaId == mid && playerNext->fmtCtx && playerNext->hasFrame
+        && playerNext->lastPts >= 0.0 && std::fabs((float)playerNext->lastPts - mediaT) <= 0.20f;
+    auto adoptNext = [&]() {
         if (player) { player->Close(); delete player; }
         player = playerNext;
         playerNext = nullptr;
         nextMediaId = -1;
         nextClipIdx = -1;
-        land(player);
-        return;
-    }
-    if (mid == playingMediaId && player && player->fmtCtx) {
-        land(player);
+        playingClip = clipIdx;
+        playingMediaId = mid;
+        playerFileId = mid;
+        shownLocal = player->lastPts >= 0.0 ? (float)player->lastPts : mediaT;
+    };
+    if (nextClose) {
+        adoptNext();
         return;
     }
     if (!player) player = new VideoPlayer();
+    if (!(playerFileId == mid && player->fmtCtx)) {
+        if (gRam.Present(player, mid, mediaT)) {
+            playingClip = clipIdx;
+            playingMediaId = mid;
+            shownLocal = mediaT;
+            return;
+        }
+    }
+    if (playerNext && nextClipIdx == clipIdx && nextMediaId == mid && playerNext->hasFrame && (playerNext->fmtCtx || playerNext->still)) {
+        adoptNext();
+        if (std::fabs(shownLocal - mediaT) > 0.20f) catchUp(player);
+        return;
+    }
+    if (mid == playingMediaId && playerFileId == mid && player->fmtCtx) {
+        catchUp(player);
+        playingClip = clipIdx;
+        playingMediaId = mid;
+        return;
+    }
     previewStatus = "Opening...";
     shownLocal = -1000.0f;
     if (player->Open(media[mid].path)) {
         playingMediaId = mid;
         playingClip = clipIdx;
-        float mediaT = clips[clipIdx].sourceOffset + ClipLocalTime(clipIdx, currentTime) * std::max(0.05f, clips[clipIdx].speed);
-        player->Seek(mediaT);
+        playerFileId = mid;
+        if (!player->still) player->Seek(mediaT);
         if (player->GrabFrame()) {
+            int guard = 0;
+            while (!image && !player->still && player->lastPts >= 0.0 && (float)player->lastPts + 0.0005f < mediaT && guard < 100) {
+                if (!player->GrabFrame()) break;
+                guard++;
+            }
             char buf[64];
             snprintf(buf, sizeof(buf), "%s %dx%d", player->decName, player->width, player->height);
             previewStatus = buf;
-            shownLocal = mediaT;
+            shownLocal = player->lastPts >= 0.0 ? (float)player->lastPts : mediaT;
         } else {
             previewStatus = player->lastError.empty() ? "Grab failed" : player->lastError;
         }
@@ -6373,42 +6451,101 @@ void EnsurePlayerForClip(int clipIdx) {
 #endif
 }
 
+static int NextVisibleClip(int currentTop, float from, float horizon, float& changeAt) {
+    changeAt = -1.0f;
+    int best = -1;
+    float bestT = from + horizon + 1.0f;
+    for (int i = 0; i < (int)clips.size(); i++) {
+        if (clips[i].track >= 3) continue;
+        float marks[2] = {clips[i].startTime, clips[i].startTime + clips[i].duration};
+        for (int m = 0; m < 2; m++) {
+            float t = marks[m];
+            if (t < from + 0.03f || t > from + horizon || t > bestT + 0.0005f) continue;
+            int plate = -1;
+            int vis = TopPictureAt(t + 0.002f, plate);
+            if (vis < 0 || vis == currentTop) continue;
+            bestT = t;
+            best = vis;
+        }
+    }
+    if (best < 0) return -1;
+    changeAt = bestT;
+    return best;
+}
+
 void PrefetchUpcoming(int top) {
 #ifdef HAVE_FFMPEG
-    if (!isPlaying || draggingPlayhead || top < 0 || top >= (int)clips.size()) return;
-    float end = clips[top].startTime + clips[top].duration;
-    float remain = end - currentTime;
-    if (remain > 3.0f || remain < -0.05f) return;
-    float look = end + 0.03f;
-    int best = -1;
-    int bestTrack = 99;
-    for (int i = 0; i < (int)clips.size(); i++) {
-        if (i == top || clips[i].track >= 3) continue;
-        if (look < clips[i].startTime || look >= clips[i].startTime + clips[i].duration) continue;
-        if (clips[i].track < bestTrack) { bestTrack = clips[i].track; best = i; }
+    if (!isPlaying || draggingPlayhead) return;
+    int ignored = -1;
+    int nowTop = (top >= 0 && top < (int)clips.size()) ? top : TopPictureAt(currentTime, ignored);
+    float changeAt = -1.0f;
+    int best = NextVisibleClip(nowTop, currentTime, 3.0f, changeAt);
+    if (best < 0) {
+        if (playerNext && nextClipIdx >= 0) {
+            playerNext->Close();
+            nextMediaId = -1;
+            nextClipIdx = -1;
+        }
+        return;
     }
-    if (best < 0) return;
     int mid = clips[best].mediaId;
     if (mid < 0 || mid >= (int)media.size()) return;
-    if (mid == playingMediaId) return;
-    if (nextClipIdx == best && playerNext && playerNext->fmtCtx && playerNext->hasFrame) return;
+    if (media[mid].type == "audio" || IsSolidPath(media[mid].path)) return;
+    if (playingClip == best || playingClipUnder == best || playingClipB == best) return;
+    float when = currentTime;
+    if (when < clips[best].startTime) when = clips[best].startTime;
+    float end = clips[best].startTime + clips[best].duration;
+    if (when > end) when = clips[best].startTime;
+    bool image = media[mid].type == "image";
+    float speed = std::max(0.05f, clips[best].speed);
+    float mediaT = image ? 0.0f : clips[best].sourceOffset + ClipLocalTime(best, when) * speed;
+    if (mediaT < 0) mediaT = 0;
+    float cutWhen = changeAt;
+    if (cutWhen < clips[best].startTime) cutWhen = clips[best].startTime;
+    if (cutWhen > end) cutWhen = clips[best].startTime;
+    float cutMedia = image ? 0.0f : clips[best].sourceOffset + ClipLocalTime(best, cutWhen) * speed;
+    if (cutMedia < 0) cutMedia = 0;
+    if (clips[best].startTime >= currentTime - 0.05f) {
+        int ai = EnsureAudio(mid);
+        if (ai >= 0 && ai < (int)audioSrcs.size() && audioSrcs[ai].nextTime < 0 && !audioSrcs[ai].failed && !audioSrcs[ai].noAudio) {
+            int16_t junk[64];
+            PullSamples(audioSrcs[ai], cutMedia, 32, junk);
+        }
+    }
+    float lo = std::min(mediaT, cutMedia);
+    float hi = std::max(mediaT, cutMedia);
+    bool cached = image ? gRam.Has(mid, 0.0f) : (gRam.Has(mid, cutMedia) || (hi - lo >= 0.05f && gRam.Covered(mid, lo, hi)));
+    if (cached) return;
+    if (mid == playingMediaId && playerFileId == mid && player && player->fmtCtx && nowTop >= 0
+        && nowTop < (int)clips.size() && clips[nowTop].mediaId >= 0 && clips[nowTop].mediaId < (int)media.size()) {
+        float curSpeed = std::max(0.05f, clips[nowTop].speed);
+        bool curImage = media[clips[nowTop].mediaId].type == "image";
+        float curMedia = curImage ? 0.0f : clips[nowTop].sourceOffset + ClipLocalTime(nowTop, currentTime) * curSpeed;
+        float lead = std::max(0.0f, changeAt - currentTime);
+        if (std::fabs((curMedia + lead * curSpeed) - cutMedia) < 0.20f) return;
+    }
     if (!playerNext) playerNext = new VideoPlayer();
-    if (nextMediaId != mid || !playerNext->fmtCtx) {
+    if (nextMediaId != mid || !(playerNext->fmtCtx || playerNext->still)) {
         if (!playerNext->Open(media[mid].path)) return;
         nextMediaId = mid;
         nextClipIdx = -1;
     }
-    float mediaT = clips[best].sourceOffset;
-    if (media[mid].type == "image") mediaT = 0.0f;
-    if (mediaT < 0) mediaT = 0;
-    if (!playerNext->hasFrame || playerNext->lastPts < 0.0 || std::fabs((float)playerNext->lastPts - mediaT) > 0.35f) {
+    if (image || playerNext->still) {
+        if (!playerNext->hasFrame) playerNext->GrabFrame();
+        if (playerNext->hasFrame) nextClipIdx = best;
+        return;
+    }
+    bool ahead = playerNext->lastPts >= 0.0 && mediaT + 0.20f < (float)playerNext->lastPts;
+    bool far = playerNext->lastPts < 0.0 || (float)playerNext->lastPts + 2.5f < mediaT;
+    if (ahead || far) {
         playerNext->Seek(mediaT);
         playerNext->GrabFrame();
-        int guard = 0;
-        while (playerNext->lastPts >= 0.0 && (float)playerNext->lastPts + 0.05f < mediaT && guard < 4) {
-            if (!playerNext->GrabFrame()) break;
-            guard++;
-        }
+    }
+    int guard = 0;
+    int limit = (playerNext->lastPts >= 0.0 && (float)playerNext->lastPts + 0.25f < mediaT) ? 3 : 1;
+    while (playerNext->lastPts >= 0.0 && (float)playerNext->lastPts + 0.03f < mediaT && guard < limit) {
+        if (!playerNext->GrabFrame()) break;
+        guard++;
     }
     if (playerNext->hasFrame) nextClipIdx = best;
 #else
@@ -6717,6 +6854,7 @@ void ClearProject() {
     libPlayId = -1;
     playingMediaId = -1;
     playingClip = -1;
+    playerFileId = -1;
     playingMediaIdB = -1;
     playingClipB = -1;
     playingMediaIdUnder = -1;
@@ -6763,6 +6901,7 @@ void RemoveMedia(int id) {
     libPlayId = -1;
     playingMediaId = -1;
     playingClip = -1;
+    playerFileId = -1;
     playingMediaIdB = -1;
     playingClipB = -1;
     playingMediaIdUnder = -1;
@@ -7065,6 +7204,7 @@ static void ApplyEdit(const EditSnap& e) {
         libPlayId = -1;
         playingMediaId = -1;
         playingClip = -1;
+        playerFileId = -1;
         playingMediaIdB = -1;
         playingClipB = -1;
         playingMediaIdUnder = -1;
