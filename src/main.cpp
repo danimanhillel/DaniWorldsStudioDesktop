@@ -6549,9 +6549,6 @@ void PrefetchUpcoming(int top) {
     if (cutWhen < clips[best].startTime) cutWhen = clips[best].startTime;
     if (cutWhen > end) cutWhen = clips[best].startTime;
     float cutMedia = image ? 0.0f : clips[best].sourceOffset + ClipLocalTime(best, cutWhen) * speed;
-    if (cutWhen < clips[best].startTime) cutWhen = clips[best].startTime;
-    if (cutWhen > end) cutWhen = clips[best].startTime;
-    float cutMedia = image ? 0.0f : clips[best].sourceOffset + ClipLocalTime(best, cutWhen) * speed;
     if (cutMedia < 0) cutMedia = 0;
     if (image ? gRam.Has(mid, 0.0f) : gRam.Has(mid, cutMedia)) return;
     if (mid == playingMediaId && playerFileId == mid && player && player->fmtCtx && nowTop >= 0
