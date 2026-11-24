@@ -6364,13 +6364,13 @@ void EnsurePlayerForClip(int clipIdx) {
             return;
         }
         bool ahead = p->lastPts >= 0.0 && mediaT + 0.12f < (float)p->lastPts;
-        bool far = p->lastPts < 0.0 || (float)p->lastPts + 0.45f < mediaT;
-        if (!p->hasFrame || ahead || far) {
-            if (p->lastPts < 0.0 || ahead || far) p->Seek(mediaT);
+        bool behind = p->lastPts < 0.0 || (float)p->lastPts + 0.45f < mediaT;
+        if (!p->hasFrame || ahead || behind) {
+            if (p->lastPts < 0.0 || ahead || behind) p->Seek(mediaT);
             p->GrabFrame();
         }
         int guard = 0;
-        int limit = far ? 100 : 8;
+        int limit = behind ? 100 : 8;
         while (p->lastPts >= 0.0 && (float)p->lastPts + 0.0005f < mediaT && guard < limit) {
             if (!p->GrabFrame()) break;
             guard++;
@@ -6536,8 +6536,8 @@ void PrefetchUpcoming(int top) {
         return;
     }
     bool ahead = playerNext->lastPts >= 0.0 && mediaT + 0.20f < (float)playerNext->lastPts;
-    bool far = playerNext->lastPts < 0.0 || (float)playerNext->lastPts + 2.5f < mediaT;
-    if (ahead || far) {
+    bool behind = playerNext->lastPts < 0.0 || (float)playerNext->lastPts + 2.5f < mediaT;
+    if (ahead || behind) {
         playerNext->Seek(mediaT);
         playerNext->GrabFrame();
     }
