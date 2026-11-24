@@ -160,6 +160,9 @@ the `K` line. Old projects omit it.
 - Hard cap stays **1GB** (`1024ull << 20`) plus `RoomFor`: leave at least 2GB
   physical RAM free (or 1/5 of RAM, whichever is larger). Do not raise the cap.
 - Solids are not cached. Audio tracks are not cached.
+- The clip that is actually on screen is cached before the one underneath it.
+  While playing, the live decoder never catches up more than 4 frames on the
+  UI thread. A longer walk freezes playback when the clip underneath ends.
 - `gRam.Tick` is skipped while export or ASR is running. Export does **not**
   use this cache, and it must not buffer full-resolution frames.
 - `PrefetchUpcoming` looks 3s ahead for the next picture change on any channel

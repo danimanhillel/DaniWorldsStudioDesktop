@@ -1026,7 +1026,16 @@ struct PreviewRam {
             }
             return w * h * 4;
         };
-        for (const Clip& c : clips) {
+        int frontClip = -1;
+        int frontTrack = 99;
+        for (int i = 0; i < (int)clips.size(); i++) {
+            const Clip& c = clips[i];
+            if (c.track >= 3) continue;
+            if (time < c.startTime || time >= c.startTime + c.duration) continue;
+            if (c.track < frontTrack) { frontTrack = c.track; frontClip = i; }
+        }
+        for (int i = 0; i < (int)clips.size(); i++) {
+            const Clip& c = clips[i];
             if (c.track >= 3 && c.track != kGsTrack) continue;
             if (c.mediaId < 0 || c.mediaId >= (int)media.size()) continue;
             if (media[c.mediaId].type == "audio") continue;
@@ -1065,7 +1074,7 @@ struct PreviewRam {
             }
             if (time < c.startTime) r.rank = c.startTime - time;
             else if (time > clipEnd) r.rank = time - clipEnd;
-            else r.rank = 0;
+            else r.rank = (i == frontClip) ? -1.0f : 0.0f;
             ranges.push_back(r);
         }
         std::sort(ranges.begin(), ranges.end(), [](const R& a, const R& b) {
@@ -1102,11 +1111,12 @@ struct PreviewRam {
                 Slot& s = it->second;
                 float a = w->second.first;
                 float b = w->second.second;
-                auto fr = s.frames.begin();
-                while (fr != s.frames.end()) {
-                    if (fr->pts < a - 0.15f || fr->pts > b + 1.0f) fr = s.frames.erase(fr);
-                    else ++fr;
+                std::vector<Frame> keep;
+                keep.reserve(s.frames.size());
+                for (auto& f : s.frames) {
+                    if (f.pts >= a - 0.15f && f.pts <= b + 1.0f) keep.push_back(std::move(f));
                 }
+                s.frames.swap(keep);
                 if (s.frames.empty()) it = slots.erase(it);
                 else ++it;
             }
@@ -1170,7 +1180,9 @@ struct PreviewRam {
                 if (r.media != activeMedia) continue;
                 if (r.b >= af - 0.25f && r.a <= at + 0.25f) useful = true;
             }
-            if (!useful) gen.fetch_add(1);
+            bool frontFirst = !merged.empty() && merged[0].rank < 0.0f && activeMedia != merged[0].media
+                && !Covered(merged[0].media, merged[0].a, merged[0].b);
+            if (!useful || frontFirst) gen.fetch_add(1);
             return;
         }
         Task task;
@@ -4457,7 +4469,8 @@ void SyncPreview(int topClip, float dt) {
         player->GrabFrame();
     }
     int limit = 2;
-    if (player->lastPts < 0.0 || (float)player->lastPts + 0.08f < mediaT) limit = 400;
+    if (player->lastPts < 0.0 || (float)player->lastPts + 0.08f < mediaT)
+        limit = playing ? 4 : 400;
     int guard = 0;
     while (player->lastPts >= 0.0 && (float)player->lastPts + 0.0005f < mediaT && guard < limit) {
         if (!player->GrabFrame()) break;

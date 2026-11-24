@@ -21,7 +21,8 @@ ripple insert, or panels-above-timeline.
   effect and not a leftover clip.
 - A cut to a clip on another channel uses the cached frame or a decoder that
   was already parked at that media time. Do not seek to the start of the file
-  and do not decode hundreds of frames on the cut.
+  and do not decode hundreds of frames on the cut. While playing, catch up at
+  most 4 frames per tick, and cache the visible clip before the one under it.
 - Preview keeps more seconds ahead (small clips 14s, large clips 9s / 11s
   source). An empty click unselects only when more than one object is
   selected. Dropping an effect does not open its side panel.
