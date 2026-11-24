@@ -992,8 +992,8 @@ struct PreviewRam {
     void Tick(float time) {
         struct R { int media; std::string path; float a, b, rank; bool image; };
         std::vector<R> ranges;
-        const float nearBehind = 1.5f;
-        const float nearAhead = 8.0f;
+        const float nearBehind = 2.0f;
+        const float nearAhead = 14.0f;
         const uint64_t fullBudget = 200ull << 20;
         auto proxyBytes = [](float aspect) -> int {
             if (!(aspect > 0.05f)) aspect = 16.0f / 9.0f;
@@ -1024,7 +1024,7 @@ struct PreviewRam {
             bool full = image || est <= fullBudget;
             if (full) {
                 if (clipEnd < time - nearBehind || c.startTime > time + nearAhead) continue;
-            } else if (clipEnd < time - 0.5f || c.startTime > time + 4.5f) {
+            } else if (clipEnd < time - 1.0f || c.startTime > time + 9.0f) {
                 continue;
             }
             R r;
@@ -1035,11 +1035,11 @@ struct PreviewRam {
                 r.a = image ? 0.0f : srcA;
                 r.b = image ? 0.05f : srcB;
             } else {
-                float visA = std::max(c.startTime, time - 0.5f);
-                float visB = std::min(clipEnd, time + 4.5f);
+                float visA = std::max(c.startTime, time - 1.0f);
+                float visB = std::min(clipEnd, time + 9.0f);
                 r.a = std::max(0.0f, c.sourceOffset + (visA - c.startTime) * speed);
                 r.b = c.sourceOffset + (visB - c.startTime) * speed;
-                if (r.b > r.a + 6.0f) r.b = r.a + 6.0f;
+                if (r.b > r.a + 11.0f) r.b = r.a + 11.0f;
                 if (media[c.mediaId].duration > 0.2f && r.b > media[c.mediaId].duration + 0.05f)
                     r.b = media[c.mediaId].duration + 0.05f;
                 if (r.b < r.a + 0.04f) r.b = r.a + 0.04f;
@@ -1085,7 +1085,7 @@ struct PreviewRam {
                 float b = w->second.second;
                 auto fr = s.frames.begin();
                 while (fr != s.frames.end()) {
-                    if (fr->pts < a - 0.08f || fr->pts > b + 0.40f) fr = s.frames.erase(fr);
+                    if (fr->pts < a - 0.15f || fr->pts > b + 1.0f) fr = s.frames.erase(fr);
                     else ++fr;
                 }
                 if (s.frames.empty()) it = slots.erase(it);
@@ -2462,7 +2462,7 @@ bool ExportSession::EnsureFrame(int mediaId, double mediaTime) {
     bool isImage = media[mediaId].type == "image";
     if (isImage && d.imageDone) return d.rw > 0;
     if (mediaTime < 0) mediaTime = 0;
-    bool needSeek = !isImage && (d.lastPts < 0 || mediaTime + 0.08 < d.lastPts || mediaTime - d.lastPts > 0.50);
+    bool needSeek = !isImage && (d.lastPts < 0 || mediaTime + 0.08 < d.lastPts || mediaTime - d.lastPts > 1.25);
     if (needSeek) {
         int64_t ts = (int64_t)(mediaTime / av_q2d(d.fmt->streams[d.stream]->time_base));
         av_seek_frame(d.fmt, d.stream, ts, AVSEEK_FLAG_BACKWARD);
@@ -2470,7 +2470,7 @@ bool ExportSession::EnsureFrame(int mediaId, double mediaTime) {
         d.lastPts = -1;
     }
     int guard = 0;
-    while (guard++ < 80) {
+    while (guard++ < 160) {
         if (d.rw > 0 && d.lastPts >= 0 && d.lastPts + 0.0001 >= mediaTime) {
             if (isImage) d.imageDone = true;
             return true;
@@ -5779,6 +5779,30 @@ static void RestoreUiShield() {
     ClearTimelineDrags();
 }
 
+static void UnselectAll() {
+    selection.clear();
+    selectedClip = -1;
+    contextClip = -1;
+    subSelection.clear();
+    selectedSub = -1;
+    selectedBus = -1;
+    mediaSel.clear();
+    gOverlaySel = -1;
+}
+
+static int SelectedObjectCount() {
+    int n = (int)selection.size() + (int)subSelection.size() + (int)mediaSel.size();
+    if (selectedBus >= 0) n++;
+    if (gOverlaySel >= 0) n++;
+    return n;
+}
+
+static bool UnselectIfMany() {
+    if (SelectedObjectCount() <= 1) return false;
+    UnselectAll();
+    return true;
+}
+
 static void ClearLaneRivals() {
     selectedBus = -1;
     mediaSel.clear();
@@ -6354,7 +6378,7 @@ void PrefetchUpcoming(int top) {
     if (!isPlaying || draggingPlayhead || top < 0 || top >= (int)clips.size()) return;
     float end = clips[top].startTime + clips[top].duration;
     float remain = end - currentTime;
-    if (remain > 1.0f || remain < -0.05f) return;
+    if (remain > 3.0f || remain < -0.05f) return;
     float look = end + 0.03f;
     int best = -1;
     int bestTrack = 99;
@@ -8054,7 +8078,7 @@ int main(int argc, char* argv[]) {
                 else { draggingBus = i; busDragOffset = mouse.x - cp0.x; trimmingBus = -1; }
             }
         }
-        if (busEmptyClick) {
+        if (busEmptyClick && !UnselectIfMany()) {
             float end = 0.0f;
             for (const auto& c : clips) end = std::max(end, c.startTime + c.duration);
             if (end < 0.5f) end = 5.0f;
@@ -8069,6 +8093,7 @@ int main(int argc, char* argv[]) {
         ImVec2 fxStart = ImGui::GetCursorScreenPos();
         ovOriginX = fxStart.x;
         ImGui::InvisibleButton("fxzone", ImVec2(std::max(8.0f, ImGui::GetContentRegionAvail().x), trackH - 4));
+        bool fxZoneClick = ImGui::IsItemClicked(0) && !TimelinePointerBusy();
         if (ImGui::BeginDragDropTarget()) {
             if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("FXKIND")) {
                 int kind = *(const int*)payload->Data;
@@ -8077,14 +8102,13 @@ int main(int argc, char* argv[]) {
                 if (st < 0) st = 0;
                 OverlayAdd(kind, SnapTime(-1, st));
                 FocusOverlay(gOverlaySel);
-                ovPanel = gOverlaySel;
-                ovPanelOpen = true;
-                openedPanelThisFrame = true;
+                fxZoneClick = false;
             }
             ImGui::EndDragDropTarget();
         }
         ImDrawList* fxl = ImGui::GetWindowDrawList();
         fxHover = -1;
+        bool ateFx = false;
         for (int i = 0; i < (int)gOverlays.size(); i++) {
             const OverlayFx& o = gOverlays[i];
             float x = fxStart.x + o.start * pixelsPerSecond;
@@ -8109,18 +8133,21 @@ int main(int argc, char* argv[]) {
             ImVec2 mouse = ImGui::GetMousePos();
             if (mouse.x < cp0.x + 8 || mouse.x > cp1.x - 8) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
             if (ImGui::IsMouseClicked(1)) {
+                ateFx = true;
                 FocusOverlay(i);
                 ovPanel = i;
                 ovPanelOpen = true;
                 openedPanelThisFrame = true;
             }
             if (ImGui::IsMouseClicked(0)) {
+                ateFx = true;
                 FocusOverlay(i);
                 if (mouse.x < cp0.x + 8) { trimmingOv = i; trimOvSide = 0; draggingOv = -1; }
                 else if (mouse.x > cp1.x - 8) { trimmingOv = i; trimOvSide = 1; draggingOv = -1; }
                 else { draggingOv = i; ovDragOffset = mouse.x - cp0.x; trimmingOv = -1; }
             }
         }
+        if (fxZoneClick && !ateFx) UnselectIfMany();
         ImGui::EndChild();
 
         ImGui::BeginChild("gslane", ImVec2(timeW + 90.0f, trackH), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
@@ -8187,8 +8214,9 @@ int main(int argc, char* argv[]) {
                 }
             }
         }
-        if (gsZoneClick && !ateGs && !marqueeLive && draggingClip < 0 && trimmingClip < 0)
-            BeginMarquee(1, ImGui::GetMousePos());
+        if (gsZoneClick && !ateGs && !marqueeLive && draggingClip < 0 && trimmingClip < 0) {
+            if (!UnselectIfMany()) BeginMarquee(1, ImGui::GetMousePos());
+        }
         ImGui::EndChild();
 
         ImGui::BeginChild("subslane", ImVec2(timeW + 90.0f, trackH), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
@@ -8253,7 +8281,9 @@ int main(int argc, char* argv[]) {
             }
         }
         if (subStyleClick) { subStyleOpen = true; openedPanelThisFrame = true; }
-        if (subZoneClick && !ateSub && !marqueeLive) BeginMarquee(3, ImGui::GetMousePos());
+        if (subZoneClick && !ateSub && !marqueeLive) {
+            if (!UnselectIfMany()) BeginMarquee(3, ImGui::GetMousePos());
+        }
         ImGui::EndChild();
 
         for (int t = 0; t < 6; t++) {
@@ -8439,7 +8469,7 @@ int main(int argc, char* argv[]) {
                     ResetAudioSync();
                     if (player) player->lastPts = -1;
 #endif
-                } else {
+                } else if (!UnselectIfMany()) {
                     BeginMarquee(t < 3 ? 1 : 2, mouse);
                 }
             }

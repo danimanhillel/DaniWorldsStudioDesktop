@@ -29,7 +29,7 @@ not tell them to rebuild.
 |---|---|
 | Remote | `github.com/danimanhillel/DaniWorldsStudioDesktop`, branch `main` |
 | Local mirror | `/tmp/dws` |
-| Skill written against | Multi-select can change channel; click selects one kind; SwinIR stays removed |
+| Skill written against | Longer preview lookahead; empty multi-click unselects; FX drop does not open the panel; SwinIR stays removed |
 
 Sources: `src/main.cpp` (almost all UI, timeline, preview, export), `effects.cpp`,
 `overlay_fx.cpp`, `rife.cpp` / `rife.h`, `asr.cpp` / `asr.h`,
@@ -152,14 +152,21 @@ the `K` line. Old projects omit it.
 ## Preview cache (`PreviewRam gRam`)
 
 - Estimated proxy size `<= 200MB` (`200ull << 20`), or an image: cache the
-  **whole** clip, but only when the clip is near the playhead (1.5s behind,
-  8s ahead).
-- Larger clips: only a window around the playhead (0.5s behind, 4.5s ahead;
-  source span capped ~6s).
-- Hard cap **1GB** (`1024ull << 20`) plus `RoomFor`: leave at least 2GB physical
-  RAM free (or 1/5 of RAM, whichever is larger).
+  **whole** clip, but only when the clip is near the playhead (2s behind,
+  14s ahead).
+- Larger clips: a window around the playhead (1s behind, 9s ahead). The
+  decoded source span is capped at 11s. Evict a cached frame only when it is
+  outside `a - 0.15` .. `b + 1.0`, so the playhead does not catch the edge.
+- Hard cap stays **1GB** (`1024ull << 20`) plus `RoomFor`: leave at least 2GB
+  physical RAM free (or 1/5 of RAM, whichever is larger). Do not raise the cap.
 - Solids are not cached. Audio tracks are not cached.
-- `gRam.Tick` is skipped while export or ASR is running.
+- `gRam.Tick` is skipped while export or ASR is running. Export does **not**
+  use this cache, and it must not buffer full-resolution frames.
+- `PrefetchUpcoming` opens the next video clip when **3s** remain (it still
+  holds one decoded frame).
+- `ExportSession::EnsureFrame` seeks forward only when the decoder is more
+  than **1.25s** behind, then walks up to **160** frames. A short sequential
+  gap must decode through, not keyframe-seek. A real backward jump still seeks.
 
 ## Panels vs timeline (`b588e7a`)
 
@@ -177,7 +184,8 @@ is dragged.
   **Do not** add menu popups to that list.
 - The preview FRAME scissor is static. Do not let a floating panel change it.
 - BUS has **no "+" button**. Clicking an empty bus lane creates a segment that
-  spans the full timeline range.
+  spans the full timeline range, unless more than one object is already
+  selected — then the click only unselects (see below).
 - A transition runs when the **left** clip is the one visually above the clip
   that continues (not "whichever track index is higher").
 - **Solids** bin: black, letterbox bars, green. Drag onto video tracks and onto
@@ -290,7 +298,15 @@ Subtitles: `selectedSub` plus `subSelection`.
   **Channel up** / **Channel down** is one step of the same ladder.
 - `SnapTime` / `SnapStart` skip indices in `groupSkip`.
 - Clamp the group so nothing starts before 0 (`ApplyGroupDelta`).
-- Empty SUBS click **without** a drag still creates a subtitle.
+- Empty SUBS click **without** a drag still creates a subtitle, but only when
+  `UnselectIfMany` does not fire (one selected object, or none).
+- `UnselectIfMany`: a click on empty lane space (BUS, FX, GS, SUBS, V/A)
+  clears every selection when `SelectedObjectCount() > 1` (clips, subs, media,
+  a bus segment, and the selected effect all count). A **single** selection is
+  left alone, so a lone click can still start a marquee or create a subtitle.
+- Dropping an effect on the FX lane selects it (`OverlayAdd` then
+  `FocusOverlay`) and does **not** set `ovPanel` / `ovPanelOpen`. Right-click
+  on an existing effect still opens the Overlay panel.
 - Delete removes the selected kind. Bus still wins over clips. Media still
   wins over clips. `WantTextInput` blocks delete.
 - Right-click menu **Mute**, **Fade In**, **Fade Out**, and **Speed** write
