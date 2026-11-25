@@ -1,7 +1,7 @@
 # DaniWorldsStudioDesktop
 
 Windows C++/SDL2/ImGui/OpenGL/FFmpeg editor. This is **not** a web app.
-Before any edit, read `.grok/skills/daniworlds-studio/SKILL.md` and follow it.
+Before any edit, read `.grok/skills/DaniWorldsStudioDesktop/SKILL.md` and follow it.
 Do not regress preview handoff, underlay, transition-end snap, group drag,
 ripple insert, or panels-above-timeline.
 
