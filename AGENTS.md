@@ -25,11 +25,14 @@ ripple insert, or panels-above-timeline.
 - Clip-menu transitions are off (`TransitionForClip` returns false). The lower
   picture was sticking. Left Shift on a clip-body edge fades opacity: 100 at
   the outer edge, 0 at the handle, and the body stays at 0 so the clip
-  underneath shows. Ctrl on the wave strip under the clip does the same for
-  volume, on every clip. Channels are tall (body plus the strip) and the
-  timeline scrolls vertically. The zoom fader, to the right of the transport
-  buttons, zooms out until about 20% empty shows on the right of the project.
-  Do not bring the transition menu back. Do not restore the standard fade.
+  underneath shows. Volume is one yellow line, not a second graph: silence
+  at the outer edge, rising to the envelope at the handle. The straight
+  envelope is hidden inside that fade. Ctrl + drag the edge on that clip's
+  audio strip. The strip is closed until the arrow in the middle of the
+  clip; click again to close it. Do not open every strip. The zoom fader,
+  to the right of the transport buttons, zooms out until about 20% empty
+  shows on the right of the project. Do not bring the transition menu back.
+  Do not restore the standard opacity fade, and do not use it for volume.
 - Preview keeps more seconds ahead (small clips 14s, large clips 9s / 11s
   source). An empty click unselects only when more than one object is
   selected. Dropping an effect does not open its side panel.

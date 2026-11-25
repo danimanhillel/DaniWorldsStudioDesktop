@@ -137,9 +137,13 @@ In order, they asked for and accepted:
 15. Clip-menu transitions (Cross Dissolve, Blend, Zoom) are **removed**.
     The lower picture was sticking. Do not put that menu back, and do not
     make `TransitionForClip` composite again. Opacity is Left Shift on the
-    clip-body edge. Volume is Ctrl on the wave strip under the clip. The
-    ramp is 100 at the outer edge and 0 at the handle; the body stays at 0
-    so the clip underneath shows. Tracks are tall and the timeline scrolls
+    clip-body edge: 100 at the outer edge, 0 at the handle, and the body
+    stays at 0 so the clip underneath shows. Volume is a separate curve,
+    one yellow line on that clip's audio strip: silence at the outer edge,
+    up to the envelope at the fade handle, and the straight envelope is not
+    drawn inside the fade. Ctrl + drag an edge of the open strip. The strip
+    stays closed until the arrow in the middle of that clip is clicked.
+    Tracks grow only while a strip on them is open, and the timeline scrolls
     vertically. The zoom fader, right of the transport buttons, zooms out
     until the view is the project plus 20% empty on the right.
 
@@ -493,11 +497,16 @@ preview and export do not composite `fxOut` (that was the stuck lower image).
 `effects.cpp` stays. The Effects **tab** (overlay FX) stays.
 
 `Clip` fields: `opIn`, `opOut`, `volIn`, `volOut` (seconds). Saved on a new
-`R` line. Copied in `ClipWithoutFx` and `EditSignature`. The old audio
-`fadeIn` / `fadeOut` menu items stay. If `volIn` or `volOut` is above 0.02s,
-`GainAt` uses that length instead of the fixed ~0.75s bool fade.
+`R` line. `audioOpen` is per clip, not saved, default closed. Copied in
+`ClipWithoutFx`. The old audio `fadeIn` / `fadeOut` menu items stay.
 
-`RampAt` is the curve (the user rejected the standard fade, where the body
+`GainAt` uses `VolumeEdge` when `volIn` or `volOut` is above 0.02s: 0 at
+the outer edge, 1 at the handle, 1 in the body. That multiplies the
+envelope. It is **not** `RampAt` (that curve is opacity only). The old
+audio `fadeIn` / `fadeOut` menu items stay and apply only when neither
+volume edge is set.
+
+Opacity (`RampAt`, the user rejected the standard fade, where the body
 stayed at 100 and hid the clip underneath):
 
 - Neither edge set: 1.
@@ -507,22 +516,35 @@ stayed at 100 and hid the clip underneath):
 - Left Shift + drag the **end** edge of the body: 0 until the handle, then
   up to 100 at the tail (`opOut`).
 - If both are set, the higher ramp wins. A gap between them stays at 0.
-- Volume is the same curve, but the drag is **Left or Right Ctrl** on the
-  **wave strip under the clip**, not on the picture (`volIn` / `volOut`).
-  Every video, audio, and GS clip has that strip. Shift on the body still
-  wins for opacity. Ctrl on the body does not fade. Shift on the wave does
-  not fade.
-- The drag does **not** change the clip bounds. It is not a trim. A body
-  edge without Shift still trims. A click on the wave body drags the clip.
+- Volume is **one** yellow line, `envelope * VolumeEdge`, drawn by
+  `DrawVolumeLine` on the wave strip. Do not also draw the envelope
+  polyline or a second `DrawFadeGraph` for volume. Fade in: the line
+  starts at the bottom (silence) and rises to the envelope at `volIn`.
+  The straight envelope, including its end point, is hidden until that
+  high point (`VolPointHidden`). Fade out is the same toward the tail:
+  the straight line stops at the handle and falls to silence. Ctrl + drag
+  an edge of the **open** wave strip sets `volIn` / `volOut`.
+- The wave strip is **per clip** and **closed by default** (`audioOpen`,
+  not saved). A yellow arrow in the center of the clip body toggles it.
+  Click again to close. Do not open every clip's strip. A lane is the
+  tall height only while some clip on it is open (`LaneHasAudioOpen`,
+  `trackLaneH`, `gsChildH`). Marquee height follows that clip's strip,
+  not the tallest lane.
+- Shift on the body still wins for opacity. Ctrl on the body does not
+  fade. Shift on the wave does not fade. A body edge without Shift still
+  trims. A click on the open wave body drags the clip. The arrow click
+  does not.
+- The drag does **not** change the clip bounds. It is not a trim.
 - Handle the fade **before** Shift-click `ToggleSelect`, or it never starts.
 - State: `fadeDragClip`, `fadeDragSide` (-1 start / +1 end), `fadeDragKind`
   (1 opacity, 2 volume). Clear them in `ClearTimelineDrags`. Length from
   mouse x, clamp `0 .. duration-0.05`. Under ~0.03s clears the fade.
-- Draw the white opacity ramp on the clip body and the yellow volume ramp
-  on the wave strip. 0 is the bottom, 1 is the top. Handle circles sit on
-  the curve. Draw them on every clip that has a fade, not only the selected
-  one. The selected yellow envelope and its points also sit on the wave
-  strip. `dragVol` maps gain across `kWaveH`, not the whole track.
+- Draw the white opacity ramp on the clip body. 0 is the bottom, 1 is the
+  top. Handle circles sit on the curve. Draw it on every clip that has an
+  opacity fade, not only the selected one. The selected envelope points
+  that are **not** inside a volume fade sit on the wave strip.
+  `dragVol` maps gain across `kWaveH`, not the whole track. Skip points
+  `VolPointHidden` hides.
 - `OpacityAt` is `RampAt` of `opIn` / `opOut`. `BlitVideo` takes `float cover`.
   Below 0.999 it blends. The grade shader alpha uniform is `cover` (a graded
   clip used to ignore the fade). Ungraded blit sets `GL_MODULATE` so
@@ -532,18 +554,17 @@ stayed at 100 and hid the clip underneath):
   and something is underneath, so a faded body shows that clip and not black.
   GS opacity is `gsOpacity * OpacityAt`.
 
-Waveform: white vertical bars, centered, in the dark strip **under** the clip
-body (not on the picture). Video, audio, and GS. Peaks are per file path,
-built once on a background thread (`DecodeWavePeaks`, about 2 buckets/second,
-32–2000, packet cap 8000). `wave` state 2 with an empty vector means no
-audio — do not retry every frame. Map through `sourceOffset` and `speed`.
+Waveform: white vertical bars, centered, in the dark strip **under** the
+clip, and only while that clip's audio strip is open. Video, audio, and
+GS. Peaks are per file path, built once on a background thread
+(`DecodeWavePeaks`, about 2 buckets/second, 32–2000, packet cap 8000).
+`wave` state 2 with an empty vector means no audio — do not retry every
+frame. Map through `sourceOffset` and `speed`.
 
-Tracks: body about 52px, wave about 36px, lane window about 120px so the
-wave is not clipped by child padding. FX and SUBS stay 42. `tlTrackH` is the
-clip+wave height plus 8 (marquee). Do not set it to the window height or the
-marquee swallows the next lane. The timeline child has
-`AlwaysVerticalScrollbar` and its height is capped near half the window, so
-the taller channels scroll downward.
+Tracks: body about 52px. The wave (about 36px) is not part of the lane
+until a clip on it is open. FX and SUBS stay 42. Do not force every lane
+to the open height. The timeline child has `AlwaysVerticalScrollbar` and
+its height is capped near half the window, so open channels still scroll.
 
 Zoom: `SliderFloat` `##tlzoom` immediately to the **right of the transport
 buttons** (after Repeat, before the timecode). Minimum is a fit of
@@ -557,9 +578,10 @@ view is the project plus about 20% empty on the right. Do not write
 
 Newest first, all on `origin/main`:
 
+- `ff88e52` opacity body stays at 0 so the clip underneath shows. Do not
+  put the standard opacity curve back. Volume is not that curve.
 - `99f00f2` edge fades, in-clip waveform, zoom fader. The fade curve in that
   commit was the standard one (body stayed at 100). The user rejected it.
-  Do not put that curve back.
 - `a110675` compile fix, duplicate `cutMedia`
 - `5861d38` channel cut: no decoder walk, audio does not reseek at EOF
 - `1aedbd5` cache the visible clip first; playback catch-up capped at 4 frames
