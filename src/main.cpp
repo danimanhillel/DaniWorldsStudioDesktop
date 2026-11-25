@@ -265,6 +265,7 @@ bool marqueeLive = false;
 bool marqueeMoved = false;
 ImVec2 trackLanePos[6];
 float tlTrackH = 42.0f;
+float tlViewW = 640.0f;
 struct DragOrig { int idx; float orig; };
 std::vector<DragOrig> groupClipDrag;
 std::vector<DragOrig> groupSubDrag;
@@ -1626,6 +1627,8 @@ void SetPlaying(bool play) {
     if (audioDev) SDL_PauseAudioDevice(audioDev, play ? 0 : 1);
 }
 
+static float RampAt(float local, float dur, float inSec, float outSec);
+
 float GainAt(const Clip& c, float localTime) {
     if (c.duration <= 0.0001f) return 1.0f;
     if (localTime < 0) localTime = 0;
@@ -1648,34 +1651,38 @@ float GainAt(const Clip& c, float localTime) {
     }
     float fadeDur = std::min(0.75f, c.duration * 0.45f);
     if (fadeDur < 0.02f) fadeDur = 0.02f;
-    float inDur = c.volIn > 0.02f ? c.volIn : (c.fadeIn ? fadeDur : 0.0f);
-    float outDur = c.volOut > 0.02f ? c.volOut : (c.fadeOut ? fadeDur : 0.0f);
-    if (inDur > 0.02f && localTime < inDur) g *= std::max(0.0f, localTime / inDur);
-    if (outDur > 0.02f) {
-        float tail = c.duration - localTime;
-        if (tail < outDur) g *= std::max(0.0f, tail / outDur);
+    if (c.volIn > 0.02f || c.volOut > 0.02f) {
+        g *= RampAt(localTime, c.duration, c.volIn, c.volOut);
+    } else {
+        if (c.fadeIn) g *= std::min(1.0f, localTime / fadeDur);
+        if (c.fadeOut) g *= std::min(1.0f, (c.duration - localTime) / fadeDur);
     }
     if (g < 0) g = 0;
     if (g > 1) g = 1;
     return g;
 }
 
-static float OpacityAt(const Clip& c, float localTime) {
-    if (c.duration <= 0.0001f) return 1.0f;
-    if (localTime < 0) localTime = 0;
-    if (localTime > c.duration) localTime = c.duration;
-    float o = 1.0f;
-    if (c.opIn > 0.02f && localTime < c.opIn) o = localTime / c.opIn;
-    if (c.opOut > 0.02f) {
-        float tail = c.duration - localTime;
-        if (tail < c.opOut) {
-            float u = tail / c.opOut;
-            if (u < o) o = u;
+static float RampAt(float local, float dur, float inSec, float outSec) {
+    if (dur <= 0.0001f) return 1.0f;
+    if (local < 0) local = 0;
+    if (local > dur) local = dur;
+    if (inSec <= 0.02f && outSec <= 0.02f) return 1.0f;
+    float o = 0.0f;
+    if (inSec > 0.02f && local < inSec) o = 1.0f - local / inSec;
+    if (outSec > 0.02f) {
+        float tail = dur - local;
+        if (tail <= outSec) {
+            float rise = 1.0f - tail / outSec;
+            if (rise > o) o = rise;
         }
     }
     if (o < 0) o = 0;
     if (o > 1) o = 1;
     return o;
+}
+
+static float OpacityAt(const Clip& c, float localTime) {
+    return RampAt(localTime, c.duration, c.opIn, c.opOut);
 }
 
 void MixTimeline(double timelineTime, int sampleCount, int16_t* dst) {
@@ -5075,7 +5082,7 @@ void BlitVideo(ImVec2 p0, ImVec2 p1, GLuint tex, int vw, int vh, ImVec2 clip0, I
     }
     if (sx1 - sx0 < 1.0f || sy1 - sy0 < 1.0f) return;
 
-    bool graded = activeGrade && BindGrade(*activeGrade, vw, vh, 1.0f);
+    bool graded = activeGrade && BindGrade(*activeGrade, vw, vh, cover);
     if (!graded && pglUseProgram) pglUseProgram(0);
     glDisable(GL_DEPTH_TEST);
     bool useBlend = blendAlpha || cover < 0.999f;
@@ -5089,8 +5096,8 @@ void BlitVideo(ImVec2 p0, ImVec2 p1, GLuint tex, int vw, int vh, ImVec2 clip0, I
     glScissor((int)sx0, (int)(io.DisplaySize.y - sy1), std::max(1, (int)(sx1 - sx0)), std::max(1, (int)(sy1 - sy0)));
     glEnable(GL_TEXTURE_2D);
     glBindTexture(GL_TEXTURE_2D, tex);
-    if (cover < 0.999f) glColor4f(1.f, 1.f, 1.f, cover);
-    else glColor3f(1.f, 1.f, 1.f);
+    if (!graded) glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+    glColor4f(1.f, 1.f, 1.f, cover);
     glMatrixMode(GL_PROJECTION);
     glPushMatrix();
     glLoadIdentity();
@@ -6017,7 +6024,7 @@ static void ApplyMarquee(ImVec2 m) {
         float x = subsOriginX + subs[i].start * pixelsPerSecond;
         float w = std::max(28.0f, subs[i].duration * pixelsPerSecond);
         ImVec2 c0(x, subsLaneY + 4.0f);
-        ImVec2 c1(x + w, subsLaneY + 4.0f + tlTrackH - 8.0f);
+        ImVec2 c1(x + w, subsLaneY + 4.0f + 34.0f);
         if (!ScreenHit(marqueeStart, m, c0, c1)) continue;
         subSelection.push_back(i);
     }
@@ -7416,7 +7423,7 @@ bool LoadProject(const std::string& path) {
             repeatOn = atoi(line + 7) != 0;
         } else if (strncmp(line, "pps ", 4) == 0) {
             float p = (float)atof(line + 4);
-            if (p > 2.0f && p <= 400.0f) pixelsPerSecond = p;
+            if (p >= 1.0f && p <= 400.0f) pixelsPerSecond = p;
         } else if (strncmp(line, "aspect ", 7) == 0) {
             int a = atoi(line + 7);
             if (a >= 0 && a <= 4) exAspect = a;
@@ -7773,37 +7780,22 @@ static void DrawFadeGraph(ImDrawList* dl, ImVec2 a, ImVec2 b, float dur, float i
     float w = b.x - a.x;
     float h = b.y - a.y;
     if (w < 6.0f || h < 6.0f) return;
-    auto level = [&](float local) {
-        float o = 1.0f;
-        if (inSec > 0.02f && local < inSec) o = local / inSec;
-        if (outSec > 0.02f) {
-            float tail = dur - local;
-            if (tail < outSec) {
-                float u = tail / outSec;
-                if (u < o) o = u;
-            }
-        }
-        if (o < 0) o = 0;
-        if (o > 1) o = 1;
-        return o;
-    };
     const int steps = 24;
     ImVec2 prev(0, 0);
     for (int i = 0; i <= steps; i++) {
         float u = (float)i / (float)steps;
-        float o = level(dur * u);
+        float o = RampAt(dur * u, dur, inSec, outSec);
         ImVec2 p(a.x + w * u, b.y - 1.0f - o * (h - 2.0f));
         if (i) dl->AddLine(prev, p, col, 1.6f);
         prev = p;
     }
-    if (inSec > 0.02f) {
-        float x = a.x + w * std::min(1.0f, inSec / dur);
-        dl->AddCircleFilled(ImVec2(x, a.y + 2.0f), 3.0f, col);
-    }
-    if (outSec > 0.02f) {
-        float x = b.x - w * std::min(1.0f, outSec / dur);
-        dl->AddCircleFilled(ImVec2(x, a.y + 2.0f), 3.0f, col);
-    }
+    auto mark = [&](float local) {
+        float x = a.x + w * (local / dur);
+        float o = RampAt(local, dur, inSec, outSec);
+        dl->AddCircleFilled(ImVec2(x, b.y - 1.0f - o * (h - 2.0f)), 3.4f, col);
+    };
+    if (inSec > 0.02f) mark(std::min(dur, inSec));
+    if (outSec > 0.02f) mark(std::max(0.0f, dur - outSec));
 }
 
 static void DrawClipBody(ImDrawList* dl, ImVec2 cp0, ImVec2 cp1, const Clip& c) {
@@ -7846,11 +7838,6 @@ static void DrawClipBody(ImDrawList* dl, ImVec2 cp0, ImVec2 cp1, const Clip& c) 
             }
         }
     }
-}
-
-static void DrawClipFades(ImDrawList* dl, ImVec2 cp0, ImVec2 cp1, const Clip& c) {
-    DrawFadeGraph(dl, cp0, cp1, c.duration, c.volIn, c.volOut, IM_COL32(255, 210, 70, 230));
-    DrawFadeGraph(dl, cp0, cp1, c.duration, c.opIn, c.opOut, IM_COL32(255, 255, 255, 235));
 }
 
 #ifdef _MSC_VER
@@ -8095,7 +8082,7 @@ int main(int argc, char* argv[]) {
         }
 
         float availY = ImGui::GetContentRegionAvail().y;
-        float tlH = 26.0f + 58.0f + 42.0f * 9.0f + 8.0f * 6.0f + 28.0f;
+        float tlH = 26.0f + 58.0f + 42.0f + 120.0f + 42.0f + 120.0f * 6.0f + 72.0f;
         if (tlH > availY * 0.50f) tlH = availY * 0.50f;
         float topH = availY - tlH - 4.0f;
         if (topH < 220.0f) topH = 220.0f;
@@ -8408,10 +8395,12 @@ int main(int argc, char* argv[]) {
             for (const auto& b : bus) contentEnd = std::max(contentEnd, b.start + b.duration);
             for (const auto& s : subs) contentEnd = std::max(contentEnd, s.start + s.duration);
             for (const auto& o : gOverlays) contentEnd = std::max(contentEnd, o.start + o.duration);
-            float viewW = std::max(240.0f, ImGui::GetWindowWidth() - 80.0f);
-            float fit = viewW / std::max(1.0f, contentEnd);
-            if (fit < 4.0f) fit = 4.0f;
-            if (fit > 48.0f) fit = 48.0f;
+            float span = contentEnd * 1.20f;
+            float viewW = tlViewW - 62.0f;
+            if (viewW < 160.0f) viewW = 160.0f;
+            float fit = viewW / std::max(1.0f, span);
+            if (fit < 1.0f) fit = 1.0f;
+            if (fit > 80.0f) fit = 80.0f;
             float zmin = std::min(fit, pixelsPerSecond);
             float zmax = std::max(240.0f, pixelsPerSecond);
             ImGui::SetNextItemWidth(130.0f);
@@ -8461,11 +8450,24 @@ int main(int argc, char* argv[]) {
             tlSeconds = std::max(tlSeconds, s.start + s.duration + 30.0f);
         for (const auto& o : gOverlays)
             tlSeconds = std::max(tlSeconds, o.start + o.duration + 30.0f);
+        {
+            float contentEnd = 0.0f;
+            for (const auto& c : clips) contentEnd = std::max(contentEnd, c.startTime + c.duration);
+            for (const auto& b : bus) contentEnd = std::max(contentEnd, b.start + b.duration);
+            for (const auto& s : subs) contentEnd = std::max(contentEnd, s.start + s.duration);
+            for (const auto& o : gOverlays) contentEnd = std::max(contentEnd, o.start + o.duration);
+            if (contentEnd > 0.5f) tlSeconds = std::max(tlSeconds, contentEnd * 1.20f);
+        }
         float timeW = tlSeconds * pixelsPerSecond;
-        ImGui::BeginChild("Timeline", ImVec2(0, tlH), true, ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_AlwaysHorizontalScrollbar);
+        ImGui::BeginChild("Timeline", ImVec2(0, tlH), true, ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_AlwaysHorizontalScrollbar | ImGuiWindowFlags_AlwaysVerticalScrollbar);
+        tlViewW = ImGui::GetWindowWidth();
         const char* trackNames[] = {"V1", "V2", "V3", "A1", "A2", "A3"};
-        float trackH = 42.0f;
-        tlTrackH = trackH;
+        const float kBodyH = 52.0f;
+        const float kWaveH = 36.0f;
+        const float kWaveGap = 2.0f;
+        float laneH = 42.0f;
+        float trackH = kBodyH + kWaveGap + kWaveH + 30.0f;
+        tlTrackH = kBodyH + kWaveGap + kWaveH + 8.0f;
         ImVec2 trackPositions[6];
 
         ImGui::BeginChild("ruler", ImVec2(timeW + 90.0f, 26.0f), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
@@ -8574,13 +8576,13 @@ int main(int argc, char* argv[]) {
         }
         ImGui::EndChild();
 
-        ImGui::BeginChild("fxlane", ImVec2(timeW + 90.0f, trackH), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        ImGui::BeginChild("fxlane", ImVec2(timeW + 90.0f, laneH), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
         ImGui::TextUnformatted("FX");
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Effects");
         ImGui::SameLine(46.0f);
         ImVec2 fxStart = ImGui::GetCursorScreenPos();
         ovOriginX = fxStart.x;
-        ImGui::InvisibleButton("fxzone", ImVec2(std::max(8.0f, ImGui::GetContentRegionAvail().x), trackH - 4));
+        ImGui::InvisibleButton("fxzone", ImVec2(std::max(8.0f, ImGui::GetContentRegionAvail().x), laneH - 4));
         bool fxZoneClick = ImGui::IsItemClicked(0) && !TimelinePointerBusy();
         if (ImGui::BeginDragDropTarget()) {
             if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("FXKIND")) {
@@ -8602,7 +8604,7 @@ int main(int argc, char* argv[]) {
             float x = fxStart.x + o.start * pixelsPerSecond;
             float w = std::max(24.0f, o.duration * pixelsPerSecond);
             ImVec2 cp0(x, fxStart.y);
-            ImVec2 cp1(x + w, fxStart.y + trackH - 8);
+            ImVec2 cp1(x + w, fxStart.y + laneH - 8);
             fxl->AddRectFilled(cp0, cp1, FxLaneColor(o.kind), 3.0f);
             if (i == gOverlaySel) fxl->AddRect(cp0, cp1, IM_COL32(255, 230, 160, 255), 3.0f, 0, 2.0f);
             fxl->AddText(ImVec2(cp0.x + 6, cp0.y + 4), IM_COL32(255, 245, 230, 240), OverlayKindName(o.kind));
@@ -8673,19 +8675,31 @@ int main(int argc, char* argv[]) {
                 float x = gsStart.x + clips[i].startTime * pixelsPerSecond;
                 float w = std::max(24.0f, clips[i].duration * pixelsPerSecond);
                 ImVec2 cp0(x, gsStart.y);
-                ImVec2 cp1(x + w, gsStart.y + trackH - 8);
+                ImVec2 cp1(x + w, gsStart.y + kBodyH);
+                ImVec2 wp0(x, cp1.y + kWaveGap);
+                ImVec2 wp1(x + w, wp0.y + kWaveH);
                 gdl->AddRectFilled(cp0, cp1, IM_COL32(40, 140, 70, 230), 3.0f);
-                DrawClipBody(gdl, cp0, cp1, clips[i]);
+                gdl->AddRectFilled(wp0, wp1, IM_COL32(16, 28, 22, 230), 2.0f);
+                DrawClipBody(gdl, wp0, wp1, clips[i]);
                 if (i == selectedClip || IsSelected(i)) gdl->AddRect(cp0, cp1, IM_COL32(180, 255, 180, 255), 3.0f, 0, i == selectedClip ? 2.0f : 1.2f);
-                DrawClipFades(gdl, cp0, cp1, clips[i]);
+                DrawFadeGraph(gdl, cp0, cp1, clips[i].duration, clips[i].opIn, clips[i].opOut, IM_COL32(255, 255, 255, 235));
+                DrawFadeGraph(gdl, wp0, wp1, clips[i].duration, clips[i].volIn, clips[i].volOut, IM_COL32(255, 210, 70, 235));
                 std::string label = "GS";
                 if (clips[i].mediaId >= 0 && clips[i].mediaId < (int)media.size())
                     label = media[clips[i].mediaId].name.substr(0, 16);
                 gdl->AddText(ImVec2(cp0.x + 6, cp0.y + 4), IM_COL32(240, 255, 240, 240), label.c_str());
-                if (!ImGui::IsMouseHoveringRect(cp0, cp1) || TimelinePointerBusy()) continue;
+                ImVec2 hit1(wp1.x, wp1.y);
+                if (!ImGui::IsMouseHoveringRect(cp0, hit1) || TimelinePointerBusy()) continue;
                 if (ImGui::IsMouseClicked(0) || ImGui::IsMouseClicked(1)) ateGs = true;
                 ImVec2 mouse = ImGui::GetMousePos();
-                if (mouse.x < cp0.x + 8 || mouse.x > cp1.x - 8) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+                bool onWave = mouse.y >= wp0.y;
+                bool atStart = mouse.x < cp0.x + 10.0f;
+                bool atEnd = mouse.x > cp1.x - 10.0f;
+                if ((onWave || (!onWave && (atStart || atEnd))) && (atStart || atEnd))
+                    ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+                if (!onWave && (atStart || atEnd) && ImGui::IsKeyDown(ImGuiKey_LeftShift)) ImGui::SetTooltip("Opacity");
+                if (onWave && (atStart || atEnd) && (ImGui::IsKeyDown(ImGuiKey_LeftCtrl) || ImGui::IsKeyDown(ImGuiKey_RightCtrl)))
+                    ImGui::SetTooltip("Volume");
                 if (ImGui::IsMouseClicked(1)) {
                     if (!IsSelected(i)) SelectOnly(i);
                     else { selectedClip = i; ClearLaneRivals(); }
@@ -8698,21 +8712,21 @@ int main(int argc, char* argv[]) {
                 if (ImGui::IsMouseClicked(0)) {
                     bool shift = ImGui::IsKeyDown(ImGuiKey_LeftShift);
                     bool ctrl = ImGui::IsKeyDown(ImGuiKey_LeftCtrl) || ImGui::IsKeyDown(ImGuiKey_RightCtrl);
-                    bool atStart = mouse.x < cp0.x + 10.0f;
-                    bool atEnd = mouse.x > cp1.x - 10.0f;
-                    if ((shift || ctrl) && (atStart || atEnd)) {
+                    bool opacityDrag = shift && !onWave && (atStart || atEnd);
+                    bool volumeDrag = ctrl && onWave && (atStart || atEnd);
+                    if (opacityDrag || volumeDrag) {
                         if (IsSelected(i)) { selectedClip = i; ClearLaneRivals(); }
                         else SelectOnly(i);
                         fadeDragClip = i;
                         fadeDragSide = atStart ? -1 : 1;
-                        fadeDragKind = shift ? 1 : 2;
+                        fadeDragKind = opacityDrag ? 1 : 2;
                         trimmingClip = -1;
                         draggingClip = -1;
                     } else if (IsSelected(i)) { selectedClip = i; ClearLaneRivals(); }
                     else SelectOnly(i);
                     if (fadeDragClip == i) {
-                    } else if (mouse.x < cp0.x + 8) { trimmingClip = i; trimSide = 0; trimAnchorX = mouse.x; trimOrigStart = clips[i].startTime; trimOrigDur = clips[i].duration; trimOrigOffset = clips[i].sourceOffset; }
-                    else if (mouse.x > cp1.x - 8) { trimmingClip = i; trimSide = 1; trimAnchorX = mouse.x; trimOrigStart = clips[i].startTime; trimOrigDur = clips[i].duration; trimOrigOffset = clips[i].sourceOffset; }
+                    } else if (!onWave && mouse.x < cp0.x + 8) { trimmingClip = i; trimSide = 0; trimAnchorX = mouse.x; trimOrigStart = clips[i].startTime; trimOrigDur = clips[i].duration; trimOrigOffset = clips[i].sourceOffset; }
+                    else if (!onWave && mouse.x > cp1.x - 8) { trimmingClip = i; trimSide = 1; trimAnchorX = mouse.x; trimOrigStart = clips[i].startTime; trimOrigDur = clips[i].duration; trimOrigOffset = clips[i].sourceOffset; }
                     else { draggingClip = i; dragOffsetX = mouse.x - cp0.x; trimmingClip = -1; CaptureGroupDrag(i, -1); }
                 }
             }
@@ -8722,14 +8736,14 @@ int main(int argc, char* argv[]) {
         }
         ImGui::EndChild();
 
-        ImGui::BeginChild("subslane", ImVec2(timeW + 90.0f, trackH), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        ImGui::BeginChild("subslane", ImVec2(timeW + 90.0f, laneH), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
         ImGui::TextUnformatted("SUBS");
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Subtitles");
         ImGui::SameLine(46.0f);
         ImVec2 subStart = ImGui::GetCursorScreenPos();
         subsOriginX = subStart.x;
         subsLaneY = subStart.y - 4.0f;
-        ImGui::InvisibleButton("subszone", ImVec2(std::max(10.0f, ImGui::GetContentRegionAvail().x), trackH - 4));
+        ImGui::InvisibleButton("subszone", ImVec2(std::max(10.0f, ImGui::GetContentRegionAvail().x), laneH - 4));
         bool subZoneClick = ImGui::IsItemClicked(0) && !TimelinePointerBusy();
         bool ateSub = false;
         bool subStyleClick = ImGui::IsItemClicked(1) && !TimelinePointerBusy();
@@ -8739,7 +8753,7 @@ int main(int argc, char* argv[]) {
                 float x = subStart.x + subs[i].start * pixelsPerSecond;
                 float w = std::max(28.0f, subs[i].duration * pixelsPerSecond);
                 ImVec2 cp0(x, subStart.y);
-                ImVec2 cp1(x + w, subStart.y + trackH - 8);
+                ImVec2 cp1(x + w, subStart.y + laneH - 8);
                 sdl->AddRectFilled(cp0, cp1, IM_COL32(150, 90, 40, 230), 3.0f);
                 if (i == selectedSub || std::find(subSelection.begin(), subSelection.end(), i) != subSelection.end())
                     sdl->AddRect(cp0, cp1, IM_COL32(255, 220, 160, 255), 3.0f, 0, i == selectedSub ? 2.0f : 1.2f);
@@ -8831,16 +8845,19 @@ int main(int argc, char* argv[]) {
                 float x = trackStart.x + clips[i].startTime * pixelsPerSecond;
                 float w = std::max(24.0f, clips[i].duration * pixelsPerSecond);
                 ImVec2 cp0(x, trackStart.y);
-                ImVec2 cp1(x + w, trackStart.y + trackH - 8);
+                ImVec2 cp1(x + w, trackStart.y + kBodyH);
+                ImVec2 wp0(x, cp1.y + kWaveGap);
+                ImVec2 wp1(x + w, wp0.y + kWaveH);
                 ImU32 ccol = (t < 3) ? IM_COL32(60, 120, 200, 220) : IM_COL32(70, 160, 90, 220);
                 tdl->AddRectFilled(cp0, cp1, ccol, 3.0f);
+                tdl->AddRectFilled(wp0, wp1, IM_COL32(12, 18, 28, 235), 2.0f);
                 int mid = clips[i].mediaId;
                 if (mid >= 0 && mid < (int)media.size() && media[mid].thumb) {
                     float tw = std::min(40.0f, w - 8.0f);
                     if (tw > 10.0f)
                         DrawThumb(tdl, cp0, ImVec2(cp0.x + tw, cp1.y), trackClip0, trackClip1, media[mid].thumb, media[mid].thumbW, media[mid].thumbH);
                 }
-                DrawClipBody(tdl, cp0, cp1, clips[i]);
+                DrawClipBody(tdl, wp0, wp1, clips[i]);
                 if (i == selectedClip || IsSelected(i)) {
                     if (i == selectedClip) EnsureEnvelope(clips[i]);
                     tdl->AddRect(cp0, cp1, IM_COL32(255, 220, 60, 255), 3.0f, 0, i == selectedClip ? 2.0f : 1.2f);
@@ -8848,16 +8865,18 @@ int main(int argc, char* argv[]) {
                     tdl->AddLine(cp0, ImVec2(cp0.x, cp1.y), IM_COL32(255, 255, 255, 255), 4.0f);
                     tdl->AddLine(ImVec2(cp1.x, cp0.y), cp1, IM_COL32(255, 255, 255, 255), 4.0f);
                     ImVec2 prev(0, 0);
+                    float waveH = std::max(1.0f, wp1.y - wp0.y);
                     for (int p = 0; p < (int)clips[i].volume.size(); p++) {
-                        float px = cp0.x + clips[i].volume[p].norm * w;
-                        float py = cp1.y - clips[i].volume[p].gain * (cp1.y - cp0.y);
+                        float px = wp0.x + clips[i].volume[p].norm * w;
+                        float py = wp1.y - clips[i].volume[p].gain * waveH;
                         if (p > 0) tdl->AddLine(prev, ImVec2(px, py), IM_COL32(255, 210, 70, 255), 2.0f);
                         tdl->AddCircleFilled(ImVec2(px, py), 4.5f, IM_COL32(255, 255, 255, 255));
                         prev = ImVec2(px, py);
                     }
                     }
                 }
-                DrawClipFades(tdl, cp0, cp1, clips[i]);
+                DrawFadeGraph(tdl, cp0, cp1, clips[i].duration, clips[i].opIn, clips[i].opOut, IM_COL32(255, 255, 255, 235));
+                DrawFadeGraph(tdl, wp0, wp1, clips[i].duration, clips[i].volIn, clips[i].volOut, IM_COL32(255, 210, 70, 235));
                 std::string label = media[clips[i].mediaId].name.substr(0, 14);
                 char extra[48];
                 snprintf(extra, sizeof(extra), " %.1fs", clips[i].duration);
@@ -8871,13 +8890,14 @@ int main(int argc, char* argv[]) {
                 if (clips[i].fadeOut) label += " FO";
                 tdl->AddText(ImVec2(cp0.x + 44, cp0.y + 4), IM_COL32(255, 255, 255, 230), label.c_str());
 
-                if (ImGui::IsMouseHoveringRect(cp0, cp1)) {
+                if (ImGui::IsMouseHoveringRect(cp0, wp1)) {
                     float mx = ImGui::GetMousePos().x;
-                    if (mx < cp0.x + 10.0f || mx > cp1.x - 10.0f) {
-                        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
-                        if (ImGui::IsKeyDown(ImGuiKey_LeftShift)) ImGui::SetTooltip("Opacity");
-                        else if (ImGui::IsKeyDown(ImGuiKey_LeftCtrl) || ImGui::IsKeyDown(ImGuiKey_RightCtrl)) ImGui::SetTooltip("Volume");
-                    }
+                    float my = ImGui::GetMousePos().y;
+                    bool edge = mx < cp0.x + 10.0f || mx > cp1.x - 10.0f;
+                    if (edge) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+                    if (edge && my < wp0.y && ImGui::IsKeyDown(ImGuiKey_LeftShift)) ImGui::SetTooltip("Opacity");
+                    if (edge && my >= wp0.y && (ImGui::IsKeyDown(ImGuiKey_LeftCtrl) || ImGui::IsKeyDown(ImGuiKey_RightCtrl)))
+                        ImGui::SetTooltip("Volume");
                 }
             }
 
@@ -8888,21 +8908,26 @@ int main(int argc, char* argv[]) {
                     float x = trackStart.x + clips[i].startTime * pixelsPerSecond;
                     float w = std::max(24.0f, clips[i].duration * pixelsPerSecond);
                     ImVec2 cp0(x, trackStart.y);
-                    ImVec2 cp1(x + w, trackStart.y + trackH - 8);
-                    if (!ImGui::IsMouseHoveringRect(cp0, cp1) || TimelinePointerBusy()) continue;
+                    ImVec2 cp1(x + w, trackStart.y + kBodyH);
+                    ImVec2 wp0(x, cp1.y + kWaveGap);
+                    ImVec2 wp1(x + w, wp0.y + kWaveH);
+                    if (!ImGui::IsMouseHoveringRect(cp0, wp1) || TimelinePointerBusy()) continue;
                     if (ImGui::IsMouseClicked(0) || ImGui::IsMouseClicked(1) || ImGui::IsMouseDoubleClicked(0)) ateClip = true;
                     ImVec2 mouse = ImGui::GetMousePos();
+                    bool onWave = mouse.y >= wp0.y;
+                    bool atStart = mouse.x < cp0.x + 10.0f;
+                    bool atEnd = mouse.x > cp1.x - 10.0f;
                     if (ImGui::IsMouseClicked(0)) {
                         bool shift = ImGui::IsKeyDown(ImGuiKey_LeftShift);
                         bool ctrl = ImGui::IsKeyDown(ImGuiKey_LeftCtrl) || ImGui::IsKeyDown(ImGuiKey_RightCtrl);
-                        bool atStart = mouse.x < cp0.x + 10.0f;
-                        bool atEnd = mouse.x > cp1.x - 10.0f;
-                        if ((shift || ctrl) && (atStart || atEnd)) {
+                        bool opacityDrag = shift && !onWave && (atStart || atEnd);
+                        bool volumeDrag = ctrl && onWave && (atStart || atEnd);
+                        if (opacityDrag || volumeDrag) {
                             if (IsSelected(i)) { selectedClip = i; ClearLaneRivals(); }
                             else SelectOnly(i);
                             fadeDragClip = i;
                             fadeDragSide = atStart ? -1 : 1;
-                            fadeDragKind = shift ? 1 : 2;
+                            fadeDragKind = opacityDrag ? 1 : 2;
                             trimmingClip = -1;
                             draggingClip = -1;
                             break;
@@ -8925,11 +8950,11 @@ int main(int argc, char* argv[]) {
                         openClipMenu = true;
                         break;
                     }
-                    if (ImGui::IsMouseDoubleClicked(0)) {
+                    if (ImGui::IsMouseDoubleClicked(0) && onWave) {
                         SelectOnly(i);
                         EnsureEnvelope(clips[i]);
-                        float n = (mouse.x - cp0.x) / w;
-                        float g = (cp1.y - mouse.y) / std::max(1.0f, cp1.y - cp0.y);
+                        float n = (mouse.x - wp0.x) / w;
+                        float g = (wp1.y - mouse.y) / std::max(1.0f, wp1.y - wp0.y);
                         if (n < 0) n = 0;
                         if (n > 1) n = 1;
                         if (g < 0) g = 0;
@@ -8941,7 +8966,7 @@ int main(int argc, char* argv[]) {
                         break;
                     }
                     if (!ImGui::IsMouseClicked(0)) continue;
-                    if (ImGui::GetIO().KeyShift) {
+                    if (ImGui::GetIO().KeyShift && !onWave) {
                         ToggleSelect(i);
                         break;
                     }
@@ -8949,16 +8974,18 @@ int main(int argc, char* argv[]) {
                     else SelectOnly(i);
                     EnsureEnvelope(clips[i]);
                     int hit = -1;
-                    for (int p = 0; p < (int)clips[i].volume.size(); p++) {
-                        float px = cp0.x + clips[i].volume[p].norm * w;
-                        float py = cp1.y - clips[i].volume[p].gain * (cp1.y - cp0.y);
-                        float dx = mouse.x - px, dy = mouse.y - py;
-                        if (dx * dx + dy * dy <= 64.0f) { hit = p; break; }
+                    if (onWave) {
+                        for (int p = 0; p < (int)clips[i].volume.size(); p++) {
+                            float px = wp0.x + clips[i].volume[p].norm * w;
+                            float py = wp1.y - clips[i].volume[p].gain * std::max(1.0f, wp1.y - wp0.y);
+                            float dx = mouse.x - px, dy = mouse.y - py;
+                            if (dx * dx + dy * dy <= 64.0f) { hit = p; break; }
+                        }
                     }
                     if (hit >= 0) {
                         dragVolClip = i;
                         dragVolPt = hit;
-                    } else {
+                    } else if (!onWave) {
                         float mx = mouse.x;
                         bool edge = (mx < cp0.x + 8.0f) || (mx > cp1.x - 8.0f);
                         if (edge || activeTool == 1) {
@@ -8974,6 +9001,10 @@ int main(int argc, char* argv[]) {
                             dragOffsetX = mx - cp0.x;
                             CaptureGroupDrag(i, -1);
                         }
+                    } else {
+                        draggingClip = i;
+                        dragOffsetX = mouse.x - cp0.x;
+                        CaptureGroupDrag(i, -1);
                     }
                     break;
                 }
@@ -9042,8 +9073,8 @@ int main(int argc, char* argv[]) {
             if (ImGui::IsMouseDown(0) && dragVolPt >= 0 && dragVolPt < (int)clips[dragVolClip].volume.size()) {
                 ImVec2 mouse = ImGui::GetMousePos();
                 int tr = clips[dragVolClip].track;
-                float top = trackPositions[tr].y;
-                float bot = top + trackH - 8.0f;
+                float top = trackPositions[tr].y + kBodyH + kWaveGap;
+                float bot = top + kWaveH;
                 float x0 = trackPositions[tr].x + clips[dragVolClip].startTime * pixelsPerSecond;
                 float w = std::max(24.0f, clips[dragVolClip].duration * pixelsPerSecond);
                 float n = (mouse.x - x0) / w;

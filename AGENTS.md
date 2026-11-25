@@ -23,10 +23,13 @@ ripple insert, or panels-above-timeline.
   Cache the next clip once the one on screen has ~1.5s ahead. An audio clip
   that reaches its end stays at the end and does not seek again.
 - Clip-menu transitions are off (`TransitionForClip` returns false). The lower
-  picture was sticking. Left Shift + an edge fades opacity (in from the head,
-  out toward the tail). Left Ctrl + the same edge fades volume. Draw the ramp
-  on the clip. Waveform bars sit on clips with audio. A zoom fader sits to the
-  right of the transport buttons. Do not bring the transition menu back.
+  picture was sticking. Left Shift on a clip-body edge fades opacity: 100 at
+  the outer edge, 0 at the handle, and the body stays at 0 so the clip
+  underneath shows. Ctrl on the wave strip under the clip does the same for
+  volume, on every clip. Channels are tall (body plus the strip) and the
+  timeline scrolls vertically. The zoom fader, to the right of the transport
+  buttons, zooms out until about 20% empty shows on the right of the project.
+  Do not bring the transition menu back. Do not restore the standard fade.
 - Preview keeps more seconds ahead (small clips 14s, large clips 9s / 11s
   source). An empty click unselects only when more than one object is
   selected. Dropping an effect does not open its side panel.

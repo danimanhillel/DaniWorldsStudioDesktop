@@ -136,9 +136,12 @@ In order, they asked for and accepted:
     picture. Audio of a clip that has ended must not seek back to the start.
 15. Clip-menu transitions (Cross Dissolve, Blend, Zoom) are **removed**.
     The lower picture was sticking. Do not put that menu back, and do not
-    make `TransitionForClip` composite again. Opacity and volume are edge
-    fades. A waveform sits on the clip. Timeline zoom is a fader to the
-    right of the transport buttons.
+    make `TransitionForClip` composite again. Opacity is Left Shift on the
+    clip-body edge. Volume is Ctrl on the wave strip under the clip. The
+    ramp is 100 at the outer edge and 0 at the handle; the body stays at 0
+    so the clip underneath shows. Tracks are tall and the timeline scrolls
+    vertically. The zoom fader, right of the transport buttons, zooms out
+    until the view is the project plus 20% empty on the right.
 
 They build on Windows themselves. The Linux sandbox has no MSVC. After an
 exe change, the reply ends with `taskkill`, `git pull`, and
@@ -494,45 +497,69 @@ preview and export do not composite `fxOut` (that was the stuck lower image).
 `fadeIn` / `fadeOut` menu items stay. If `volIn` or `volOut` is above 0.02s,
 `GainAt` uses that length instead of the fixed ~0.75s bool fade.
 
-Direction (standard fade, not the literal inverse of the Hebrew wording —
-say so if the user asks to flip it):
+`RampAt` is the curve (the user rejected the standard fade, where the body
+stayed at 100 and hid the clip underneath):
 
-- Left Shift + drag the **start** edge: opacity 0 at the head, 100 at the
-  handle, 100 after (`opIn`).
-- Left Shift + drag the **end** edge: 100 until the handle, 0 at the tail
-  (`opOut`).
-- Left Ctrl + the same edge: the same shape for audio gain (`volIn` /
-  `volOut`). Shift wins if both are held.
-- The drag does **not** change the clip bounds. It is not a trim.
-- Handle it **before** Shift-click `ToggleSelect`, or the fade never starts.
+- Neither edge set: 1.
+- Left Shift + drag the **start** edge of the **clip body**: 100 at the head,
+  0 at the handle, and **0 for the rest of the clip** (`opIn`). The lower
+  clip shows after the handle.
+- Left Shift + drag the **end** edge of the body: 0 until the handle, then
+  up to 100 at the tail (`opOut`).
+- If both are set, the higher ramp wins. A gap between them stays at 0.
+- Volume is the same curve, but the drag is **Left or Right Ctrl** on the
+  **wave strip under the clip**, not on the picture (`volIn` / `volOut`).
+  Every video, audio, and GS clip has that strip. Shift on the body still
+  wins for opacity. Ctrl on the body does not fade. Shift on the wave does
+  not fade.
+- The drag does **not** change the clip bounds. It is not a trim. A body
+  edge without Shift still trims. A click on the wave body drags the clip.
+- Handle the fade **before** Shift-click `ToggleSelect`, or it never starts.
 - State: `fadeDragClip`, `fadeDragSide` (-1 start / +1 end), `fadeDragKind`
   (1 opacity, 2 volume). Clear them in `ClearTimelineDrags`. Length from
   mouse x, clamp `0 .. duration-0.05`. Under ~0.03s clears the fade.
-- Draw the ramp inside the clip (white = opacity, yellow = volume). 0 is the
-  bottom, 1 is the top. Draw it on every clip that has a fade, not only the
-  selected one.
-- `OpacityAt`. `BlitVideo` takes `float cover`. Below 0.999 it blends with
-  `glColor4f`. `BlitToCanvas(idx, place, cover)` scales source alpha.
+- Draw the white opacity ramp on the clip body and the yellow volume ramp
+  on the wave strip. 0 is the bottom, 1 is the top. Handle circles sit on
+  the curve. Draw them on every clip that has a fade, not only the selected
+  one. The selected yellow envelope and its points also sit on the wave
+  strip. `dragVol` maps gain across `kWaveH`, not the whole track.
+- `OpacityAt` is `RampAt` of `opIn` / `opOut`. `BlitVideo` takes `float cover`.
+  Below 0.999 it blends. The grade shader alpha uniform is `cover` (a graded
+  clip used to ignore the fade). Ungraded blit sets `GL_MODULATE` so
+  `glColor4f` alpha applies. `BlitToCanvas(idx, place, cover)` scales source
+  alpha. `cover <= 0.001` draws nothing.
 - `FrontLeavesGaps` returns true when the front `OpacityAt` is below 0.98
-  and something is underneath, so the fade shows that clip and not black.
+  and something is underneath, so a faded body shows that clip and not black.
   GS opacity is `gsOpacity * OpacityAt`.
 
-Waveform: white vertical bars, centered, on video, audio, and GS clips that
-have audio. Peaks are per file path, built once on a background thread
-(`DecodeWavePeaks`, about 2 buckets/second, 32–2000, packet cap 8000).
-`wave` state 2 with an empty vector means no audio — do not retry every
-frame. Map through `sourceOffset` and `speed`.
+Waveform: white vertical bars, centered, in the dark strip **under** the clip
+body (not on the picture). Video, audio, and GS. Peaks are per file path,
+built once on a background thread (`DecodeWavePeaks`, about 2 buckets/second,
+32–2000, packet cap 8000). `wave` state 2 with an empty vector means no
+audio — do not retry every frame. Map through `sourceOffset` and `speed`.
+
+Tracks: body about 52px, wave about 36px, lane window about 120px so the
+wave is not clipped by child padding. FX and SUBS stay 42. `tlTrackH` is the
+clip+wave height plus 8 (marquee). Do not set it to the window height or the
+marquee swallows the next lane. The timeline child has
+`AlwaysVerticalScrollbar` and its height is capped near half the window, so
+the taller channels scroll downward.
 
 Zoom: `SliderFloat` `##tlzoom` immediately to the **right of the transport
-buttons** (after Repeat, before the timecode). Range is a fit value (project
-span vs window width, clamped 4–48) up to 240. Do not write
+buttons** (after Repeat, before the timecode). Minimum is a fit of
+`contentEnd * 1.20` against `tlViewW` (the timeline child width from the
+previous frame, minus the label gutter), clamped 1–80. At that minimum the
+view is the project plus about 20% empty on the right. Do not write
 `pixelsPerSecond` every frame. Default stays 50. Saved as `pps`. Load accepts
-about 2–400 so a zoomed-out project stays zoomed out.
+1–400. `tlSeconds` is at least `contentEnd * 1.20`.
 
 ## Shipped commits — do not redo
 
 Newest first, all on `origin/main`:
 
+- `99f00f2` edge fades, in-clip waveform, zoom fader. The fade curve in that
+  commit was the standard one (body stayed at 100). The user rejected it.
+  Do not put that curve back.
 - `a110675` compile fix, duplicate `cutMedia`
 - `5861d38` channel cut: no decoder walk, audio does not reseek at EOF
 - `1aedbd5` cache the visible clip first; playback catch-up capped at 4 frames
