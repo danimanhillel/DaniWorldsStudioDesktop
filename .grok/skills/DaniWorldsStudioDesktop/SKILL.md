@@ -134,6 +134,11 @@ In order, they asked for and accepted:
 14. A cut between channels (1↔2, 2↔3, 1↔3, any pair) must be seamless. The
     end of a clip that is underneath the one on screen must not freeze the
     picture. Audio of a clip that has ended must not seek back to the start.
+15. Clip-menu transitions (Cross Dissolve, Blend, Zoom) are **removed**.
+    The lower picture was sticking. Do not put that menu back, and do not
+    make `TransitionForClip` composite again. Opacity and volume are edge
+    fades. A waveform sits on the clip. Timeline zoom is a fader to the
+    right of the transport buttons.
 
 They build on Windows themselves. The Linux sandbox has no MSVC. After an
 exe change, the reply ends with `taskkill`, `git pull`, and
@@ -253,8 +258,8 @@ is dragged.
 - BUS has **no "+" button**. Clicking an empty bus lane creates a segment that
   spans the full timeline range, unless more than one object is already
   selected — then the click only unselects (see below).
-- A transition runs when the **left** clip is the one visually above the clip
-  that continues (not "whichever track index is higher").
+- The clip right-click **Effects** menu is gone. `TransitionForClip` returns
+  false. Overlay FX on the FX lane is separate. Leave that tab.
 - **Solids** bin: black, letterbox bars, green. Drag onto video tracks and onto
   GS. Textures are `gSolidTex[3]`, created before first use. `MakeThumbnail` of
   a solid must see `gSolidTex` already declared.
@@ -477,6 +482,52 @@ download the DLL or the model. Do not send guessed ONNX Runtime zip URLs.
 
 `asr.cpp`. The only models the build copies are `mel80.bin` and
 `multilingual.tiktoken`. Do not drop that `POST_BUILD`.
+
+## Edge fades, waveform, timeline zoom
+
+Replaces the clip-menu transitions. `TransitionForClip` returns false so
+preview and export do not composite `fxOut` (that was the stuck lower image).
+`effects.cpp` stays. The Effects **tab** (overlay FX) stays.
+
+`Clip` fields: `opIn`, `opOut`, `volIn`, `volOut` (seconds). Saved on a new
+`R` line. Copied in `ClipWithoutFx` and `EditSignature`. The old audio
+`fadeIn` / `fadeOut` menu items stay. If `volIn` or `volOut` is above 0.02s,
+`GainAt` uses that length instead of the fixed ~0.75s bool fade.
+
+Direction (standard fade, not the literal inverse of the Hebrew wording —
+say so if the user asks to flip it):
+
+- Left Shift + drag the **start** edge: opacity 0 at the head, 100 at the
+  handle, 100 after (`opIn`).
+- Left Shift + drag the **end** edge: 100 until the handle, 0 at the tail
+  (`opOut`).
+- Left Ctrl + the same edge: the same shape for audio gain (`volIn` /
+  `volOut`). Shift wins if both are held.
+- The drag does **not** change the clip bounds. It is not a trim.
+- Handle it **before** Shift-click `ToggleSelect`, or the fade never starts.
+- State: `fadeDragClip`, `fadeDragSide` (-1 start / +1 end), `fadeDragKind`
+  (1 opacity, 2 volume). Clear them in `ClearTimelineDrags`. Length from
+  mouse x, clamp `0 .. duration-0.05`. Under ~0.03s clears the fade.
+- Draw the ramp inside the clip (white = opacity, yellow = volume). 0 is the
+  bottom, 1 is the top. Draw it on every clip that has a fade, not only the
+  selected one.
+- `OpacityAt`. `BlitVideo` takes `float cover`. Below 0.999 it blends with
+  `glColor4f`. `BlitToCanvas(idx, place, cover)` scales source alpha.
+- `FrontLeavesGaps` returns true when the front `OpacityAt` is below 0.98
+  and something is underneath, so the fade shows that clip and not black.
+  GS opacity is `gsOpacity * OpacityAt`.
+
+Waveform: white vertical bars, centered, on video, audio, and GS clips that
+have audio. Peaks are per file path, built once on a background thread
+(`DecodeWavePeaks`, about 2 buckets/second, 32–2000, packet cap 8000).
+`wave` state 2 with an empty vector means no audio — do not retry every
+frame. Map through `sourceOffset` and `speed`.
+
+Zoom: `SliderFloat` `##tlzoom` immediately to the **right of the transport
+buttons** (after Repeat, before the timecode). Range is a fit value (project
+span vs window width, clamped 4–48) up to 240. Do not write
+`pixelsPerSecond` every frame. Default stays 50. Saved as `pps`. Load accepts
+about 2–400 so a zoomed-out project stays zoomed out.
 
 ## Shipped commits — do not redo
 

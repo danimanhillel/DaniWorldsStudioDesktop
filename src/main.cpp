@@ -99,6 +99,10 @@ struct Clip {
     float speed = 1.0f;
     bool fadeIn = false;
     bool fadeOut = false;
+    float opIn = 0.0f;
+    float opOut = 0.0f;
+    float volIn = 0.0f;
+    float volOut = 0.0f;
     int track = 0;
     std::vector<VolPoint> volume;
     bool eqOn = false;
@@ -210,6 +214,9 @@ int fxEdit = -1;
 bool openClipMenu = false;
 int dragVolClip = -1;
 int dragVolPt = -1;
+int fadeDragClip = -1;
+int fadeDragSide = 0;
+int fadeDragKind = 0;
 float frameDebt = 0.0f;
 float timeOriginX = 0.0f;
 int exAspect = 0;
@@ -1641,11 +1648,34 @@ float GainAt(const Clip& c, float localTime) {
     }
     float fadeDur = std::min(0.75f, c.duration * 0.45f);
     if (fadeDur < 0.02f) fadeDur = 0.02f;
-    if (c.fadeIn) g *= std::min(1.0f, localTime / fadeDur);
-    if (c.fadeOut) g *= std::min(1.0f, (c.duration - localTime) / fadeDur);
+    float inDur = c.volIn > 0.02f ? c.volIn : (c.fadeIn ? fadeDur : 0.0f);
+    float outDur = c.volOut > 0.02f ? c.volOut : (c.fadeOut ? fadeDur : 0.0f);
+    if (inDur > 0.02f && localTime < inDur) g *= std::max(0.0f, localTime / inDur);
+    if (outDur > 0.02f) {
+        float tail = c.duration - localTime;
+        if (tail < outDur) g *= std::max(0.0f, tail / outDur);
+    }
     if (g < 0) g = 0;
     if (g > 1) g = 1;
     return g;
+}
+
+static float OpacityAt(const Clip& c, float localTime) {
+    if (c.duration <= 0.0001f) return 1.0f;
+    if (localTime < 0) localTime = 0;
+    if (localTime > c.duration) localTime = c.duration;
+    float o = 1.0f;
+    if (c.opIn > 0.02f && localTime < c.opIn) o = localTime / c.opIn;
+    if (c.opOut > 0.02f) {
+        float tail = c.duration - localTime;
+        if (tail < c.opOut) {
+            float u = tail / c.opOut;
+            if (u < o) o = u;
+        }
+    }
+    if (o < 0) o = 0;
+    if (o > 1) o = 1;
+    return o;
 }
 
 void MixTimeline(double timelineTime, int sampleCount, int16_t* dst) {
@@ -2317,7 +2347,7 @@ struct ExportSession {
     bool HoldFrame(ExpDec& d, double want, std::vector<uint8_t>& dst, int& rw, int& rh);
     bool HoldFrameView(ExpDec& d, double want, const uint8_t*& data, int& rw, int& rh);
     bool RifePair(int mediaId, double mediaT, float speed, std::vector<uint8_t>& out, int& rw, int& rh);
-    void BlitToCanvas(int idx, const Clip* place = nullptr);
+    void BlitToCanvas(int idx, const Clip* place = nullptr, float cover = 1.0f);
 };
 
 void FitInside(int sw, int sh, int dw, int dh, int& ox, int& oy, int& fw, int& fh) {
@@ -2643,7 +2673,10 @@ bool ExportSession::RifePair(int mediaId, double mediaT, float speed, std::vecto
     return true;
 }
 
-void ExportSession::BlitToCanvas(int idx, const Clip* place) {
+void ExportSession::BlitToCanvas(int idx, const Clip* place, float cover) {
+    if (cover < 0.0f) cover = 0.0f;
+    if (cover > 1.0f) cover = 1.0f;
+    if (cover <= 0.001f) return;
     if (idx < 0 || idx >= (int)decs.size()) return;
     ExpDec& d = decs[idx];
     if (d.rw < 1 || d.rh < 1 || d.rgba.empty()) return;
@@ -2677,7 +2710,9 @@ void ExportSession::BlitToCanvas(int idx, const Clip* place) {
                 const uint8_t* s = src + (size_t)x * 4;
                 uint8_t* dst = canvas.data() + dstOff + (size_t)x * 4;
                 unsigned a = s[3];
-                if (a >= 250) {
+                if (cover < 0.999f) a = (unsigned)((float)a * cover + 0.5f);
+                if (a > 255) a = 255;
+                if (a >= 250 && cover >= 0.999f) {
                     dst[0] = s[0]; dst[1] = s[1]; dst[2] = s[2]; dst[3] = 255;
                 } else if (a > 0) {
                     dst[0] = (uint8_t)((s[0] * a + dst[0] * (255 - a)) / 255);
@@ -2715,7 +2750,9 @@ void ExportSession::BlitToCanvas(int idx, const Clip* place) {
             const uint8_t* s = src + ((size_t)sy * fw + sx) * 4;
             uint8_t* dst = canvas.data() + ((size_t)y * w + x) * 4;
             unsigned a = s[3];
-            if (a >= 250) {
+            if (cover < 0.999f) a = (unsigned)((float)a * cover + 0.5f);
+            if (a > 255) a = 255;
+            if (a >= 250 && cover >= 0.999f) {
                 dst[0] = s[0]; dst[1] = s[1]; dst[2] = s[2]; dst[3] = 255;
             } else if (a > 0) {
                 dst[0] = (uint8_t)((s[0] * a + dst[0] * (255 - a)) / 255);
@@ -3564,6 +3601,8 @@ static bool FrontLeavesGaps(int top, int partner, int plate, int drive, float t,
         if (nb < 2) bg[nb++] = c;
     }
     if (nb == 0) return false;
+    float topLocal = t - clips[top].startTime;
+    if (OpacityAt(clips[top], topLocal) < 0.98f) return true;
     if (partner >= 0) {
         int a = -1, b = -1;
         float prog = 0;
@@ -4019,6 +4058,7 @@ void ExportSession::Step() {
             float speed = std::max(0.05f, c.speed);
             double local = ClipLocalTime(ci, (float)when);
             double mediaT = c.sourceOffset + local * (double)speed;
+            float cover = OpacityAt(c, (float)local);
             std::vector<uint8_t> mid;
             int mw = 0, mh = 0;
             if (RifePair(c.mediaId, mediaT, speed, mid, mw, mh)) {
@@ -4030,7 +4070,7 @@ void ExportSession::Step() {
                 d.rgba = std::move(mid);
                 d.rw = mw;
                 d.rh = mh;
-                BlitToCanvas(idx, &c);
+                BlitToCanvas(idx, &c, cover);
                 d.rgba = std::move(saved);
                 d.rw = srw;
                 d.rh = srh;
@@ -4038,7 +4078,7 @@ void ExportSession::Step() {
             }
             int idx = OpenDec(c.mediaId);
             if (!EnsureFrame(c.mediaId, mediaT)) return false;
-            BlitToCanvas(idx, &c);
+            BlitToCanvas(idx, &c, cover);
             return true;
         };
         int bg[2] = {-1, -1};
@@ -4120,7 +4160,7 @@ void ExportSession::Step() {
     if (plate >= 0) {
         const Clip& c = clips[plate];
         int idx = OpenDec(c.mediaId);
-        if (EnsureFrame(c.mediaId, 0)) BlitToCanvas(idx, &c);
+        if (EnsureFrame(c.mediaId, 0)) BlitToCanvas(idx, &c, OpacityAt(c, (float)t - c.startTime));
     }
     int gs = FindGsClip((float)t);
     if (gs >= 0) {
@@ -4130,16 +4170,17 @@ void ExportSession::Step() {
         std::vector<uint8_t> base = canvas;
         std::vector<uint8_t> mid;
         int mw = 0, mh = 0;
+        float gsCover = c.gsOpacity * OpacityAt(c, (float)t - c.startTime);
         if (RifePair(c.mediaId, mediaT, speed, mid, mw, mh)) {
             BlendChromaPlaced(base.data(), w, h, mid.data(), mw, mh,
-                              c.keySim, c.keySoft, c.keySpill, c.gsX, c.gsY, c.gsScale, c.gsOpacity, c.gsAspect, c.gsRot);
+                              c.keySim, c.keySoft, c.keySpill, c.gsX, c.gsY, c.gsScale, gsCover, c.gsAspect, c.gsRot);
             canvas.swap(base);
         } else {
             int idx = OpenDec(c.mediaId);
             if (idx >= 0 && EnsureFrame(c.mediaId, mediaT) && idx < (int)decs.size() && !decs[idx].rgba.empty()) {
                 ExpDec& d = decs[idx];
                 BlendChromaPlaced(base.data(), w, h, d.rgba.data(), d.rw, d.rh,
-                                  c.keySim, c.keySoft, c.keySpill, c.gsX, c.gsY, c.gsScale, c.gsOpacity, c.gsAspect, c.gsRot);
+                                  c.keySim, c.keySoft, c.keySpill, c.gsX, c.gsY, c.gsScale, gsCover, c.gsAspect, c.gsRot);
                 canvas.swap(base);
             }
         }
@@ -4996,8 +5037,11 @@ static void DrawXformChrome(int top, int plate) {
 #endif
 
 void BlitVideo(ImVec2 p0, ImVec2 p1, GLuint tex, int vw, int vh, ImVec2 clip0, ImVec2 clip1,
-               float ox = 0.0f, float oy = 0.0f, float scale = 1.0f, float aspect = 1.0f, float rot = 0.0f, bool blendAlpha = false) {
+               float ox = 0.0f, float oy = 0.0f, float scale = 1.0f, float aspect = 1.0f, float rot = 0.0f, bool blendAlpha = false, float cover = 1.0f) {
     if (!tex || vw <= 0 || vh <= 0) return;
+    if (cover < 0.0f) cover = 0.0f;
+    if (cover > 1.0f) cover = 1.0f;
+    if (cover <= 0.001f) return;
     float areaW = p1.x - p0.x;
     float areaH = p1.y - p0.y;
     if (areaW < 4 || areaH < 4) return;
@@ -5034,7 +5078,8 @@ void BlitVideo(ImVec2 p0, ImVec2 p1, GLuint tex, int vw, int vh, ImVec2 clip0, I
     bool graded = activeGrade && BindGrade(*activeGrade, vw, vh, 1.0f);
     if (!graded && pglUseProgram) pglUseProgram(0);
     glDisable(GL_DEPTH_TEST);
-    if (blendAlpha) {
+    bool useBlend = blendAlpha || cover < 0.999f;
+    if (useBlend) {
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     } else {
@@ -5044,7 +5089,8 @@ void BlitVideo(ImVec2 p0, ImVec2 p1, GLuint tex, int vw, int vh, ImVec2 clip0, I
     glScissor((int)sx0, (int)(io.DisplaySize.y - sy1), std::max(1, (int)(sx1 - sx0)), std::max(1, (int)(sy1 - sy0)));
     glEnable(GL_TEXTURE_2D);
     glBindTexture(GL_TEXTURE_2D, tex);
-    glColor3f(1.f, 1.f, 1.f);
+    if (cover < 0.999f) glColor4f(1.f, 1.f, 1.f, cover);
+    else glColor3f(1.f, 1.f, 1.f);
     glMatrixMode(GL_PROJECTION);
     glPushMatrix();
     glLoadIdentity();
@@ -5070,6 +5116,7 @@ void BlitVideo(ImVec2 p0, ImVec2 p1, GLuint tex, int vw, int vh, ImVec2 clip0, I
     glPopMatrix();
     glMatrixMode(GL_MODELVIEW);
     glDisable(GL_TEXTURE_2D);
+    glColor4f(1.f, 1.f, 1.f, 1.f);
     glDisable(GL_BLEND);
     glDisable(GL_SCISSOR_TEST);
     if (graded && pglUseProgram) pglUseProgram(0);
@@ -5304,7 +5351,8 @@ static void DrawBackgroundClip(int clip, ImVec2 view0, ImVec2 view1) {
     bool alpha = false;
     int mid = c.mediaId;
     if (mid >= 0 && mid < (int)media.size()) alpha = SolidHasAlpha(media[mid].path);
-    BlitVideo(view0, view1, tex, tw, th, view0, view1, c.gsX, c.gsY, c.gsScale, c.gsAspect, c.gsRot, alpha);
+    float cover = OpacityAt(c, currentTime - c.startTime);
+    BlitVideo(view0, view1, tex, tw, th, view0, view1, c.gsX, c.gsY, c.gsScale, c.gsAspect, c.gsRot, alpha, cover);
     recordFit = rec;
     activeGrade = saved;
 }
@@ -5717,6 +5765,7 @@ static void ClearTimelineDrags() {
     trimmingBus = -1;
     dragVolClip = -1;
     dragVolPt = -1;
+    fadeDragClip = -1;
     draggingOv = -1;
     trimmingOv = -1;
     draggingSub = -1;
@@ -6060,32 +6109,12 @@ int OverlapPartner(int i) {
 }
 
 bool TransitionForClip(int clip, float t, int& a, int& b, float& progress, std::string& id) {
-    if (clip < 0 || clip >= (int)clips.size()) return false;
-    auto window = [&](int owner) -> bool {
-        if (owner < 0 || owner >= (int)clips.size() || clips[owner].fxOut.empty()) return false;
-        if (!FxKnown(clips[owner].fxOut.c_str())) return false;
-        int other = OverlapPartner(owner);
-        if (other < 0) return false;
-        float o0 = clips[owner].startTime;
-        float o1 = o0 + clips[owner].duration;
-        float p0 = clips[other].startTime;
-        float p1 = p0 + clips[other].duration;
-        float t0 = std::max(o0, p0);
-        float t1 = std::min(o1, p1);
-        if (t1 - t0 < 0.05f || t < t0 || t >= t1) return false;
-        bool ownerFirst = o0 < p0 - 0.001f || (std::fabs(o0 - p0) <= 0.001f && clips[owner].track > clips[other].track);
-        a = ownerFirst ? owner : other;
-        b = ownerFirst ? other : owner;
-        progress = (t - t0) / (t1 - t0);
-        if (progress < 0) progress = 0;
-        if (progress > 1) progress = 1;
-        id = clips[owner].fxOut;
-        return true;
-    };
-    if (window(clip)) return true;
-    for (int i = 0; i < (int)clips.size(); i++) {
-        if (i != clip && OverlapPartner(i) == clip && window(i)) return true;
-    }
+    (void)clip;
+    (void)t;
+    (void)a;
+    (void)b;
+    (void)progress;
+    (void)id;
     return false;
 }
 
@@ -6164,7 +6193,17 @@ void SplitSelected() {
     right.fadeIn = false;
     right.fadeOut = c.fadeOut;
     c.fadeOut = false;
+    right.opIn = 0;
+    right.opOut = c.opOut;
+    c.opOut = 0;
+    right.volIn = 0;
+    right.volOut = c.volOut;
+    c.volOut = 0;
     c.duration = leftDur;
+    if (c.opIn > c.duration) c.opIn = c.duration;
+    if (c.volIn > c.duration) c.volIn = c.duration;
+    if (right.opOut > right.duration) right.opOut = right.duration;
+    if (right.volOut > right.duration) right.volOut = right.duration;
     std::vector<VolPoint> leftPts, rightPts;
     leftPts.push_back({0.0f, c.volume.front().gain});
     for (const auto& p : c.volume) {
@@ -6729,6 +6768,14 @@ void ApplyTrim(int idx, float mouseX) {
         c.sourceOffset = image ? 0.0f : noff;
         c.duration = ndur;
     }
+    auto clampFade = [&](float& v) {
+        if (v < 0) v = 0;
+        if (v > c.duration) v = c.duration;
+    };
+    clampFade(c.opIn);
+    clampFade(c.opOut);
+    clampFade(c.volIn);
+    clampFade(c.volOut);
 }
 
 void ExportDims(int aspect, int res, int& w, int& h) {
@@ -7018,6 +7065,7 @@ bool SaveProject(const std::string& path) {
                 c.fadeIn ? 1 : 0, c.fadeOut ? 1 : 0, c.track, (int)c.volume.size());
         for (const auto& v : c.volume)
             fprintf(f, "V %.6f %.6f\n", v.norm, v.gain);
+        fprintf(f, "R %.4f %.4f %.4f %.4f\n", c.opIn, c.opOut, c.volIn, c.volOut);
         fprintf(f, "F %d %d %d %.4f %.4f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f\n",
                 c.eqOn ? 1 : 0, c.reverbOn ? 1 : 0, c.delayOn ? 1 : 0, c.reverbTime, c.delayTempo,
                 c.eqGain[0], c.eqGain[1], c.eqGain[2], c.eqGain[3],
@@ -7079,6 +7127,10 @@ static Clip ClipWithoutFx(const Clip& s) {
     d.speed = s.speed;
     d.fadeIn = s.fadeIn;
     d.fadeOut = s.fadeOut;
+    d.opIn = s.opIn;
+    d.opOut = s.opOut;
+    d.volIn = s.volIn;
+    d.volOut = s.volOut;
     d.track = s.track;
     d.volume = s.volume;
     d.eqOn = s.eqOn;
@@ -7141,7 +7193,8 @@ static std::string EditSignature(const EditSnap& e) {
     o << e.clips.size() << '\n';
     for (const auto& c : e.clips) {
         o << c.mediaId << '\t' << c.startTime << '\t' << c.duration << '\t' << c.sourceOffset << '\t'
-          << c.speed << '\t' << c.fadeIn << c.fadeOut << '\t' << c.track << '\t' << c.muted << '\t'
+          << c.speed << '\t' << c.fadeIn << c.fadeOut << '\t' << c.opIn << '\t' << c.opOut << '\t'
+          << c.volIn << '\t' << c.volOut << '\t' << c.track << '\t' << c.muted << '\t'
           << c.fxOut << '\t' << c.fxDur << '\t'
           << c.keySim << '\t' << c.keySoft << '\t' << c.keySpill << '\t'
           << c.gsX << '\t' << c.gsY << '\t' << c.gsScale << '\t' << c.gsAspect << '\t' << c.gsRot << '\t' << c.gsOpacity << '\t' << c.gsFit << '\t'
@@ -7363,7 +7416,7 @@ bool LoadProject(const std::string& path) {
             repeatOn = atoi(line + 7) != 0;
         } else if (strncmp(line, "pps ", 4) == 0) {
             float p = (float)atof(line + 4);
-            if (p > 5.0f && p < 400.0f) pixelsPerSecond = p;
+            if (p > 2.0f && p <= 400.0f) pixelsPerSecond = p;
         } else if (strncmp(line, "aspect ", 7) == 0) {
             int a = atoi(line + 7);
             if (a >= 0 && a <= 4) exAspect = a;
@@ -7399,6 +7452,20 @@ bool LoadProject(const std::string& path) {
                     if (sscanf(line, "V %f %f", &vp.norm, &vp.gain) == 2) c.volume.push_back(vp);
                 }
                 clips.push_back(c);
+            }
+        } else if (line[0] == 'R' && line[1] == ' ' && !clips.empty()) {
+            float a = 0, b = 0, vi = 0, vo = 0;
+            if (sscanf(line, "R %f %f %f %f", &a, &b, &vi, &vo) == 4) {
+                Clip& cl = clips.back();
+                auto lim = [&](float v) {
+                    if (v < 0) v = 0;
+                    if (v > cl.duration) v = cl.duration;
+                    return v;
+                };
+                cl.opIn = lim(a);
+                cl.opOut = lim(b);
+                cl.volIn = lim(vi);
+                cl.volOut = lim(vo);
             }
         } else if (line[0] == 'F' && line[1] == ' ' && !clips.empty()) {
             Clip& c = clips.back();
@@ -7555,6 +7622,236 @@ bool LoadProject(const std::string& path) {
     return true;
 }
 
+static std::mutex gWaveMu;
+static std::map<std::string, int> gWaveState;
+static std::map<std::string, std::vector<unsigned char>> gWavePeaks;
+
+#ifdef HAVE_FFMPEG
+static std::vector<unsigned char> DecodeWavePeaks(const std::string& path, float durationHint) {
+    std::vector<unsigned char> peaks;
+    AVFormatContext* fmt = nullptr;
+    if (avformat_open_input(&fmt, path.c_str(), nullptr, nullptr) < 0) return peaks;
+    if (avformat_find_stream_info(fmt, nullptr) < 0) { avformat_close_input(&fmt); return peaks; }
+    int as = -1;
+    for (unsigned i = 0; i < fmt->nb_streams; i++) {
+        if (fmt->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) { as = (int)i; break; }
+    }
+    if (as < 0) { avformat_close_input(&fmt); return peaks; }
+    const AVCodec* codec = avcodec_find_decoder(fmt->streams[as]->codecpar->codec_id);
+    AVCodecContext* ctx = codec ? avcodec_alloc_context3(codec) : nullptr;
+    if (!ctx || avcodec_parameters_to_context(ctx, fmt->streams[as]->codecpar) < 0
+        || avcodec_open2(ctx, codec, nullptr) < 0 || ctx->sample_rate <= 0) {
+        if (ctx) avcodec_free_context(&ctx);
+        avformat_close_input(&fmt);
+        return peaks;
+    }
+    float dur = durationHint;
+    if (fmt->duration > 0) dur = (float)fmt->duration / (float)AV_TIME_BASE;
+    if (dur < 0.05f) dur = durationHint > 0.05f ? durationHint : 1.0f;
+    int buckets = (int)(dur * 2.0f);
+    if (buckets < 32) buckets = 32;
+    if (buckets > 2000) buckets = 2000;
+    std::vector<float> acc((size_t)buckets, 0.0f);
+    AVChannelLayout outLayout;
+    av_channel_layout_default(&outLayout, 1);
+    AVChannelLayout fallback;
+    const AVChannelLayout* inLay = &ctx->ch_layout;
+    bool usedFallback = false;
+    if (ctx->ch_layout.nb_channels <= 0) {
+        av_channel_layout_default(&fallback, 2);
+        inLay = &fallback;
+        usedFallback = true;
+    }
+    SwrContext* swr = nullptr;
+    const int rate = 8000;
+    bool swrOk = swr_alloc_set_opts2(&swr, &outLayout, AV_SAMPLE_FMT_S16, rate,
+                                     inLay, ctx->sample_fmt, ctx->sample_rate, 0, nullptr) >= 0
+        && swr && swr_init(swr) >= 0;
+    av_channel_layout_uninit(&outLayout);
+    if (usedFallback) av_channel_layout_uninit(&fallback);
+    if (!swrOk) {
+        if (swr) swr_free(&swr);
+        avcodec_free_context(&ctx);
+        avformat_close_input(&fmt);
+        return peaks;
+    }
+    AVPacket* pkt = av_packet_alloc();
+    AVFrame* fr = av_frame_alloc();
+    if (!pkt || !fr) {
+        if (pkt) av_packet_free(&pkt);
+        if (fr) av_frame_free(&fr);
+        swr_free(&swr);
+        avcodec_free_context(&ctx);
+        avformat_close_input(&fmt);
+        return peaks;
+    }
+    int audioPackets = 0;
+    while (audioPackets < 8000 && av_read_frame(fmt, pkt) >= 0) {
+        if (pkt->stream_index != as) { av_packet_unref(pkt); continue; }
+        audioPackets++;
+        if (avcodec_send_packet(ctx, pkt) == 0) {
+            while (avcodec_receive_frame(ctx, fr) == 0) {
+                int outCount = (int)av_rescale_rnd(swr_get_delay(swr, ctx->sample_rate) + fr->nb_samples,
+                                                    rate, ctx->sample_rate, AV_ROUND_UP);
+                if (outCount < 1) outCount = 1;
+                std::vector<int16_t> tmp((size_t)outCount + 8);
+                uint8_t* planes[1] = { (uint8_t*)tmp.data() };
+                int got = swr_convert(swr, planes, outCount, (const uint8_t**)fr->data, fr->nb_samples);
+                if (got <= 0) continue;
+                double pts = 0;
+                if (fr->best_effort_timestamp != AV_NOPTS_VALUE)
+                    pts = fr->best_effort_timestamp * av_q2d(fmt->streams[as]->time_base);
+                else if (fr->pts != AV_NOPTS_VALUE)
+                    pts = fr->pts * av_q2d(fmt->streams[as]->time_base);
+                if (pts < 0) pts = 0;
+                for (int s = 0; s < got; s++) {
+                    double sampleT = pts + (double)s / (double)rate;
+                    int bucket = (int)(sampleT / (double)dur * (double)buckets);
+                    if (bucket < 0) bucket = 0;
+                    if (bucket >= buckets) bucket = buckets - 1;
+                    float amp = std::fabs((float)tmp[(size_t)s]) / 32768.0f;
+                    if (amp > acc[(size_t)bucket]) acc[(size_t)bucket] = amp;
+                }
+            }
+        }
+        av_packet_unref(pkt);
+    }
+    av_packet_free(&pkt);
+    av_frame_free(&fr);
+    swr_free(&swr);
+    avcodec_free_context(&ctx);
+    avformat_close_input(&fmt);
+    float peak = 0;
+    for (float v : acc) if (v > peak) peak = v;
+    peaks.assign((size_t)buckets, 0);
+    if (peak > 0.0008f) {
+        for (int i = 0; i < buckets; i++) {
+            float n = acc[(size_t)i] / peak;
+            if (n > 1) n = 1;
+            peaks[(size_t)i] = (unsigned char)(n * 255.0f + 0.5f);
+        }
+    }
+    return peaks;
+}
+#endif
+
+static void RequestWave(int mediaId) {
+#ifdef HAVE_FFMPEG
+    if (mediaId < 0 || mediaId >= (int)media.size()) return;
+    if (media[mediaId].type == "image") return;
+    if (media[mediaId].path.rfind("solid:", 0) == 0) return;
+    std::string path = media[mediaId].path;
+    float dur = media[mediaId].duration;
+    {
+        std::lock_guard<std::mutex> lock(gWaveMu);
+        int& st = gWaveState[path];
+        if (st != 0) return;
+        st = 1;
+    }
+    std::thread([path, dur]() {
+        std::vector<unsigned char> peaks = DecodeWavePeaks(path, dur);
+        std::lock_guard<std::mutex> lock(gWaveMu);
+        gWavePeaks[path] = std::move(peaks);
+        gWaveState[path] = 2;
+    }).detach();
+#else
+    (void)mediaId;
+#endif
+}
+
+static bool CopyWave(const std::string& path, std::vector<unsigned char>& out) {
+    std::lock_guard<std::mutex> lock(gWaveMu);
+    auto it = gWaveState.find(path);
+    if (it == gWaveState.end() || it->second != 2) return false;
+    out = gWavePeaks[path];
+    return true;
+}
+
+static void DrawFadeGraph(ImDrawList* dl, ImVec2 a, ImVec2 b, float dur, float inSec, float outSec, ImU32 col) {
+    if (!dl || dur < 0.05f) return;
+    if (inSec <= 0.02f && outSec <= 0.02f) return;
+    float w = b.x - a.x;
+    float h = b.y - a.y;
+    if (w < 6.0f || h < 6.0f) return;
+    auto level = [&](float local) {
+        float o = 1.0f;
+        if (inSec > 0.02f && local < inSec) o = local / inSec;
+        if (outSec > 0.02f) {
+            float tail = dur - local;
+            if (tail < outSec) {
+                float u = tail / outSec;
+                if (u < o) o = u;
+            }
+        }
+        if (o < 0) o = 0;
+        if (o > 1) o = 1;
+        return o;
+    };
+    const int steps = 24;
+    ImVec2 prev(0, 0);
+    for (int i = 0; i <= steps; i++) {
+        float u = (float)i / (float)steps;
+        float o = level(dur * u);
+        ImVec2 p(a.x + w * u, b.y - 1.0f - o * (h - 2.0f));
+        if (i) dl->AddLine(prev, p, col, 1.6f);
+        prev = p;
+    }
+    if (inSec > 0.02f) {
+        float x = a.x + w * std::min(1.0f, inSec / dur);
+        dl->AddCircleFilled(ImVec2(x, a.y + 2.0f), 3.0f, col);
+    }
+    if (outSec > 0.02f) {
+        float x = b.x - w * std::min(1.0f, outSec / dur);
+        dl->AddCircleFilled(ImVec2(x, a.y + 2.0f), 3.0f, col);
+    }
+}
+
+static void DrawClipBody(ImDrawList* dl, ImVec2 cp0, ImVec2 cp1, const Clip& c) {
+    if (!dl || c.mediaId < 0 || c.mediaId >= (int)media.size()) return;
+    const MediaItem& m = media[c.mediaId];
+    if (m.type != "image" && m.path.rfind("solid:", 0) != 0) {
+        RequestWave(c.mediaId);
+        std::vector<unsigned char> peaks;
+        if (CopyWave(m.path, peaks) && !peaks.empty()) {
+            float w = cp1.x - cp0.x;
+            float h = cp1.y - cp0.y;
+            if (w >= 8.0f && h >= 8.0f) {
+                float dur = m.duration > 0.05f ? m.duration : 1.0f;
+                float speed = c.speed < 0.05f ? 1.0f : c.speed;
+                float src0 = c.sourceOffset;
+                float src1 = src0 + c.duration * speed;
+                int n = (int)peaks.size();
+                float midY = (cp0.y + cp1.y) * 0.5f;
+                float maxH = h * 0.42f;
+                int bars = (int)(w / 3.0f);
+                if (bars < 1) bars = 1;
+                if (bars > 2000) bars = 2000;
+                ImU32 col = IM_COL32(255, 255, 255, 210);
+                for (int i = 0; i < bars; i++) {
+                    float u0 = src0 + (src1 - src0) * ((float)i / (float)bars);
+                    float u1 = src0 + (src1 - src0) * ((float)(i + 1) / (float)bars);
+                    int i0 = (int)(u0 / dur * (float)n);
+                    int i1 = (int)(u1 / dur * (float)n);
+                    if (i0 < 0) i0 = 0;
+                    if (i1 < i0) i1 = i0;
+                    if (i0 >= n) i0 = n - 1;
+                    if (i1 >= n) i1 = n - 1;
+                    unsigned char pk = 0;
+                    for (int k = i0; k <= i1; k++) if (peaks[(size_t)k] > pk) pk = peaks[(size_t)k];
+                    float bh = maxH * ((float)pk / 255.0f);
+                    if (bh < 0.6f) continue;
+                    float x = cp0.x + (float)i * 3.0f + 1.0f;
+                    dl->AddLine(ImVec2(x, midY - bh), ImVec2(x, midY + bh), col, 1.35f);
+                }
+            }
+        }
+    }
+}
+
+static void DrawClipFades(ImDrawList* dl, ImVec2 cp0, ImVec2 cp1, const Clip& c) {
+    DrawFadeGraph(dl, cp0, cp1, c.duration, c.volIn, c.volOut, IM_COL32(255, 210, 70, 230));
+    DrawFadeGraph(dl, cp0, cp1, c.duration, c.opIn, c.opOut, IM_COL32(255, 255, 255, 235));
+}
 
 #ifdef _MSC_VER
 #pragma optimize("", off)
@@ -8106,6 +8403,23 @@ int main(int argc, char* argv[]) {
         if (ImGui::IsItemHovered()) ImGui::SetTooltip(repeatOn ? "Repeat on" : "Repeat");
         ImGui::SameLine();
         {
+            float contentEnd = 8.0f;
+            for (const auto& c : clips) contentEnd = std::max(contentEnd, c.startTime + c.duration);
+            for (const auto& b : bus) contentEnd = std::max(contentEnd, b.start + b.duration);
+            for (const auto& s : subs) contentEnd = std::max(contentEnd, s.start + s.duration);
+            for (const auto& o : gOverlays) contentEnd = std::max(contentEnd, o.start + o.duration);
+            float viewW = std::max(240.0f, ImGui::GetWindowWidth() - 80.0f);
+            float fit = viewW / std::max(1.0f, contentEnd);
+            if (fit < 4.0f) fit = 4.0f;
+            if (fit > 48.0f) fit = 48.0f;
+            float zmin = std::min(fit, pixelsPerSecond);
+            float zmax = std::max(240.0f, pixelsPerSecond);
+            ImGui::SetNextItemWidth(130.0f);
+            ImGui::SliderFloat("##tlzoom", &pixelsPerSecond, zmin, zmax, "%.0f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Zoom");
+        }
+        ImGui::SameLine();
+        {
             int total = (int)currentTime;
             int ms = (int)((currentTime - (float)total) * 100.0f);
             if (ms > 99) ms = 99;
@@ -8361,7 +8675,9 @@ int main(int argc, char* argv[]) {
                 ImVec2 cp0(x, gsStart.y);
                 ImVec2 cp1(x + w, gsStart.y + trackH - 8);
                 gdl->AddRectFilled(cp0, cp1, IM_COL32(40, 140, 70, 230), 3.0f);
+                DrawClipBody(gdl, cp0, cp1, clips[i]);
                 if (i == selectedClip || IsSelected(i)) gdl->AddRect(cp0, cp1, IM_COL32(180, 255, 180, 255), 3.0f, 0, i == selectedClip ? 2.0f : 1.2f);
+                DrawClipFades(gdl, cp0, cp1, clips[i]);
                 std::string label = "GS";
                 if (clips[i].mediaId >= 0 && clips[i].mediaId < (int)media.size())
                     label = media[clips[i].mediaId].name.substr(0, 16);
@@ -8380,9 +8696,22 @@ int main(int argc, char* argv[]) {
                     openedPanelThisFrame = true;
                 }
                 if (ImGui::IsMouseClicked(0)) {
-                    if (IsSelected(i)) { selectedClip = i; ClearLaneRivals(); }
+                    bool shift = ImGui::IsKeyDown(ImGuiKey_LeftShift);
+                    bool ctrl = ImGui::IsKeyDown(ImGuiKey_LeftCtrl) || ImGui::IsKeyDown(ImGuiKey_RightCtrl);
+                    bool atStart = mouse.x < cp0.x + 10.0f;
+                    bool atEnd = mouse.x > cp1.x - 10.0f;
+                    if ((shift || ctrl) && (atStart || atEnd)) {
+                        if (IsSelected(i)) { selectedClip = i; ClearLaneRivals(); }
+                        else SelectOnly(i);
+                        fadeDragClip = i;
+                        fadeDragSide = atStart ? -1 : 1;
+                        fadeDragKind = shift ? 1 : 2;
+                        trimmingClip = -1;
+                        draggingClip = -1;
+                    } else if (IsSelected(i)) { selectedClip = i; ClearLaneRivals(); }
                     else SelectOnly(i);
-                    if (mouse.x < cp0.x + 8) { trimmingClip = i; trimSide = 0; trimAnchorX = mouse.x; trimOrigStart = clips[i].startTime; trimOrigDur = clips[i].duration; trimOrigOffset = clips[i].sourceOffset; }
+                    if (fadeDragClip == i) {
+                    } else if (mouse.x < cp0.x + 8) { trimmingClip = i; trimSide = 0; trimAnchorX = mouse.x; trimOrigStart = clips[i].startTime; trimOrigDur = clips[i].duration; trimOrigOffset = clips[i].sourceOffset; }
                     else if (mouse.x > cp1.x - 8) { trimmingClip = i; trimSide = 1; trimAnchorX = mouse.x; trimOrigStart = clips[i].startTime; trimOrigDur = clips[i].duration; trimOrigOffset = clips[i].sourceOffset; }
                     else { draggingClip = i; dragOffsetX = mouse.x - cp0.x; trimmingClip = -1; CaptureGroupDrag(i, -1); }
                 }
@@ -8511,6 +8840,7 @@ int main(int argc, char* argv[]) {
                     if (tw > 10.0f)
                         DrawThumb(tdl, cp0, ImVec2(cp0.x + tw, cp1.y), trackClip0, trackClip1, media[mid].thumb, media[mid].thumbW, media[mid].thumbH);
                 }
+                DrawClipBody(tdl, cp0, cp1, clips[i]);
                 if (i == selectedClip || IsSelected(i)) {
                     if (i == selectedClip) EnsureEnvelope(clips[i]);
                     tdl->AddRect(cp0, cp1, IM_COL32(255, 220, 60, 255), 3.0f, 0, i == selectedClip ? 2.0f : 1.2f);
@@ -8527,6 +8857,7 @@ int main(int argc, char* argv[]) {
                     }
                     }
                 }
+                DrawClipFades(tdl, cp0, cp1, clips[i]);
                 std::string label = media[clips[i].mediaId].name.substr(0, 14);
                 char extra[48];
                 snprintf(extra, sizeof(extra), " %.1fs", clips[i].duration);
@@ -8538,21 +8869,20 @@ int main(int argc, char* argv[]) {
                 }
                 if (clips[i].fadeIn) label += " FI";
                 if (clips[i].fadeOut) label += " FO";
-                if (!clips[i].fxOut.empty()) {
-                    ClipEffect* fx = FxFind(clips[i].fxOut.c_str());
-                    if (fx) label += std::string(" ") + fx->badge();
-                }
                 tdl->AddText(ImVec2(cp0.x + 44, cp0.y + 4), IM_COL32(255, 255, 255, 230), label.c_str());
 
                 if (ImGui::IsMouseHoveringRect(cp0, cp1)) {
                     float mx = ImGui::GetMousePos().x;
-                    if (mx < cp0.x + 8 || mx > cp1.x - 8)
+                    if (mx < cp0.x + 10.0f || mx > cp1.x - 10.0f) {
                         ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+                        if (ImGui::IsKeyDown(ImGuiKey_LeftShift)) ImGui::SetTooltip("Opacity");
+                        else if (ImGui::IsKeyDown(ImGuiKey_LeftCtrl) || ImGui::IsKeyDown(ImGuiKey_RightCtrl)) ImGui::SetTooltip("Volume");
+                    }
                 }
             }
 
             bool ateClip = false;
-            if (draggingClip < 0 && trimmingClip < 0 && dragVolClip < 0) {
+            if (draggingClip < 0 && trimmingClip < 0 && dragVolClip < 0 && fadeDragClip < 0) {
                 for (int i = (int)clips.size() - 1; i >= 0; --i) {
                     if (clips[i].track != t) continue;
                     float x = trackStart.x + clips[i].startTime * pixelsPerSecond;
@@ -8562,6 +8892,22 @@ int main(int argc, char* argv[]) {
                     if (!ImGui::IsMouseHoveringRect(cp0, cp1) || TimelinePointerBusy()) continue;
                     if (ImGui::IsMouseClicked(0) || ImGui::IsMouseClicked(1) || ImGui::IsMouseDoubleClicked(0)) ateClip = true;
                     ImVec2 mouse = ImGui::GetMousePos();
+                    if (ImGui::IsMouseClicked(0)) {
+                        bool shift = ImGui::IsKeyDown(ImGuiKey_LeftShift);
+                        bool ctrl = ImGui::IsKeyDown(ImGuiKey_LeftCtrl) || ImGui::IsKeyDown(ImGuiKey_RightCtrl);
+                        bool atStart = mouse.x < cp0.x + 10.0f;
+                        bool atEnd = mouse.x > cp1.x - 10.0f;
+                        if ((shift || ctrl) && (atStart || atEnd)) {
+                            if (IsSelected(i)) { selectedClip = i; ClearLaneRivals(); }
+                            else SelectOnly(i);
+                            fadeDragClip = i;
+                            fadeDragSide = atStart ? -1 : 1;
+                            fadeDragKind = shift ? 1 : 2;
+                            trimmingClip = -1;
+                            draggingClip = -1;
+                            break;
+                        }
+                    }
                     if (ImGui::IsMouseClicked(0) && std::fabs(mouse.x - (trackStart.x + currentTime * pixelsPerSecond)) <= 6.0f) {
                         draggingPlayhead = true;
                         shownLocal = -1000.0f;
@@ -8633,7 +8979,7 @@ int main(int argc, char* argv[]) {
                 }
             }
             if (!ateClip && ImGui::IsItemClicked(0) && !TimelinePointerBusy()
-                && draggingClip < 0 && trimmingClip < 0 && dragVolClip < 0 && !marqueeLive) {
+                && draggingClip < 0 && trimmingClip < 0 && dragVolClip < 0 && fadeDragClip < 0 && !marqueeLive) {
                 ImVec2 mouse = ImGui::GetMousePos();
                 float phx = trackStart.x + currentTime * pixelsPerSecond;
                 if (std::fabs(mouse.x - phx) <= 6.0f) {
@@ -8738,7 +9084,36 @@ int main(int argc, char* argv[]) {
             } else trimmingClip = -1;
         }
 
-        if (draggingClip >= 0 && draggingClip < (int)clips.size() && trimmingClip < 0) {
+        if (fadeDragClip >= 0 && fadeDragClip < (int)clips.size()) {
+            if (ImGui::IsMouseDown(0)) {
+                Clip& c = clips[fadeDragClip];
+                int tr = c.track;
+                float origin = timeOriginX;
+                if (tr == kGsTrack) origin = gsOriginX;
+                else if (tr >= 0 && tr < 6) origin = trackPositions[tr].x;
+                float x0 = origin + c.startTime * pixelsPerSecond;
+                float span = std::max(24.0f, c.duration * pixelsPerSecond);
+                float mx = ImGui::GetMousePos().x;
+                float len = (fadeDragSide < 0) ? (mx - x0) / pixelsPerSecond : (x0 + span - mx) / pixelsPerSecond;
+                if (len < 0.03f) len = 0.0f;
+                float cap = c.duration - 0.05f;
+                if (cap < 0.0f) cap = 0.0f;
+                if (len > cap) len = cap;
+                if (fadeDragKind == 2) {
+                    if (fadeDragSide < 0) c.volIn = len;
+                    else c.volOut = len;
+#ifdef HAVE_FFMPEG
+                    ResetAudioSync();
+#endif
+                } else {
+                    if (fadeDragSide < 0) c.opIn = len;
+                    else c.opOut = len;
+                }
+                shownLocal = -1000.0f;
+            } else fadeDragClip = -1;
+        }
+
+        if (draggingClip >= 0 && draggingClip < (int)clips.size() && trimmingClip < 0 && fadeDragClip < 0) {
             if (ImGui::IsMouseDown(0)) {
                 ImVec2 mouse = ImGui::GetMousePos();
                 int tr = clips[draggingClip].track;
@@ -8875,11 +9250,11 @@ int main(int argc, char* argv[]) {
             } else draggingPlayhead = false;
         }
 
-        if (isPlaying || draggingClip >= 0 || draggingPlayhead || trimmingClip >= 0) {
+        if (isPlaying || draggingClip >= 0 || draggingPlayhead || trimmingClip >= 0 || fadeDragClip >= 0) {
             float mx = ImGui::GetMousePos().x;
             float viewL = tlMin.x;
             float viewR = tlMin.x + ImGui::GetWindowSize().x;
-            if (draggingClip >= 0 || draggingPlayhead || trimmingClip >= 0) {
+            if (draggingClip >= 0 || draggingPlayhead || trimmingClip >= 0 || fadeDragClip >= 0) {
                 if (mx > viewR - 28.0f) ImGui::SetScrollX(ImGui::GetScrollX() + 30.0f);
                 else if (mx < viewL + 16.0f) ImGui::SetScrollX(std::max(0.0f, ImGui::GetScrollX() - 30.0f));
             }
@@ -8951,28 +9326,6 @@ int main(int argc, char* argv[]) {
                         if (ImGui::MenuItem(labels[s], nullptr, on)) {
                             for (int i : selection)
                                 if (i >= 0 && i < (int)clips.size()) SetClipSpeed(clips[i], speeds[s]);
-                        }
-                    }
-                    ImGui::EndMenu();
-                }
-                ImGui::Separator();
-                if (ImGui::BeginMenu("Effects")) {
-                    int joins = CountSelectedJoins();
-                    if (joins <= 0) {
-                        ImGui::TextDisabled("Shift+click two overlapping clips");
-                    } else {
-                        ImGui::Text("%d overlap%s", joins, joins == 1 ? "" : "s");
-                        for (int fi = 0; fi < FxCount(); fi++) {
-                            ClipEffect* fx = FxAt(fi);
-                            if (!fx) continue;
-                            if (ImGui::MenuItem(fx->label())) {
-                                int n = ApplyFxToSelection(fx->id(), 0);
-                                previewStatus = n > 0 ? std::string(fx->label()) + " on overlap" : "No overlapping clips";
-                            }
-                        }
-                        if (ImGui::MenuItem("None")) {
-                            ApplyFxToSelection("", 0);
-                            previewStatus = "Effect cleared";
                         }
                     }
                     ImGui::EndMenu();
@@ -9504,15 +9857,17 @@ int main(int argc, char* argv[]) {
                 const Clip* pc = nullptr;
                 int pic = (playingClip >= 0 && playingClip < (int)clips.size()) ? playingClip : topClip;
                 if (pic >= 0 && pic < (int)clips.size()) pc = &clips[pic];
+                float cover = pc ? OpacityAt(*pc, currentTime - pc->startTime) : 1.0f;
                 BlitVideo(view0, view1, player->texture, player->width, player->height, view0, view1,
-                          pc ? pc->gsX : 0, pc ? pc->gsY : 0, pc ? pc->gsScale : 1, pc ? pc->gsAspect : 1, pc ? pc->gsRot : 0);
+                          pc ? pc->gsX : 0, pc ? pc->gsY : 0, pc ? pc->gsScale : 1, pc ? pc->gsAspect : 1, pc ? pc->gsRot : 0, false, cover);
             }
         } else if (player && player->hasFrame && player->texture) {
             const Clip* pc = nullptr;
             int pic = (playingClip >= 0 && playingClip < (int)clips.size()) ? playingClip : topClip;
             if (pic >= 0 && pic < (int)clips.size()) pc = &clips[pic];
+            float cover = pc ? OpacityAt(*pc, currentTime - pc->startTime) : 1.0f;
             BlitVideo(view0, view1, player->texture, player->width, player->height, view0, view1,
-                      pc ? pc->gsX : 0, pc ? pc->gsY : 0, pc ? pc->gsScale : 1, pc ? pc->gsAspect : 1, pc ? pc->gsRot : 0);
+                      pc ? pc->gsX : 0, pc ? pc->gsY : 0, pc ? pc->gsScale : 1, pc ? pc->gsAspect : 1, pc ? pc->gsRot : 0, false, cover);
         }
         activeGrade = nullptr;
         recordFit = false;
@@ -9535,7 +9890,8 @@ int main(int argc, char* argv[]) {
                 ImVec2 a = fitValid ? fitA : view0;
                 ImVec2 b = fitValid ? fitB : view1;
                 const Clip& gc = clips[gsDrawClip];
-                BlitKeyed(a, b, tex, gc.keySim, gc.keySoft, gc.keySpill, gc.gsX, gc.gsY, gc.gsScale, gc.gsOpacity, gc.gsAspect, gc.gsRot);
+                float gsCover = gc.gsOpacity * OpacityAt(gc, currentTime - gc.startTime);
+                BlitKeyed(a, b, tex, gc.keySim, gc.keySoft, gc.keySpill, gc.gsX, gc.gsY, gc.gsScale, gsCover, gc.gsAspect, gc.gsRot);
                 if (!fitValid) { fitA = a; fitB = b; fitValid = true; }
             }
         }
@@ -9549,7 +9905,7 @@ int main(int argc, char* argv[]) {
             if (mid >= 0 && mid < (int)media.size() && media[mid].thumb) {
                 const Clip& pc = clips[previewPlate];
                 BlitVideo(view0, view1, media[mid].thumb, media[mid].thumbW, media[mid].thumbH, view0, view1,
-                          pc.gsX, pc.gsY, pc.gsScale, pc.gsAspect, pc.gsRot, true);
+                          pc.gsX, pc.gsY, pc.gsScale, pc.gsAspect, pc.gsRot, true, OpacityAt(pc, currentTime - pc.startTime));
             }
         }
         DrawPreviewSubs(view0, view1);
