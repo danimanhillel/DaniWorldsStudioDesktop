@@ -526,7 +526,10 @@ Opacity (`RampAt` — the user asked to flip the previous curve):
   high point (`VolPointHidden`). The high point itself is a real envelope
   point (`EnsureFadeAnchor`). After the fade exists, drag that circle:
   horizontal moves `volIn` / `volOut`, vertical moves the gain the fade
-  reaches. Dragging it back to the edge clears the fade. Fade out is the
+  reaches. The circle is grabbable even where it sits on the boundary
+  between the clip body and the wave (`FadeHandleRole` does not require
+  the pointer to be inside the wave). That click must not drag the clip.
+  Dragging it back to the edge clears the fade. Fade out is the
   same toward the tail. Ctrl + drag an edge of the **open** wave strip
   still sets the fade and moves that same point.
 - The wave strip is **per clip** and **closed by default** (`audioOpen`,

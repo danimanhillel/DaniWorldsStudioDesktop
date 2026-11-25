@@ -7827,6 +7827,13 @@ static void DrawFadeGraph(ImDrawList* dl, ImVec2 a, ImVec2 b, float dur, float i
     if (outSec > 0.02f) mark(std::max(0.0f, dur - outSec));
 }
 
+static float VolPointY(float top, float bot, float g) {
+    float h = bot - top;
+    if (g < 0) g = 0;
+    if (g > 1) g = 1;
+    return bot - 1.0f - g * (h - 2.0f);
+}
+
 static bool VolPointHidden(const Clip& c, float norm) {
     float dur = c.duration;
     if (dur <= 0.05f) return false;
@@ -7898,21 +7905,18 @@ static void MoveFadeAnchor(Clip& c, int side, float oldLen) {
 static int FadeHandleRole(const Clip& c, ImVec2 wp0, ImVec2 wp1, float w, ImVec2 mouse) {
     float dur = c.duration;
     if (dur <= 0.05f) return 0;
-    float h = std::max(1.0f, wp1.y - wp0.y);
     auto hit = [&](float local) {
-        if (local <= 0.02f || local >= dur) return false;
+        if (local <= 0.02f || local >= dur - 0.02f) return false;
         float u = local / dur;
         float g = EnvAtNorm(c, u);
-        if (g < 0) g = 0;
-        if (g > 1) g = 1;
         float px = wp0.x + u * w;
-        float py = wp1.y - g * h;
+        float py = VolPointY(wp0.y, wp1.y, g);
         float dx = mouse.x - px;
         float dy = mouse.y - py;
-        return dx * dx + dy * dy <= 144.0f;
+        return dx * dx + dy * dy <= 196.0f;
     };
-    if (hit(c.volIn)) return 1;
-    if (hit(dur - c.volOut)) return 2;
+    if (c.volIn > 0.02f && hit(c.volIn)) return 1;
+    if (c.volOut > 0.02f && hit(dur - c.volOut)) return 2;
     return 0;
 }
 
@@ -7932,7 +7936,7 @@ static void DrawVolumeLine(ImDrawList* dl, ImVec2 a, ImVec2 b, const Clip& c) {
         float g = EnvAtNorm(c, u) * VolumeEdge(local, dur, c.volIn, c.volOut);
         if (g < 0) g = 0;
         if (g > 1) g = 1;
-        ImVec2 p(a.x + w * u, b.y - 1.0f - g * (h - 2.0f));
+        ImVec2 p(a.x + w * u, VolPointY(a.y, b.y, g));
         if (i) dl->AddLine(prev, p, col, 1.8f);
         prev = p;
     }
@@ -7941,9 +7945,7 @@ static void DrawVolumeLine(ImDrawList* dl, ImVec2 a, ImVec2 b, const Clip& c) {
         if (local > dur) local = dur;
         float u = local / dur;
         float g = EnvAtNorm(c, u);
-        if (g < 0) g = 0;
-        if (g > 1) g = 1;
-        dl->AddCircleFilled(ImVec2(a.x + w * u, b.y - 1.0f - g * (h - 2.0f)), 4.0f, IM_COL32(255, 255, 255, 255));
+        dl->AddCircleFilled(ImVec2(a.x + w * u, VolPointY(a.y, b.y, g)), 5.2f, IM_COL32(255, 255, 255, 255));
     };
     if (c.volIn > 0.02f) mark(std::min(dur, c.volIn));
     if (c.volOut > 0.02f) mark(std::max(0.0f, dur - c.volOut));
@@ -8888,7 +8890,7 @@ int main(int argc, char* argv[]) {
                 if (!onArrow && !onWave && (atStart || atEnd) && ImGui::IsKeyDown(ImGuiKey_LeftShift)) ImGui::SetTooltip("Opacity");
                 if (onWave && (atStart || atEnd) && (ImGui::IsKeyDown(ImGuiKey_LeftCtrl) || ImGui::IsKeyDown(ImGuiKey_RightCtrl)))
                     ImGui::SetTooltip("Volume");
-                if (onWave && FadeHandleRole(clips[i], wp0, wp1, w, mouse)) {
+                if (open && FadeHandleRole(clips[i], wp0, wp1, w, mouse)) {
                     ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
                     ImGui::SetTooltip("Move volume point");
                 }
@@ -8912,7 +8914,7 @@ int main(int argc, char* argv[]) {
                     }
                     bool opacityDrag = shift && !onWave && (atStart || atEnd);
                     bool volumeDrag = ctrl && onWave && (atStart || atEnd);
-                    int fadePt = onWave ? FadeHandleRole(clips[i], wp0, wp1, w, mouse) : 0;
+                    int fadePt = open ? FadeHandleRole(clips[i], wp0, wp1, w, mouse) : 0;
                     if (fadePt && !shift) {
                         if (IsSelected(i)) { selectedClip = i; ClearLaneRivals(); }
                         else SelectOnly(i);
@@ -9085,11 +9087,10 @@ int main(int argc, char* argv[]) {
                         tdl->AddLine(cp0, ImVec2(cp0.x, cp1.y), IM_COL32(255, 255, 255, 255), 4.0f);
                         tdl->AddLine(ImVec2(cp1.x, cp0.y), cp1, IM_COL32(255, 255, 255, 255), 4.0f);
                         if (open) {
-                            float waveH = std::max(1.0f, wp1.y - wp0.y);
                             for (int p = 0; p < (int)clips[i].volume.size(); p++) {
                                 if (VolPointHidden(clips[i], clips[i].volume[p].norm)) continue;
                                 float px = wp0.x + clips[i].volume[p].norm * w;
-                                float py = wp1.y - clips[i].volume[p].gain * waveH;
+                                float py = VolPointY(wp0.y, wp1.y, clips[i].volume[p].gain);
                                 tdl->AddCircleFilled(ImVec2(px, py), 4.5f, IM_COL32(255, 255, 255, 255));
                             }
                         }
@@ -9160,7 +9161,7 @@ int main(int argc, char* argv[]) {
                         }
                         bool opacityDrag = shift && !onWave && (atStart || atEnd);
                         bool volumeDrag = ctrl && onWave && (atStart || atEnd);
-                        int fadePt = onWave ? FadeHandleRole(clips[i], wp0, wp1, w, mouse) : 0;
+                        int fadePt = open ? FadeHandleRole(clips[i], wp0, wp1, w, mouse) : 0;
                         if (fadePt && !shift) {
                             if (IsSelected(i)) { selectedClip = i; ClearLaneRivals(); }
                             else SelectOnly(i);
@@ -9235,7 +9236,7 @@ int main(int argc, char* argv[]) {
                         for (int p = 0; p < (int)clips[i].volume.size(); p++) {
                             if (VolPointHidden(clips[i], clips[i].volume[p].norm)) continue;
                             float px = wp0.x + clips[i].volume[p].norm * w;
-                            float py = wp1.y - clips[i].volume[p].gain * std::max(1.0f, wp1.y - wp0.y);
+                            float py = VolPointY(wp0.y, wp1.y, clips[i].volume[p].gain);
                             float dx = mouse.x - px, dy = mouse.y - py;
                             if (dx * dx + dy * dy <= 64.0f) { hit = p; break; }
                         }
@@ -9243,7 +9244,11 @@ int main(int argc, char* argv[]) {
                     if (hit >= 0) {
                         dragVolClip = i;
                         dragVolPt = hit;
-                        dragVolRole = 0;
+                        float dur = clips[i].duration;
+                        float local = clips[i].volume[hit].norm * dur;
+                        if (clips[i].volIn > 0.02f && std::fabs(local - clips[i].volIn) <= 0.06f) dragVolRole = 1;
+                        else if (clips[i].volOut > 0.02f && std::fabs((dur - local) - clips[i].volOut) <= 0.06f) dragVolRole = 2;
+                        else dragVolRole = 0;
                     } else if (!onWave) {
                         float mx = mouse.x;
                         bool edge = (mx < cp0.x + 8.0f) || (mx > cp1.x - 8.0f);

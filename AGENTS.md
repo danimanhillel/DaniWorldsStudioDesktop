@@ -28,8 +28,9 @@ ripple insert, or panels-above-timeline.
   the top, right side falls from the top to the bottom, and the body stays
   at 100. Volume is one yellow line: silence at the outer edge, rising to
   the envelope at the handle. The straight envelope is hidden inside that
-  fade. The circle at the top of that fade can be dragged afterwards:
-  sideways changes the fade length, up and down changes its level. Ctrl +
+  fade. The circle at the top of that fade can be dragged afterwards,
+  including when it sits on the clip itself: sideways changes the fade
+  length, up and down changes its level. Ctrl +
   drag the edge on that clip's audio strip. The strip is closed
   until the arrow in the middle of the clip; click again to close it. The
   zoom fader sits on the right, next to the aspect combo. Do not bring the
