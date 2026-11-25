@@ -137,15 +137,16 @@ In order, they asked for and accepted:
 15. Clip-menu transitions (Cross Dissolve, Blend, Zoom) are **removed**.
     The lower picture was sticking. Do not put that menu back, and do not
     make `TransitionForClip` composite again. Opacity is Left Shift on the
-    clip-body edge: 100 at the outer edge, 0 at the handle, and the body
-    stays at 0 so the clip underneath shows. Volume is a separate curve,
-    one yellow line on that clip's audio strip: silence at the outer edge,
-    up to the envelope at the fade handle, and the straight envelope is not
-    drawn inside the fade. Ctrl + drag an edge of the open strip. The strip
-    stays closed until the arrow in the middle of that clip is clicked.
-    Tracks grow only while a strip on them is open, and the timeline scrolls
-    vertically. The zoom fader, right of the transport buttons, zooms out
-    until the view is the project plus 20% empty on the right.
+    clip-body edge, and it is the opposite of the earlier inverted ramp:
+    the left edge rises from the bottom (0) to the top (100) at the handle
+    and the body stays at 100; the right edge falls from the top to the
+    bottom at the tail. Volume is a separate curve, one yellow line on that
+    clip's audio strip: silence at the outer edge, up to the envelope at
+    the fade handle, and the straight envelope is not drawn inside the
+    fade. Ctrl + drag an edge of the open strip. The strip stays closed
+    until the arrow in the middle of that clip is clicked. Tracks grow
+    only while a strip on them is open, and the timeline scrolls vertically.
+    The zoom fader sits on the right, immediately left of the aspect combo.
 
 They build on Windows themselves. The Linux sandbox has no MSVC. After an
 exe change, the reply ends with `taskkill`, `git pull`, and
@@ -506,16 +507,17 @@ envelope. It is **not** `RampAt` (that curve is opacity only). The old
 audio `fadeIn` / `fadeOut` menu items stay and apply only when neither
 volume edge is set.
 
-Opacity (`RampAt`, the user rejected the standard fade, where the body
-stayed at 100 and hid the clip underneath):
+Opacity (`RampAt` — the user asked to flip the previous curve):
 
 - Neither edge set: 1.
-- Left Shift + drag the **start** edge of the **clip body**: 100 at the head,
-  0 at the handle, and **0 for the rest of the clip** (`opIn`). The lower
-  clip shows after the handle.
-- Left Shift + drag the **end** edge of the body: 0 until the handle, then
-  up to 100 at the tail (`opOut`).
-- If both are set, the higher ramp wins. A gap between them stays at 0.
+- Left Shift + drag the **start** edge of the **clip body**: 0 at the head
+  (bottom of the graph), 100 at the handle, and **100 for the rest of the
+  clip** (`opIn`). The clip underneath shows only while the ramp is below 1.
+- Left Shift + drag the **end** edge of the body: 100 until the handle, then
+  down to 0 at the tail (`opOut`).
+- If both are set, the lower ramp wins where they overlap. The body between
+  them stays at 100. Do not put the inverted curve back (100 at the outer
+  edge, body stuck at 0).
 - Volume is **one** yellow line, `envelope * VolumeEdge`, drawn by
   `DrawVolumeLine` on the wave strip. Do not also draw the envelope
   polyline or a second `DrawFadeGraph` for volume. Fade in: the line
@@ -566,20 +568,20 @@ until a clip on it is open. FX and SUBS stay 42. Do not force every lane
 to the open height. The timeline child has `AlwaysVerticalScrollbar` and
 its height is capped near half the window, so open channels still scroll.
 
-Zoom: `SliderFloat` `##tlzoom` immediately to the **right of the transport
-buttons** (after Repeat, before the timecode). Minimum is a fit of
-`contentEnd * 1.20` against `tlViewW` (the timeline child width from the
-previous frame, minus the label gutter), clamped 1–80. At that minimum the
-view is the project plus about 20% empty on the right. Do not write
-`pixelsPerSecond` every frame. Default stays 50. Saved as `pps`. Load accepts
-1–400. `tlSeconds` is at least `contentEnd * 1.20`.
+Zoom: `SliderFloat` `##tlzoom` on the **right**, immediately to the left of
+the aspect combo (`##previewaspect`), not beside the transport buttons.
+Minimum is a fit of `contentEnd * 1.20` against `tlViewW` (the timeline
+child width from the previous frame, minus the label gutter), clamped 1–80.
+At that minimum the view is the project plus about 20% empty on the right.
+Do not write `pixelsPerSecond` every frame. Default stays 50. Saved as `pps`.
+Load accepts 1–400. `tlSeconds` is at least `contentEnd * 1.20`.
 
 ## Shipped commits — do not redo
 
 Newest first, all on `origin/main`:
 
-- `ff88e52` opacity body stays at 0 so the clip underneath shows. Do not
-  put the standard opacity curve back. Volume is not that curve.
+- `ff88e52` had the inverted opacity ramp (100 at the edge, body at 0).
+  The user then asked for the opposite. Do not put that inverted ramp back.
 - `99f00f2` edge fades, in-clip waveform, zoom fader. The fade curve in that
   commit was the standard one (body stayed at 100). The user rejected it.
 - `a110675` compile fix, duplicate `cutMedia`

@@ -23,16 +23,15 @@ ripple insert, or panels-above-timeline.
   Cache the next clip once the one on screen has ~1.5s ahead. An audio clip
   that reaches its end stays at the end and does not seek again.
 - Clip-menu transitions are off (`TransitionForClip` returns false). The lower
-  picture was sticking. Left Shift on a clip-body edge fades opacity: 100 at
-  the outer edge, 0 at the handle, and the body stays at 0 so the clip
-  underneath shows. Volume is one yellow line, not a second graph: silence
-  at the outer edge, rising to the envelope at the handle. The straight
-  envelope is hidden inside that fade. Ctrl + drag the edge on that clip's
-  audio strip. The strip is closed until the arrow in the middle of the
-  clip; click again to close it. Do not open every strip. The zoom fader,
-  to the right of the transport buttons, zooms out until about 20% empty
-  shows on the right of the project. Do not bring the transition menu back.
-  Do not restore the standard opacity fade, and do not use it for volume.
+  picture was sticking. Left Shift on a clip-body edge fades opacity the
+  opposite way from the inverted ramp: left side rises from the bottom to
+  the top, right side falls from the top to the bottom, and the body stays
+  at 100. Volume is one yellow line: silence at the outer edge, rising to
+  the envelope at the handle. The straight envelope is hidden inside that
+  fade. Ctrl + drag the edge on that clip's audio strip. The strip is closed
+  until the arrow in the middle of the clip; click again to close it. The
+  zoom fader sits on the right, next to the aspect combo. Do not bring the
+  transition menu back. Do not restore the inverted opacity ramp.
 - Preview keeps more seconds ahead (small clips 14s, large clips 9s / 11s
   source). An empty click unselects only when more than one object is
   selected. Dropping an effect does not open its side panel.

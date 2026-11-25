@@ -1691,13 +1691,13 @@ static float RampAt(float local, float dur, float inSec, float outSec) {
     if (local < 0) local = 0;
     if (local > dur) local = dur;
     if (inSec <= 0.02f && outSec <= 0.02f) return 1.0f;
-    float o = 0.0f;
-    if (inSec > 0.02f && local < inSec) o = 1.0f - local / inSec;
+    float o = 1.0f;
+    if (inSec > 0.02f && local < inSec) o = local / inSec;
     if (outSec > 0.02f) {
         float tail = dur - local;
-        if (tail <= outSec) {
-            float rise = 1.0f - tail / outSec;
-            if (rise > o) o = rise;
+        if (tail < outSec) {
+            float fall = tail / outSec;
+            if (fall < o) o = fall;
         }
     }
     if (o < 0) o = 0;
@@ -8486,6 +8486,19 @@ int main(int argc, char* argv[]) {
         if (ImGui::IsItemHovered()) ImGui::SetTooltip(repeatOn ? "Repeat on" : "Repeat");
         ImGui::SameLine();
         {
+            int total = (int)currentTime;
+            int ms = (int)((currentTime - (float)total) * 100.0f);
+            if (ms > 99) ms = 99;
+            ImGui::AlignTextToFramePadding();
+            ImGui::Text("%02d:%02d.%02d", total / 60, total % 60, ms);
+        }
+        ImGui::SameLine();
+        {
+            float zoomW = 130.0f;
+            float comboW = 92.0f;
+            float need = zoomW + comboW + 8.0f;
+            float avail = ImGui::GetContentRegionAvail().x;
+            if (avail > need) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + avail - need);
             float contentEnd = 8.0f;
             for (const auto& c : clips) contentEnd = std::max(contentEnd, c.startTime + c.duration);
             for (const auto& b : bus) contentEnd = std::max(contentEnd, b.start + b.duration);
@@ -8499,23 +8512,10 @@ int main(int argc, char* argv[]) {
             if (fit > 80.0f) fit = 80.0f;
             float zmin = std::min(fit, pixelsPerSecond);
             float zmax = std::max(240.0f, pixelsPerSecond);
-            ImGui::SetNextItemWidth(130.0f);
+            ImGui::SetNextItemWidth(zoomW);
             ImGui::SliderFloat("##tlzoom", &pixelsPerSecond, zmin, zmax, "%.0f");
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Zoom");
-        }
-        ImGui::SameLine();
-        {
-            int total = (int)currentTime;
-            int ms = (int)((currentTime - (float)total) * 100.0f);
-            if (ms > 99) ms = 99;
-            ImGui::AlignTextToFramePadding();
-            ImGui::Text("%02d:%02d.%02d", total / 60, total % 60, ms);
-        }
-        ImGui::SameLine();
-        {
-            float comboW = 92.0f;
-            float avail = ImGui::GetContentRegionAvail().x;
-            if (avail > comboW) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + avail - comboW);
+            ImGui::SameLine();
             ImGui::SetNextItemWidth(comboW);
             const char* aspectLabel = "16:9";
             if (exAspect == 1) aspectLabel = "9:16";
