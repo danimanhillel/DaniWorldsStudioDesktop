@@ -523,9 +523,12 @@ Opacity (`RampAt` — the user asked to flip the previous curve):
   polyline or a second `DrawFadeGraph` for volume. Fade in: the line
   starts at the bottom (silence) and rises to the envelope at `volIn`.
   The straight envelope, including its end point, is hidden until that
-  high point (`VolPointHidden`). Fade out is the same toward the tail:
-  the straight line stops at the handle and falls to silence. Ctrl + drag
-  an edge of the **open** wave strip sets `volIn` / `volOut`.
+  high point (`VolPointHidden`). The high point itself is a real envelope
+  point (`EnsureFadeAnchor`). After the fade exists, drag that circle:
+  horizontal moves `volIn` / `volOut`, vertical moves the gain the fade
+  reaches. Dragging it back to the edge clears the fade. Fade out is the
+  same toward the tail. Ctrl + drag an edge of the **open** wave strip
+  still sets the fade and moves that same point.
 - The wave strip is **per clip** and **closed by default** (`audioOpen`,
   not saved). A yellow arrow in the center of the clip body toggles it.
   Click again to close. Do not open every clip's strip. A lane is the

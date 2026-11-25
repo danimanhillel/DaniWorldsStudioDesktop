@@ -215,6 +215,7 @@ int fxEdit = -1;
 bool openClipMenu = false;
 int dragVolClip = -1;
 int dragVolPt = -1;
+int dragVolRole = 0;
 int fadeDragClip = -1;
 int fadeDragSide = 0;
 int fadeDragKind = 0;
@@ -5796,6 +5797,7 @@ static void ClearTimelineDrags() {
     trimmingBus = -1;
     dragVolClip = -1;
     dragVolPt = -1;
+    dragVolRole = 0;
     fadeDragClip = -1;
     draggingOv = -1;
     trimmingOv = -1;
@@ -7829,9 +7831,89 @@ static bool VolPointHidden(const Clip& c, float norm) {
     float dur = c.duration;
     if (dur <= 0.05f) return false;
     float local = norm * dur;
-    if (c.volIn > 0.02f && local <= c.volIn + 0.001f) return true;
-    if (c.volOut > 0.02f && dur - local <= c.volOut + 0.001f) return true;
+    if (c.volIn > 0.02f && local < c.volIn - 0.02f) return true;
+    if (c.volOut > 0.02f && dur - local < c.volOut - 0.02f) return true;
     return false;
+}
+
+static int FindVolPoint(const Clip& c, float norm, float tol) {
+    int best = -1;
+    float bd = tol;
+    for (int i = 0; i < (int)c.volume.size(); i++) {
+        float d = std::fabs(c.volume[i].norm - norm);
+        if (d <= bd) { bd = d; best = i; }
+    }
+    return best;
+}
+
+static int EnsureFadeAnchor(Clip& c, int side) {
+    EnsureEnvelope(c);
+    float dur = c.duration;
+    if (dur <= 0.05f) return -1;
+    float len = side < 0 ? c.volIn : c.volOut;
+    if (len <= 0.02f) return -1;
+    float n = side < 0 ? len / dur : 1.0f - len / dur;
+    if (n < 0.012f) n = 0.012f;
+    if (n > 0.988f) n = 0.988f;
+    int idx = FindVolPoint(c, n, 0.035f);
+    if (idx == 0 || idx == (int)c.volume.size() - 1) idx = -1;
+    if (idx >= 0) return idx;
+    float g = EnvAtNorm(c, n);
+    size_t at = 1;
+    while (at < c.volume.size() && c.volume[at].norm < n) at++;
+    if (at >= c.volume.size()) at = c.volume.size() - 1;
+    c.volume.insert(c.volume.begin() + (std::ptrdiff_t)at, {n, g});
+    return (int)at;
+}
+
+static void MoveFadeAnchor(Clip& c, int side, float oldLen) {
+    EnsureEnvelope(c);
+    float dur = c.duration;
+    if (dur <= 0.05f) return;
+    float len = side < 0 ? c.volIn : c.volOut;
+    float oldN = side < 0 ? oldLen / dur : 1.0f - oldLen / dur;
+    if (len <= 0.02f) {
+        int idx = FindVolPoint(c, oldN, 0.045f);
+        if (idx > 0 && idx < (int)c.volume.size() - 1) c.volume.erase(c.volume.begin() + idx);
+        return;
+    }
+    float n = side < 0 ? len / dur : 1.0f - len / dur;
+    if (n < 0.012f) n = 0.012f;
+    if (n > 0.988f) n = 0.988f;
+    int idx = FindVolPoint(c, oldN, 0.045f);
+    if (idx <= 0 || idx >= (int)c.volume.size() - 1) idx = FindVolPoint(c, n, 0.045f);
+    if (idx <= 0 || idx >= (int)c.volume.size() - 1) {
+        EnsureFadeAnchor(c, side);
+        return;
+    }
+    float lo = c.volume[idx - 1].norm + 0.01f;
+    float hi = c.volume[idx + 1].norm - 0.01f;
+    if (n < lo) n = lo;
+    if (n > hi) n = hi;
+    c.volume[idx].norm = n;
+    if (side < 0) c.volIn = n * dur;
+    else c.volOut = (1.0f - n) * dur;
+}
+
+static int FadeHandleRole(const Clip& c, ImVec2 wp0, ImVec2 wp1, float w, ImVec2 mouse) {
+    float dur = c.duration;
+    if (dur <= 0.05f) return 0;
+    float h = std::max(1.0f, wp1.y - wp0.y);
+    auto hit = [&](float local) {
+        if (local <= 0.02f || local >= dur) return false;
+        float u = local / dur;
+        float g = EnvAtNorm(c, u);
+        if (g < 0) g = 0;
+        if (g > 1) g = 1;
+        float px = wp0.x + u * w;
+        float py = wp1.y - g * h;
+        float dx = mouse.x - px;
+        float dy = mouse.y - py;
+        return dx * dx + dy * dy <= 144.0f;
+    };
+    if (hit(c.volIn)) return 1;
+    if (hit(dur - c.volOut)) return 2;
+    return 0;
 }
 
 static void DrawVolumeLine(ImDrawList* dl, ImVec2 a, ImVec2 b, const Clip& c) {
@@ -8806,6 +8888,10 @@ int main(int argc, char* argv[]) {
                 if (!onArrow && !onWave && (atStart || atEnd) && ImGui::IsKeyDown(ImGuiKey_LeftShift)) ImGui::SetTooltip("Opacity");
                 if (onWave && (atStart || atEnd) && (ImGui::IsKeyDown(ImGuiKey_LeftCtrl) || ImGui::IsKeyDown(ImGuiKey_RightCtrl)))
                     ImGui::SetTooltip("Volume");
+                if (onWave && FadeHandleRole(clips[i], wp0, wp1, w, mouse)) {
+                    ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                    ImGui::SetTooltip("Move volume point");
+                }
                 if (ImGui::IsMouseClicked(1)) {
                     if (!IsSelected(i)) SelectOnly(i);
                     else { selectedClip = i; ClearLaneRivals(); }
@@ -8826,6 +8912,22 @@ int main(int argc, char* argv[]) {
                     }
                     bool opacityDrag = shift && !onWave && (atStart || atEnd);
                     bool volumeDrag = ctrl && onWave && (atStart || atEnd);
+                    int fadePt = onWave ? FadeHandleRole(clips[i], wp0, wp1, w, mouse) : 0;
+                    if (fadePt && !shift) {
+                        if (IsSelected(i)) { selectedClip = i; ClearLaneRivals(); }
+                        else SelectOnly(i);
+                        EnsureEnvelope(clips[i]);
+                        int idx = EnsureFadeAnchor(clips[i], fadePt == 1 ? -1 : 1);
+                        if (idx >= 0) {
+                            dragVolClip = i;
+                            dragVolPt = idx;
+                            dragVolRole = fadePt;
+                            trimmingClip = -1;
+                            draggingClip = -1;
+                            fadeDragClip = -1;
+                        }
+                        continue;
+                    }
                     if (opacityDrag || volumeDrag) {
                         if (IsSelected(i)) { selectedClip = i; ClearLaneRivals(); }
                         else SelectOnly(i);
@@ -9021,6 +9123,10 @@ int main(int argc, char* argv[]) {
                     if (!onArrow && edge && my < wp0.y && ImGui::IsKeyDown(ImGuiKey_LeftShift)) ImGui::SetTooltip("Opacity");
                     if (open && edge && my >= wp0.y && (ImGui::IsKeyDown(ImGuiKey_LeftCtrl) || ImGui::IsKeyDown(ImGuiKey_RightCtrl)))
                         ImGui::SetTooltip("Volume");
+                    if (open && FadeHandleRole(clips[i], wp0, wp1, w, ImGui::GetMousePos())) {
+                        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                        ImGui::SetTooltip("Move volume point");
+                    }
                 }
             }
 
@@ -9054,6 +9160,22 @@ int main(int argc, char* argv[]) {
                         }
                         bool opacityDrag = shift && !onWave && (atStart || atEnd);
                         bool volumeDrag = ctrl && onWave && (atStart || atEnd);
+                        int fadePt = onWave ? FadeHandleRole(clips[i], wp0, wp1, w, mouse) : 0;
+                        if (fadePt && !shift) {
+                            if (IsSelected(i)) { selectedClip = i; ClearLaneRivals(); }
+                            else SelectOnly(i);
+                            EnsureEnvelope(clips[i]);
+                            int idx = EnsureFadeAnchor(clips[i], fadePt == 1 ? -1 : 1);
+                            if (idx >= 0) {
+                                dragVolClip = i;
+                                dragVolPt = idx;
+                                dragVolRole = fadePt;
+                                trimmingClip = -1;
+                                draggingClip = -1;
+                                fadeDragClip = -1;
+                            }
+                            break;
+                        }
                         if (opacityDrag || volumeDrag) {
                             if (IsSelected(i)) { selectedClip = i; ClearLaneRivals(); }
                             else SelectOnly(i);
@@ -9083,6 +9205,7 @@ int main(int argc, char* argv[]) {
                         break;
                     }
                     if (ImGui::IsMouseDoubleClicked(0) && onWave) {
+                        if (FadeHandleRole(clips[i], wp0, wp1, w, mouse)) break;
                         SelectOnly(i);
                         EnsureEnvelope(clips[i]);
                         float n = (mouse.x - wp0.x) / w;
@@ -9120,6 +9243,7 @@ int main(int argc, char* argv[]) {
                     if (hit >= 0) {
                         dragVolClip = i;
                         dragVolPt = hit;
+                        dragVolRole = 0;
                     } else if (!onWave) {
                         float mx = mouse.x;
                         bool edge = (mx < cp0.x + 8.0f) || (mx > cp1.x - 8.0f);
@@ -9204,13 +9328,15 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        if (dragVolClip >= 0 && dragVolClip < (int)clips.size() && clips[dragVolClip].track >= 0 && clips[dragVolClip].track < 6) {
-            if (ImGui::IsMouseDown(0) && dragVolPt >= 0 && dragVolPt < (int)clips[dragVolClip].volume.size()) {
+        if (dragVolClip >= 0 && dragVolClip < (int)clips.size()) {
+            int tr = clips[dragVolClip].track;
+            bool gsLane = tr == kGsTrack;
+            bool avLane = tr >= 0 && tr < 6;
+            if (ImGui::IsMouseDown(0) && dragVolPt >= 0 && dragVolPt < (int)clips[dragVolClip].volume.size() && (gsLane || avLane)) {
                 ImVec2 mouse = ImGui::GetMousePos();
-                int tr = clips[dragVolClip].track;
-                float top = trackPositions[tr].y + kBodyH + kWaveGap;
+                float top = (gsLane ? gsLaneY + 4.0f : trackPositions[tr].y) + kBodyH + kWaveGap;
                 float bot = top + kWaveH;
-                float x0 = trackPositions[tr].x + clips[dragVolClip].startTime * pixelsPerSecond;
+                float x0 = (gsLane ? gsOriginX : trackPositions[tr].x) + clips[dragVolClip].startTime * pixelsPerSecond;
                 float w = std::max(24.0f, clips[dragVolClip].duration * pixelsPerSecond);
                 float n = (mouse.x - x0) / w;
                 float g = (bot - mouse.y) / std::max(1.0f, bot - top);
@@ -9218,17 +9344,47 @@ int main(int argc, char* argv[]) {
                 if (n > 1) n = 1;
                 if (g < 0) g = 0;
                 if (g > 1) g = 1;
-                auto& pts = clips[dragVolClip].volume;
-                if (dragVolPt == 0) n = 0;
-                if (dragVolPt == (int)pts.size() - 1) n = 1;
-                if (dragVolPt > 0 && dragVolPt < (int)pts.size() - 1) {
-                    float lo = pts[dragVolPt - 1].norm + 0.01f;
-                    float hi = pts[dragVolPt + 1].norm - 0.01f;
-                    if (n < lo) n = lo;
-                    if (n > hi) n = hi;
+                Clip& c = clips[dragVolClip];
+                auto& pts = c.volume;
+                if (dragVolRole == 1 || dragVolRole == 2) {
+                    float dur = c.duration;
+                    float other = dragVolRole == 1 ? c.volOut : c.volIn;
+                    float cap = dur - std::max(0.0f, other) - 0.05f;
+                    if (cap < 0.05f) cap = dur * 0.45f;
+                    float len = dragVolRole == 1 ? n * dur : (1.0f - n) * dur;
+                    if (len < 0.03f) len = 0.0f;
+                    if (len > cap) len = cap;
+                    if (len <= 0.02f) {
+                        if (dragVolPt > 0 && dragVolPt < (int)pts.size() - 1)
+                            pts.erase(pts.begin() + dragVolPt);
+                        if (dragVolRole == 1) c.volIn = 0.0f;
+                        else c.volOut = 0.0f;
+                        dragVolPt = -1;
+                        dragVolRole = 0;
+                        dragVolClip = -1;
+                    } else if (dragVolPt > 0 && dragVolPt < (int)pts.size() - 1) {
+                        float nn = dragVolRole == 1 ? len / dur : 1.0f - len / dur;
+                        float lo = pts[dragVolPt - 1].norm + 0.01f;
+                        float hi = pts[dragVolPt + 1].norm - 0.01f;
+                        if (nn < lo) nn = lo;
+                        if (nn > hi) nn = hi;
+                        pts[dragVolPt].norm = nn;
+                        pts[dragVolPt].gain = g;
+                        if (dragVolRole == 1) c.volIn = nn * dur;
+                        else c.volOut = (1.0f - nn) * dur;
+                    }
+                } else {
+                    if (dragVolPt == 0) n = 0;
+                    if (dragVolPt == (int)pts.size() - 1) n = 1;
+                    if (dragVolPt > 0 && dragVolPt < (int)pts.size() - 1) {
+                        float lo = pts[dragVolPt - 1].norm + 0.01f;
+                        float hi = pts[dragVolPt + 1].norm - 0.01f;
+                        if (n < lo) n = lo;
+                        if (n > hi) n = hi;
+                    }
+                    pts[dragVolPt].norm = n;
+                    pts[dragVolPt].gain = g;
                 }
-                pts[dragVolPt].norm = n;
-                pts[dragVolPt].gain = g;
                 ImGui::SetTooltip("%d", (int)std::lround(g * 128.0f));
                 shownLocal = -1000.0f;
 #ifdef HAVE_FFMPEG
@@ -9237,6 +9393,7 @@ int main(int argc, char* argv[]) {
             } else {
                 dragVolClip = -1;
                 dragVolPt = -1;
+                dragVolRole = 0;
             }
         }
 
@@ -9266,8 +9423,10 @@ int main(int argc, char* argv[]) {
                 if (cap < 0.0f) cap = 0.0f;
                 if (len > cap) len = cap;
                 if (fadeDragKind == 2) {
+                    float oldLen = fadeDragSide < 0 ? c.volIn : c.volOut;
                     if (fadeDragSide < 0) c.volIn = len;
                     else c.volOut = len;
+                    MoveFadeAnchor(c, fadeDragSide, oldLen);
 #ifdef HAVE_FFMPEG
                     ResetAudioSync();
 #endif
