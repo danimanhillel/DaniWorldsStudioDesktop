@@ -612,11 +612,15 @@ Opacity (`RampAt` — the user asked to flip the previous curve):
   same toward the tail. Ctrl + drag an edge of the **open** wave strip
   still sets the fade and moves that same point.
 - The wave strip is **per clip** and **closed by default** (`audioOpen`,
-  not saved). A yellow arrow in the center of the clip body toggles it.
-  Click again to close. Do not open every clip's strip. A lane is the
-  tall height only while some clip on it is open (`LaneHasAudioOpen`,
-  `trackLaneH`, `gsChildH`). Marquee height follows that clip's strip,
-  not the tallest lane.
+  not saved) on V1–V3 and GS. A yellow arrow in the center of the clip
+  body toggles it. Click again to close. A1, A2 and A3 always show the
+  strip and the same yellow volume line. There is no arrow on those
+  lanes, and the lane stays the open height. Double-click the wave to
+  add a point, drag a point to change level, Ctrl + drag an edge of the
+  wave for the fade. Do not open every video clip's strip. A video or GS
+  lane is the tall height only while some clip on it is open
+  (`LaneHasAudioOpen`, `trackLaneH`, `gsChildH`). Marquee height follows
+  that clip's strip, and an audio-track clip always includes the wave.
 - Shift on the body still wins for opacity. Ctrl on the body does not
   fade. Shift on the wave does not fade. A body edge without Shift still
   trims. A click on the open wave body drags the clip. The arrow click

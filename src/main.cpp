@@ -6658,7 +6658,7 @@ static void ApplyMarquee(ImVec2 m) {
         float w = std::max(24.0f, clips[i].duration * pixelsPerSecond);
         ImVec2 c0(x, originY);
         float vis = kClipBody;
-        if (clips[i].audioOpen) vis += kClipGap + kClipWave;
+        if (clips[i].audioOpen || (clips[i].track >= 3 && clips[i].track <= 5)) vis += kClipGap + kClipWave;
         ImVec2 c1(x + w, originY + vis);
         if (!ScreenHit(marqueeStart, m, c0, c1)) return;
         selection.push_back(i);
@@ -9694,7 +9694,7 @@ int main(int argc, char* argv[]) {
 
         for (int t = 0; t < 6; t++) {
             ImGui::PushID(t);
-            float thisH = LaneHasAudioOpen(t) ? openH : closedH;
+            float thisH = (t >= 3 || LaneHasAudioOpen(t)) ? openH : closedH;
             trackLaneH[t] = thisH;
             ImGui::BeginChild("track", ImVec2(timeW + 90.0f, thisH), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
             ImGui::Text("%s", trackNames[t]);
@@ -9744,7 +9744,7 @@ int main(int argc, char* argv[]) {
                 if (clips[i].track != t) continue;
                 float x = trackStart.x + clips[i].startTime * pixelsPerSecond;
                 float w = std::max(24.0f, clips[i].duration * pixelsPerSecond);
-                bool open = clips[i].audioOpen;
+                bool open = t >= 3 || clips[i].audioOpen;
                 ImVec2 cp0(x, trackStart.y);
                 ImVec2 cp1(x + w, trackStart.y + kBodyH);
                 ImVec2 wp0(x, cp1.y + kWaveGap);
@@ -9779,7 +9779,7 @@ int main(int argc, char* argv[]) {
                     }
                 }
                 DrawFadeGraph(tdl, cp0, cp1, clips[i].duration, clips[i].opIn, clips[i].opOut, IM_COL32(255, 255, 255, 235));
-                DrawAudioArrow(tdl, cp0, cp1, open);
+                if (t < 3) DrawAudioArrow(tdl, cp0, cp1, clips[i].audioOpen);
                 std::string label = media[clips[i].mediaId].name.substr(0, 14);
                 char extra[48];
                 snprintf(extra, sizeof(extra), " %.1fs", clips[i].duration);
@@ -9805,7 +9805,7 @@ int main(int argc, char* argv[]) {
                     float mx = ImGui::GetMousePos().x;
                     float my = ImGui::GetMousePos().y;
                     bool edge = mx < cp0.x + 10.0f || mx > cp1.x - 10.0f;
-                    bool onArrow = AudioArrowHit(cp0, cp1, ImGui::GetMousePos());
+                    bool onArrow = t < 3 && AudioArrowHit(cp0, cp1, ImGui::GetMousePos());
                     if (onArrow) {
                         ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
                         ImGui::SetTooltip(open ? "Close audio" : "Audio");
@@ -9826,7 +9826,7 @@ int main(int argc, char* argv[]) {
                     if (clips[i].track != t) continue;
                     float x = trackStart.x + clips[i].startTime * pixelsPerSecond;
                     float w = std::max(24.0f, clips[i].duration * pixelsPerSecond);
-                    bool open = clips[i].audioOpen;
+                    bool open = t >= 3 || clips[i].audioOpen;
                     ImVec2 cp0(x, trackStart.y);
                     ImVec2 cp1(x + w, trackStart.y + kBodyH);
                     ImVec2 wp0(x, cp1.y + kWaveGap);
@@ -9835,7 +9835,7 @@ int main(int argc, char* argv[]) {
                     if (!ImGui::IsMouseHoveringRect(cp0, hit1) || TimelinePointerBusy()) continue;
                     if (ImGui::IsMouseClicked(0) || ImGui::IsMouseClicked(1) || ImGui::IsMouseDoubleClicked(0)) ateClip = true;
                     ImVec2 mouse = ImGui::GetMousePos();
-                    bool onArrow = AudioArrowHit(cp0, cp1, mouse);
+                    bool onArrow = t < 3 && AudioArrowHit(cp0, cp1, mouse);
                     bool onWave = open && mouse.y >= wp0.y;
                     bool atStart = mouse.x < cp0.x + 10.0f;
                     bool atEnd = mouse.x > cp1.x - 10.0f;

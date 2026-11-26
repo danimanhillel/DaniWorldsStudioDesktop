@@ -37,9 +37,10 @@ ripple insert, or panels-above-timeline.
   fade. The circle at the top of that fade can be dragged afterwards,
   including when it sits on the clip itself: sideways changes the fade
   length, up and down changes its level. Ctrl +
-  drag the edge on that clip's audio strip. The strip is closed
-  until the arrow in the middle of the clip; click again to close it. The
-  zoom fader sits on the right, next to the aspect combo. Do not bring the
+  drag the edge on that clip's audio strip. On V1–V3 and GS the strip is
+  closed until the arrow in the middle of the clip; click again to close
+  it. A1–A3 always show that strip and the same volume line, with no
+  arrow. The zoom fader sits on the right, next to the aspect combo. Do not bring the
   transition menu back. Do not restore the inverted opacity ramp.
 - Overlay effects stay append-only. Zoom In and Zoom Out are kinds 3 and 4.
   Dust, Cassette, Frame, Film Dust, Retro Dust, Old Film, and Record are
