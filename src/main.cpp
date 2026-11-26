@@ -1656,6 +1656,7 @@ static float VolumeEdge(float local, float dur, float inSec, float outSec) {
 }
 
 static float RampAt(float local, float dur, float inSec, float outSec);
+bool TransitionForClip(int clip, float t, int& a, int& b, float& progress, std::string& id);
 
 float GainAt(const Clip& c, float localTime) {
     if (c.duration <= 0.0001f) return 1.0f;
@@ -1684,6 +1685,23 @@ float GainAt(const Clip& c, float localTime) {
     } else {
         if (c.fadeIn) g *= std::min(1.0f, localTime / fadeDur);
         if (c.fadeOut) g *= std::min(1.0f, (c.duration - localTime) / fadeDur);
+    }
+    if (g < 0) g = 0;
+    if (g > 1) g = 1;
+    int idx = -1;
+    for (int i = 0; i < (int)clips.size(); i++) {
+        if (&clips[i] == &c) { idx = i; break; }
+    }
+    if (idx >= 0) {
+        int a = -1, b = -1;
+        float prog = 0;
+        std::string tid;
+        if (TransitionForClip(idx, c.startTime + localTime, a, b, prog, tid)) {
+            float w = 1.0f;
+            if (idx == a) w = std::cos(prog * 1.57079632679f);
+            else if (idx == b) w = std::sin(prog * 1.57079632679f);
+            g *= w;
+        }
     }
     if (g < 0) g = 0;
     if (g > 1) g = 1;
@@ -4344,17 +4362,38 @@ void ExportSession::Step() {
                         int ar, ag, ab, aa, br, bgg, bb, ba;
                         sample(frameA, x, y, look.scaleA, ar, ag, ab, aa);
                         sample(frameB, x, y, look.scaleB, br, bgg, bb, ba);
+                        float u = ((float)x + 0.5f) / (float)w;
+                        float v = ((float)y + 0.5f) / (float)h;
                         float wa = aa ? wa0 : 0.0f;
                         float wb = ba ? wb0 : 0.0f;
+                        if (look.wipe == 1) { bool takeB = u < wb0; wa = (takeB || !aa) ? 0.0f : 1.0f; wb = (takeB && ba) ? 1.0f : 0.0f; }
+                        else if (look.wipe == 2) { bool takeB = u > 1.0f - wb0; wa = (takeB || !aa) ? 0.0f : 1.0f; wb = (takeB && ba) ? 1.0f : 0.0f; }
+                        else if (look.wipe == 3) { bool takeB = v < wb0; wa = (takeB || !aa) ? 0.0f : 1.0f; wb = (takeB && ba) ? 1.0f : 0.0f; }
+                        else if (look.wipe == 4) { bool takeB = v > 1.0f - wb0; wa = (takeB || !aa) ? 0.0f : 1.0f; wb = (takeB && ba) ? 1.0f : 0.0f; }
                         float sum = wa + wb;
                         size_t i = ((size_t)y * (size_t)w + x) * 4;
-                        if (sum <= 0.001f) continue;
-                        float keep = 1.0f - sum;
-                        if (keep < 0) keep = 0;
                         const uint8_t* s = canvas.data() + i;
-                        canvas[i] = (uint8_t)std::min(255, (int)(ar * wa + br * wb + s[0] * keep));
-                        canvas[i + 1] = (uint8_t)std::min(255, (int)(ag * wa + bgg * wb + s[1] * keep));
-                        canvas[i + 2] = (uint8_t)std::min(255, (int)(ab * wa + bb * wb + s[2] * keep));
+                        float rr, rg, rbv;
+                        if (sum <= 0.001f) {
+                            rr = s[0];
+                            rg = s[1];
+                            rbv = s[2];
+                        } else {
+                            float keep = 1.0f - sum;
+                            if (keep < 0) keep = 0;
+                            rr = ar * wa + br * wb + s[0] * keep;
+                            rg = ag * wa + bgg * wb + s[1] * keep;
+                            rbv = ab * wa + bb * wb + s[2] * keep;
+                        }
+                        if (look.dip > 0.001f) {
+                            float k = look.dip > 1.0f ? 1.0f : look.dip;
+                            rr = rr * (1.0f - k) + look.dipR * 255.0f * k;
+                            rg = rg * (1.0f - k) + look.dipG * 255.0f * k;
+                            rbv = rbv * (1.0f - k) + look.dipB * 255.0f * k;
+                        }
+                        canvas[i] = (uint8_t)std::min(255, (int)rr);
+                        canvas[i + 1] = (uint8_t)std::min(255, (int)rg);
+                        canvas[i + 2] = (uint8_t)std::min(255, (int)rbv);
                         canvas[i + 3] = 255;
                     }
                 }
@@ -5338,6 +5377,56 @@ void BlitVideo(ImVec2 p0, ImVec2 p1, GLuint tex, int vw, int vh, ImVec2 clip0, I
     if (graded && pglUseProgram) pglUseProgram(0);
 }
 
+static void DrawTransitionCard(ImDrawList* dl, ImVec2 p0, ImVec2 p1, const char* id) {
+    if (!dl || !id) return;
+    FxLook look;
+    FxEvaluate(id, 0.42f, look);
+    dl->PushClipRect(p0, p1, true);
+    dl->AddRectFilled(p0, p1, IM_COL32(18, 20, 26, 255), 2.0f);
+    auto box = [&](float sc, ImVec2& a, ImVec2& b) {
+        float cx = (p0.x + p1.x) * 0.5f;
+        float cy = (p0.y + p1.y) * 0.5f;
+        float hw = (p1.x - p0.x) * 0.5f * sc;
+        float hh = (p1.y - p0.y) * 0.5f * sc;
+        a = ImVec2(cx - hw, cy - hh);
+        b = ImVec2(cx + hw, cy + hh);
+    };
+    ImVec2 a0, a1, b0, b1;
+    box(look.scaleA, a0, a1);
+    box(look.scaleB, b0, b1);
+    float wb = look.alphaB;
+    if (wb < 0) wb = 0;
+    if (wb > 1) wb = 1;
+    if (look.wipe == 0) {
+        int aa = (int)((1.0f - wb) * 255.0f);
+        if (aa < 0) aa = 0;
+        if (aa > 255) aa = 255;
+        dl->AddRectFilled(a0, a1, IM_COL32(196, 122, 64, aa));
+        int ba = (int)(wb * 255.0f);
+        if (ba > 0) dl->AddRectFilled(b0, b1, IM_COL32(70, 148, 214, ba));
+    } else {
+        dl->AddRectFilled(a0, a1, IM_COL32(196, 122, 64, 255));
+        ImVec2 c0 = p0, c1 = p1;
+        if (look.wipe == 1) c1.x = p0.x + (p1.x - p0.x) * wb;
+        else if (look.wipe == 2) c0.x = p1.x - (p1.x - p0.x) * wb;
+        else if (look.wipe == 3) c1.y = p0.y + (p1.y - p0.y) * wb;
+        else c0.y = p1.y - (p1.y - p0.y) * wb;
+        dl->PushClipRect(c0, c1, true);
+        dl->AddRectFilled(b0, b1, IM_COL32(70, 148, 214, 255));
+        dl->PopClipRect();
+    }
+    if (look.dip > 0.001f) {
+        float k = look.dip > 1.0f ? 1.0f : look.dip;
+        int a = (int)(k * 220.0f);
+        int r = (int)(look.dipR * 255.0f);
+        int g = (int)(look.dipG * 255.0f);
+        int b = (int)(look.dipB * 255.0f);
+        dl->AddRectFilled(p0, p1, IM_COL32(r, g, b, a));
+    }
+    dl->AddRect(p0, p1, IM_COL32(90, 96, 110, 255), 2.0f);
+    dl->PopClipRect();
+}
+
 void BlitFxPair(ImVec2 p0, ImVec2 p1, GLuint texA, int aw, int ah, GLuint texB, int bw, int bh, const FxLook& look, const Clip* ca = nullptr, const Clip* cb = nullptr) {
     if (!texA || aw <= 0 || ah <= 0) return;
     ImGuiIO& io = ImGui::GetIO();
@@ -5410,7 +5499,7 @@ void BlitFxPair(ImVec2 p0, ImVec2 p1, GLuint texA, int aw, int ah, GLuint texB, 
     glLoadIdentity();
     glDisable(GL_BLEND);
     bool revealed = false;
-    if (haveB && bgShowN > 0 && previewFrameValid) {
+    if (haveB && look.wipe == 0 && bgShowN > 0 && previewFrameValid) {
         static int stencilBits = -1;
         if (stencilBits < 0) {
             stencilBits = 0;
@@ -5509,8 +5598,45 @@ void BlitFxPair(ImVec2 p0, ImVec2 p1, GLuint texA, int aw, int ah, GLuint texB, 
         if (haveB) {
             glEnable(GL_BLEND);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-            quad(texB, bw, bh, boxB0, boxB1, look.alphaB, look.scaleB, cb);
+            if (look.wipe != 0) {
+                float edge = look.alphaB;
+                if (edge < 0) edge = 0;
+                if (edge > 1) edge = 1;
+                float x0 = sx0, y0 = sy0, x1 = sx1, y1 = sy1;
+                float spanX = p1.x - p0.x;
+                float spanY = p1.y - p0.y;
+                if (look.wipe == 1) x1 = p0.x + spanX * edge;
+                else if (look.wipe == 2) x0 = p1.x - spanX * edge;
+                else if (look.wipe == 3) y1 = p0.y + spanY * edge;
+                else if (look.wipe == 4) y0 = p1.y - spanY * edge;
+                x0 = std::max(x0, sx0);
+                y0 = std::max(y0, sy0);
+                x1 = std::min(x1, sx1);
+                y1 = std::min(y1, sy1);
+                if (x1 - x0 >= 1.0f && y1 - y0 >= 1.0f) {
+                    glScissor((int)x0, (int)(io.DisplaySize.y - y1), std::max(1, (int)(x1 - x0)), std::max(1, (int)(y1 - y0)));
+                    quad(texB, bw, bh, boxB0, boxB1, 1.0f, look.scaleB, cb);
+                }
+            } else {
+                quad(texB, bw, bh, boxB0, boxB1, look.alphaB, look.scaleB, cb);
+            }
         }
+    }
+    if (look.dip > 0.001f) {
+        float k = look.dip > 1.0f ? 1.0f : look.dip;
+        if (pglUseProgram) pglUseProgram(0);
+        glDisable(GL_TEXTURE_2D);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glScissor((int)sx0, (int)(io.DisplaySize.y - sy1), std::max(1, (int)(sx1 - sx0)), std::max(1, (int)(sy1 - sy0)));
+        glColor4f(look.dipR, look.dipG, look.dipB, k);
+        glBegin(GL_QUADS);
+        glVertex2f(sx0, sy0);
+        glVertex2f(sx1, sy0);
+        glVertex2f(sx1, sy1);
+        glVertex2f(sx0, sy1);
+        glEnd();
+        glColor4f(1.f, 1.f, 1.f, 1.f);
     }
     glPopMatrix();
     glMatrixMode(GL_PROJECTION);
@@ -6339,13 +6465,37 @@ int OverlapPartner(int i) {
 }
 
 bool TransitionForClip(int clip, float t, int& a, int& b, float& progress, std::string& id) {
-    (void)clip;
-    (void)t;
-    (void)a;
-    (void)b;
-    (void)progress;
-    (void)id;
-    return false;
+    a = b = -1;
+    progress = 0;
+    id.clear();
+    if (clip < 0 || clip >= (int)clips.size()) return false;
+    int other = OverlapPartner(clip);
+    if (other < 0) return false;
+    auto known = [&](int i) {
+        return !clips[i].fxOut.empty() && FxKnown(clips[i].fxOut.c_str());
+    };
+    int owner = (clips[clip].track <= clips[other].track) ? clip : other;
+    int carrier = -1;
+    if (known(owner)) carrier = owner;
+    else if (known(clip)) carrier = clip;
+    else if (known(other)) carrier = other;
+    if (carrier < 0) return false;
+    float t0 = std::max(clips[clip].startTime, clips[other].startTime);
+    float t1 = std::min(clips[clip].startTime + clips[clip].duration, clips[other].startTime + clips[other].duration);
+    if (!(t1 > t0 + 0.02f) || t < t0 || t >= t1) return false;
+    int outgoing = clip;
+    int incoming = other;
+    if (clips[other].startTime < clips[clip].startTime - 0.001f) {
+        outgoing = other;
+        incoming = clip;
+    }
+    a = outgoing;
+    b = incoming;
+    progress = (t - t0) / (t1 - t0);
+    if (progress < 0) progress = 0;
+    if (progress > 1) progress = 1;
+    id = clips[carrier].fxOut;
+    return true;
 }
 
 float ClipLocalTime(int clipIdx, float timelineT) {
@@ -8613,6 +8763,40 @@ int main(int argc, char* argv[]) {
             ImGui::EndChild();
             ImGui::EndTabItem();
         }
+        if (ImGui::BeginTabItem("Transitions")) {
+            ImGui::TextDisabled("Select two overlapping clips, then drag");
+            ImGui::BeginChild("libtrans", ImVec2(0, 0), false);
+            ImVec2 transClip0 = ImGui::GetWindowPos();
+            ImVec2 transClip1(transClip0.x + ImGui::GetWindowSize().x, transClip0.y + ImGui::GetWindowSize().y);
+            float gap = 6.0f;
+            float cellW = std::max(70.0f, (ImGui::GetContentRegionAvail().x - gap * 2.0f) / 3.0f);
+            float thumbH = cellW * 9.0f / 16.0f;
+            for (int i = 0; i < FxCount(); i++) {
+                ClipEffect* fx = FxAt(i);
+                if (!fx) continue;
+                if (i % 3 != 0) ImGui::SameLine(0, gap);
+                ImGui::PushID(7000 + i);
+                ImGui::BeginGroup();
+                ImGui::InvisibleButton("##tr", ImVec2(cellW, thumbH));
+                ImDrawList* xdl = ImGui::GetWindowDrawList();
+                ImVec2 tp0 = ImGui::GetItemRectMin();
+                ImVec2 tp1 = ImGui::GetItemRectMax();
+                bool vis = tp1.y > transClip0.y && tp0.y < transClip1.y && tp1.x > transClip0.x && tp0.x < transClip1.x;
+                if (vis) DrawTransitionCard(xdl, tp0, tp1, fx->id());
+                ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + cellW);
+                ImGui::TextUnformatted(fx->label());
+                ImGui::PopTextWrapPos();
+                ImGui::EndGroup();
+                if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
+                    ImGui::SetDragDropPayload("TRANS", &i, sizeof(int));
+                    ImGui::TextUnformatted(fx->label());
+                    ImGui::EndDragDropSource();
+                }
+                ImGui::PopID();
+            }
+            ImGui::EndChild();
+            ImGui::EndTabItem();
+        }
         ImGui::EndTabBar();
         }
         ImGui::EndChild();
@@ -9224,9 +9408,18 @@ int main(int argc, char* argv[]) {
             if (ImGui::BeginDragDropTarget()) {
                 const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("MEDIA");
                 const ImGuiPayload* solid = payload ? nullptr : ImGui::AcceptDragDropPayload("SOLID");
+                const ImGuiPayload* trans = (payload || solid || t >= 3) ? nullptr : ImGui::AcceptDragDropPayload("TRANS");
                 int mid = -1;
                 if (payload) mid = *(const int*)payload->Data;
                 else if (solid) mid = EnsureSolidMedia(*(const int*)solid->Data);
+                else if (trans && trans->DataSize == (int)sizeof(int)) {
+                    int fxIdx = *(const int*)trans->Data;
+                    ClipEffect* fx = FxAt(fxIdx);
+                    if (fx) {
+                        int n = ApplyFxToSelection(fx->id(), 1.0f);
+                        previewStatus = n ? std::string(fx->label()) + " on the overlap" : "Select two overlapping clips";
+                    }
+                }
                 if (mid >= 0 && mid < (int)media.size()) {
                     bool isVideo = (media[mid].type == "video" || media[mid].type == "image");
                     bool isAudio = (media[mid].type == "audio");
@@ -9298,6 +9491,13 @@ int main(int argc, char* argv[]) {
                 }
                 if (clips[i].fadeIn) label += " FI";
                 if (clips[i].fadeOut) label += " FO";
+                if (!clips[i].fxOut.empty()) {
+                    ClipEffect* fx = FxFind(clips[i].fxOut.c_str());
+                    if (fx) {
+                        label += " ";
+                        label += fx->badge();
+                    }
+                }
                 tdl->AddText(ImVec2(cp0.x + 44, cp0.y + 4), IM_COL32(255, 255, 255, 230), label.c_str());
 
                 ImVec2 hover1 = open ? wp1 : cp1;

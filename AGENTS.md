@@ -22,8 +22,14 @@ ripple insert, or panels-above-timeline.
 - A cut between channels must not open a decoder or seek audio on that frame.
   Cache the next clip once the one on screen has ~1.5s ahead. An audio clip
   that reaches its end stays at the end and does not seek again.
-- Clip-menu transitions are off (`TransitionForClip` returns false). The lower
-  picture was sticking. Left Shift on a clip-body edge fades opacity the
+- The clip right-click transition menu stays off. Do not bring that menu
+  back, and do not restore the inverted opacity ramp. Transitions are the
+  tab next to Solids: select two clips that overlap on different video
+  channels, then drag the effect onto a video track. `TransitionForClip`
+  composites only that applied `fxOut` inside the half-open overlap. The
+  incoming clip stays on the main player, so the lower picture does not
+  stick after the overlap. Those two clips equal-power crossfade their
+  audio for the same span. Left Shift on a clip-body edge fades opacity the
   opposite way from the inverted ramp: left side rises from the bottom to
   the top, right side falls from the top to the bottom, and the body stays
   at 100. Volume is one yellow line: silence at the outer edge, rising to
@@ -37,8 +43,8 @@ ripple insert, or panels-above-timeline.
   transition menu back. Do not restore the inverted opacity ramp.
 - Overlay effects stay append-only. Zoom In and Zoom Out are kinds 3 and 4.
   Dust, Cassette, Frame, Film Dust, Retro Dust, Old Film, and Record are
-  19–25 (shader in preview, `FilmGrade` on export). The Media, Effects, and
-  Solids tabs stay pinned; only the cards under them scroll. Effects cards
+  19–25 (shader in preview, `FilmGrade` on export). The Media, Effects, Solids,
+  and Transitions tabs stay pinned; only the cards under them scroll. Effects cards
   show the bundled plate through the real preview shader, not the flat icon.
 - RIFE queries the CUDA runtime for the GPU, or the NVIDIA driver if that
   runtime cannot name the card. A 5090 (compute capability 12.0) wins over a

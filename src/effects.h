@@ -8,6 +8,11 @@ struct FxLook {
     float alphaB = 0.0f;
     float scaleA = 1.0f;
     float scaleB = 1.0f;
+    float dip = 0.0f;
+    float dipR = 0.0f;
+    float dipG = 0.0f;
+    float dipB = 0.0f;
+    int wipe = 0;
 };
 
 class ClipEffect {

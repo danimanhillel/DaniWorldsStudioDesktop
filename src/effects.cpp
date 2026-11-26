@@ -14,7 +14,8 @@ public:
     void evaluate(float p, FxLook& look) const override {
         if (p < 0) p = 0;
         if (p > 1) p = 1;
-        look.alphaB = p;
+        float s = p * p * (3.0f - 2.0f * p);
+        look.alphaB = s;
         look.scaleA = 1.0f;
         look.scaleB = 1.0f;
     }
@@ -32,6 +33,67 @@ public:
         look.scaleA = 1.0f;
         look.scaleB = 1.0f;
     }
+};
+
+class DipBlackFx : public ClipEffect {
+public:
+    const char* id() const override { return "dip_black"; }
+    const char* label() const override { return "Dip to Black"; }
+    const char* badge() const override { return "DB"; }
+    void evaluate(float p, FxLook& look) const override {
+        if (p < 0) p = 0;
+        if (p > 1) p = 1;
+        look.scaleA = 1.0f;
+        look.scaleB = 1.0f;
+        if (p < 0.5f) {
+            look.alphaB = 0.0f;
+            look.dip = p * 2.0f;
+        } else {
+            look.alphaB = 1.0f;
+            look.dip = (1.0f - p) * 2.0f;
+        }
+    }
+};
+
+class DipWhiteFx : public ClipEffect {
+public:
+    const char* id() const override { return "dip_white"; }
+    const char* label() const override { return "Dip to White"; }
+    const char* badge() const override { return "DW"; }
+    void evaluate(float p, FxLook& look) const override {
+        if (p < 0) p = 0;
+        if (p > 1) p = 1;
+        look.scaleA = 1.0f;
+        look.scaleB = 1.0f;
+        look.dipR = look.dipG = look.dipB = 1.0f;
+        if (p < 0.5f) {
+            look.alphaB = 0.0f;
+            look.dip = p * 2.0f;
+        } else {
+            look.alphaB = 1.0f;
+            look.dip = (1.0f - p) * 2.0f;
+        }
+    }
+};
+
+class WipeFx : public ClipEffect {
+public:
+    WipeFx(const char* i, const char* lab, const char* b, int dir) : wid(i), wlab(lab), wbadge(b), wdir(dir) {}
+    const char* id() const override { return wid; }
+    const char* label() const override { return wlab; }
+    const char* badge() const override { return wbadge; }
+    void evaluate(float p, FxLook& look) const override {
+        if (p < 0) p = 0;
+        if (p > 1) p = 1;
+        look.alphaB = p;
+        look.scaleA = 1.0f;
+        look.scaleB = 1.0f;
+        look.wipe = wdir;
+    }
+    const char* wid;
+    const char* wlab;
+    const char* wbadge;
+    int wdir;
 };
 
 class ZoomInFx : public ClipEffect {
@@ -68,6 +130,12 @@ std::vector<ClipEffect*>& Registry() {
     if (!ready) {
         items.push_back(new CrossDissolve());
         items.push_back(new BlendFx());
+        items.push_back(new DipBlackFx());
+        items.push_back(new DipWhiteFx());
+        items.push_back(new WipeFx("wipe_left", "Wipe Left", "WL", 2));
+        items.push_back(new WipeFx("wipe_right", "Wipe Right", "WR", 1));
+        items.push_back(new WipeFx("wipe_down", "Wipe Down", "WD", 3));
+        items.push_back(new WipeFx("wipe_up", "Wipe Up", "WU", 4));
         items.push_back(new ZoomInFx());
         items.push_back(new ZoomOutFx());
         ready = true;
@@ -116,6 +184,9 @@ void FxEvaluate(const char* id, float progress, FxLook& look) {
     look.alphaB = 0;
     look.scaleA = 1;
     look.scaleB = 1;
+    look.dip = 0;
+    look.dipR = look.dipG = look.dipB = 0;
+    look.wipe = 0;
     ClipEffect* fx = FxFind(id);
     if (!fx) return;
     fx->evaluate(progress, look);
@@ -140,10 +211,31 @@ void FxComposite(const char* id, float progress,
             int ar, ag, ab, br, bg, bb;
             SampleScaled(a, aw, ah, u, v, look.scaleA, ar, ag, ab);
             SampleScaled(b, bw, bh, u, v, look.scaleB, br, bg, bb);
+            float wA = wa;
+            float wB = wb;
+            if (look.wipe == 1) { bool takeB = u < wb; wA = takeB ? 0.0f : 1.0f; wB = takeB ? 1.0f : 0.0f; }
+            else if (look.wipe == 2) { bool takeB = u > 1.0f - wb; wA = takeB ? 0.0f : 1.0f; wB = takeB ? 1.0f : 0.0f; }
+            else if (look.wipe == 3) { bool takeB = v < wb; wA = takeB ? 0.0f : 1.0f; wB = takeB ? 1.0f : 0.0f; }
+            else if (look.wipe == 4) { bool takeB = v > 1.0f - wb; wA = takeB ? 0.0f : 1.0f; wB = takeB ? 1.0f : 0.0f; }
+            int rr = (int)(ar * wA + br * wB);
+            int rg = (int)(ag * wA + bg * wB);
+            int rb = (int)(ab * wA + bb * wB);
+            if (look.dip > 0.001f) {
+                float k = look.dip > 1.0f ? 1.0f : look.dip;
+                rr = (int)(rr * (1.0f - k) + look.dipR * 255.0f * k);
+                rg = (int)(rg * (1.0f - k) + look.dipG * 255.0f * k);
+                rb = (int)(rb * (1.0f - k) + look.dipB * 255.0f * k);
+            }
+            if (rr < 0) rr = 0;
+            if (rg < 0) rg = 0;
+            if (rb < 0) rb = 0;
+            if (rr > 255) rr = 255;
+            if (rg > 255) rg = 255;
+            if (rb > 255) rb = 255;
             uint8_t* p = row + (size_t)x * 4;
-            p[0] = (uint8_t)std::min(255, (int)(ar * wa + br * wb));
-            p[1] = (uint8_t)std::min(255, (int)(ag * wa + bg * wb));
-            p[2] = (uint8_t)std::min(255, (int)(ab * wa + bb * wb));
+            p[0] = (uint8_t)rr;
+            p[1] = (uint8_t)rg;
+            p[2] = (uint8_t)rb;
             p[3] = 255;
         }
     }

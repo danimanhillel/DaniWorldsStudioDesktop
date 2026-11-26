@@ -134,9 +134,22 @@ In order, they asked for and accepted:
 14. A cut between channels (1↔2, 2↔3, 1↔3, any pair) must be seamless. The
     end of a clip that is underneath the one on screen must not freeze the
     picture. Audio of a clip that has ended must not seek back to the start.
-15. Clip-menu transitions (Cross Dissolve, Blend, Zoom) are **removed**.
-    The lower picture was sticking. Do not put that menu back, and do not
-    make `TransitionForClip` composite again. Opacity is Left Shift on the
+15. The clip right-click **Effects** menu stays gone. Do not put that menu
+    back. A transition is not applied to every overlap. The **Transitions**
+    tab (after Solids, child `libtrans`) is the only way in: select two clips
+    that overlap on different video channels, then drag the card onto V1, V2,
+    or V3 (`TRANS` payload, index into `FxAt`). `ApplyFxToSelection` stores
+    `fxOut` on the lower-track clip and `fxDur` as the overlap length.
+    `TransitionForClip` returns true only when that pair has a known `fxOut`
+    and `t` is inside `[overlapStart, overlapEnd)`. A is the earlier clip,
+    B the later one. At `t >= overlapEnd` it returns false and the survivor
+    plays on the normal player. `drive` stays on B for the whole overlap so
+    the main decoder does not seek at the end. `GainAt` equal-power
+    crossfades only A and B during that span (`cos` / `sin` of `p * pi/2`).
+    Other overlaps are unchanged. Cards: Cross Dissolve (smoothstep), Blend
+    (linear), Dip to Black, Dip to White, Wipe Left / Right / Down / Up,
+    Zoom In, Zoom Out. Wipe is `FxLook.wipe` 1 right, 2 left, 3 down, 4 up.
+    Dip uses `dip` plus `dipR/G/B`. Opacity is Left Shift on the
     clip-body edge, and it is the opposite of the earlier inverted ramp:
     the left edge rises from the bottom (0) to the top (100) at the handle
     and the body stays at 100; the right edge falls from the top to the
@@ -153,8 +166,8 @@ In order, they asked for and accepted:
     Old Film, Record. Preview is the GL shader; export is `FilmGrade` in
     `OverlayStamp`. Do not renumber kinds. The library grid shows 19–25,
     then Zoom In / Zoom Out, then the older effects. The Media / Effects /
-    Solids tab bar does not scroll. Each tab's cards sit in their own child
-    (`libmedia`, `libfx`, `libsolids`). The timeline ruler stays pinned.
+    Solids / Transitions tab bar does not scroll. Each tab's cards sit in
+    their own child (`libmedia`, `libfx`, `libsolids`, `libtrans`). The timeline ruler stays pinned.
     Vertical scroll is only `tlbody` (the channels). Horizontal scroll is
     that same body; the ruler copies it with `SetNextWindowScroll`. Do not
     put the ruler back inside the vertical scroller. Effects cards show the
@@ -285,8 +298,8 @@ is dragged.
 - BUS has **no "+" button**. Clicking an empty bus lane creates a segment that
   spans the full timeline range, unless more than one object is already
   selected — then the click only unselects (see below).
-- The clip right-click **Effects** menu is gone. `TransitionForClip` returns
-  false. Overlay FX on the FX lane is separate. Leave that tab.
+- The clip right-click **Effects** menu stays gone. Overlay FX on the FX
+  lane is separate. Transitions are the tab after Solids, not that menu.
 - **Solids** bin: black, letterbox bars, green. Drag onto video tracks and onto
   GS. Textures are `gSolidTex[3]`, created before first use. `MakeThumbnail` of
   a solid must see `gSolidTex` already declared.
@@ -356,7 +369,8 @@ int y = (int)(v * (float)h);
 ```
 
 Preview reveal inside `BlitFxPair` only when
-`haveB && bgShowN > 0 && previewFrameValid &&` stencil bits `> 0`.
+`haveB && look.wipe == 0 && bgShowN > 0 && previewFrameValid &&` stencil bits `> 0`.
+A wipe uses a scissor on B (`wipe` 1 from the left, 2 from the right, 3 from the top, 4 from the bottom). A dip draws a color quad over the frame after the pair.
 `SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8)` **before** `SDL_CreateWindow`.
 `revealTex` is declared in the outer `if`, not inside the stencil block
 (it is used later). Cap the `glGetError` drain at 8.
@@ -543,9 +557,10 @@ download the DLL or the model. Do not send guessed ONNX Runtime zip URLs.
 
 ## Edge fades, waveform, timeline zoom
 
-Replaces the clip-menu transitions. `TransitionForClip` returns false so
-preview and export do not composite `fxOut` (that was the stuck lower image).
-`effects.cpp` stays. The Effects **tab** (overlay FX) stays.
+The clip-menu transition list stays gone. `TransitionForClip` composites
+only an applied `fxOut` inside the half-open overlap (see decision 15).
+Do not turn it on for every overlap, and do not put the menu back.
+`effects.cpp` is the transition set. The Effects **tab** (overlay FX) stays.
 
 `Clip` fields: `opIn`, `opOut`, `volIn`, `volOut` (seconds). Saved on a new
 `R` line. `audioOpen` is per clip, not saved, default closed. Copied in
@@ -555,7 +570,8 @@ preview and export do not composite `fxOut` (that was the stuck lower image).
 the outer edge, 1 at the handle, 1 in the body. That multiplies the
 envelope. It is **not** `RampAt` (that curve is opacity only). The old
 audio `fadeIn` / `fadeOut` menu items stay and apply only when neither
-volume edge is set.
+volume edge is set. If this clip is A or B of an active transition, that
+gain is then multiplied by the equal-power weight for the overlap.
 
 Opacity (`RampAt` — the user asked to flip the previous curve):
 
