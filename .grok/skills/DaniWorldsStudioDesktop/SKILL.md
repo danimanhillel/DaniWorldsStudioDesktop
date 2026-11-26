@@ -491,7 +491,10 @@ Phases:
    The UI treats `phase == 1` as the GPU step (max 16 steps / 80ms).
 
 Subtitles: burned during phase 0 only when `burnSubs && !rifeOn`. If RIFE is on,
-they burn inside `StepRife`, on the full-rate frames.
+they burn inside `StepRife`, on the full-rate frames. `StampGlyph` samples
+the atlas with bilinear alpha and a round stroke (two rings). Do not put the
+eight nearest-neighbor copies back. The preview stroke is the same circle,
+and the font texture is `GL_LINEAR`. The subtitle face is Segoe UI at 160px.
 
 `CloseAll` deletes `*.rife-tmp.mp4` and calls `RifeShutdown()` if RIFE was on.
 There is no second upscale pass.

@@ -4058,41 +4058,78 @@ static void WrapBalanced(ImFont* font, float size, const std::string& text, floa
     }
 }
 
-static void StampGlyph(uint8_t* canvas, int cw, int ch, const ImFontGlyph* g, float x0, float y0, float x1, float y1, unsigned char cr, unsigned char cg, unsigned char cb) {
+static float AtlasAlpha(float ax, float ay) {
+    if (fontAtlas.empty() || fontAtlasW < 2 || fontAtlasH < 2) return 0.0f;
+    ax -= 0.5f;
+    ay -= 0.5f;
+    int x0 = (int)std::floor(ax);
+    int y0 = (int)std::floor(ay);
+    float tx = ax - (float)x0;
+    float ty = ay - (float)y0;
+    auto at = [&](int x, int y) -> float {
+        if (x < 0 || y < 0 || x >= fontAtlasW || y >= fontAtlasH) return 0.0f;
+        return fontAtlas[(size_t)y * (size_t)fontAtlasW + (size_t)x] * (1.0f / 255.0f);
+    };
+    float a0 = at(x0, y0) * (1.0f - tx) + at(x0 + 1, y0) * tx;
+    float a1 = at(x0, y0 + 1) * (1.0f - tx) + at(x0 + 1, y0 + 1) * tx;
+    return a0 * (1.0f - ty) + a1 * ty;
+}
+
+static void BlendPixel(uint8_t* d, unsigned char cr, unsigned char cg, unsigned char cb, float a) {
+    if (a < 0.004f) return;
+    if (a > 1.0f) a = 1.0f;
+    float inv = 1.0f - a;
+    d[0] = (uint8_t)std::lround(cr * a + d[0] * inv);
+    d[1] = (uint8_t)std::lround(cg * a + d[1] * inv);
+    d[2] = (uint8_t)std::lround(cb * a + d[2] * inv);
+    d[3] = 255;
+}
+
+static void StampGlyph(uint8_t* canvas, int cw, int ch, const ImFontGlyph* g, float x0, float y0, float x1, float y1,
+                       unsigned char cr, unsigned char cg, unsigned char cb,
+                       unsigned char br, unsigned char bgc, unsigned char bb, float edge) {
     if (!g || fontAtlas.empty() || x1 <= x0 || y1 <= y0) return;
-    int ix0 = (int)std::floor(x0);
-    int iy0 = (int)std::floor(y0);
-    int ix1 = (int)std::ceil(x1);
-    int iy1 = (int)std::ceil(y1);
-    int au0 = (int)(g->U0 * fontAtlasW);
-    int av0 = (int)(g->V0 * fontAtlasH);
-    int au1 = (int)(g->U1 * fontAtlasW);
-    int av1 = (int)(g->V1 * fontAtlasH);
-    if (au1 <= au0) au1 = au0 + 1;
-    if (av1 <= av0) av1 = av0 + 1;
+    float gw = x1 - x0;
+    float gh = y1 - y0;
+    float pad = edge > 0.2f ? edge : 0.0f;
+    int ix0 = (int)std::floor(x0 - pad);
+    int iy0 = (int)std::floor(y0 - pad);
+    int ix1 = (int)std::ceil(x1 + pad);
+    int iy1 = (int)std::ceil(y1 + pad);
+    auto sampleAt = [&](float px, float py) -> float {
+        float u = (px - x0) / gw;
+        float v = (py - y0) / gh;
+        float ax = (g->U0 + u * (g->U1 - g->U0)) * (float)fontAtlasW;
+        float ay = (g->V0 + v * (g->V1 - g->V0)) * (float)fontAtlasH;
+        return AtlasAlpha(ax, ay);
+    };
+    const int rings = pad > 0.2f ? 2 : 0;
+    const int spokes = 12;
     for (int y = iy0; y < iy1; y++) {
         if (y < 0 || y >= ch) continue;
-        float v = (y + 0.5f - y0) / (y1 - y0);
-        int ay = av0 + (int)(v * (av1 - av0));
-        if (ay < 0 || ay >= fontAtlasH) continue;
         for (int x = ix0; x < ix1; x++) {
             if (x < 0 || x >= cw) continue;
-            float u = (x + 0.5f - x0) / (x1 - x0);
-            int ax = au0 + (int)(u * (au1 - au0));
-            if (ax < 0 || ax >= fontAtlasW) continue;
-            unsigned char al = fontAtlas[(size_t)ay * fontAtlasW + ax];
-            if (al < 4) continue;
-            uint8_t* d = canvas + ((size_t)y * cw + x) * 4;
-            float a = al / 255.0f;
-            d[0] = (uint8_t)std::lround(cr * a + d[0] * (1.0f - a));
-            d[1] = (uint8_t)std::lround(cg * a + d[1] * (1.0f - a));
-            d[2] = (uint8_t)std::lround(cb * a + d[2] * (1.0f - a));
-            d[3] = 255;
+            float px = (float)x + 0.5f;
+            float py = (float)y + 0.5f;
+            float fill = sampleAt(px, py);
+            float stroke = fill;
+            for (int ring = 1; ring <= rings; ring++) {
+                float rad = pad * ((float)ring / (float)rings);
+                for (int k = 0; k < spokes; k++) {
+                    float ang = (float)k * 6.2831853f / (float)spokes + (ring == 2 ? 0.26f : 0.0f);
+                    stroke = std::max(stroke, sampleAt(px - std::cos(ang) * rad, py - std::sin(ang) * rad));
+                }
+            }
+            uint8_t* d = canvas + ((size_t)y * (size_t)cw + (size_t)x) * 4;
+            if (rings) BlendPixel(d, br, bgc, bb, stroke);
+            BlendPixel(d, cr, cg, cb, fill);
         }
     }
 }
 
-static void DrawTextLine(uint8_t* canvas, int cw, int ch, ImFont* font, float size, float x, float y, const std::string& text, unsigned char cr, unsigned char cg, unsigned char cb) {
+static void DrawTextLine(uint8_t* canvas, int cw, int ch, ImFont* font, float size, float x, float y, const std::string& text,
+                         unsigned char cr, unsigned char cg, unsigned char cb,
+                         unsigned char br, unsigned char bgc, unsigned char bb, float edge) {
     if (!font) return;
     float scale = size / font->FontSize;
     const char* p = text.c_str();
@@ -4100,7 +4137,8 @@ static void DrawTextLine(uint8_t* canvas, int cw, int ch, ImFont* font, float si
         unsigned cp = DecodeUtf8(p);
         const ImFontGlyph* g = font->FindGlyph((ImWchar)cp);
         if (!g) { x += size * 0.5f; continue; }
-        StampGlyph(canvas, cw, ch, g, x + g->X0 * scale, y + g->Y0 * scale, x + g->X1 * scale, y + g->Y1 * scale, cr, cg, cb);
+        StampGlyph(canvas, cw, ch, g, x + g->X0 * scale, y + g->Y0 * scale, x + g->X1 * scale, y + g->Y1 * scale,
+                   cr, cg, cb, br, bgc, bb, edge);
         x += g->AdvanceX * scale;
     }
 }
@@ -4131,8 +4169,6 @@ static void BurnSubtitles(uint8_t* canvas, int cw, int ch, float t) {
     unsigned char bgc = (unsigned char)(Clamp01(subStyle.edge[1]) * 255);
     unsigned char bb = (unsigned char)(Clamp01(subStyle.edge[2]) * 255);
     float edge = subStyle.border ? std::max(1.0f, subStyle.borderPx * (size / 42.0f)) : 0.0f;
-    const float oxs[8] = {-1, 1, 0, 0, -1, 1, -1, 1};
-    const float oys[8] = {0, 0, -1, 1, -1, -1, 1, 1};
     for (int n = (int)ids.size() - 1; n >= 0; n--) {
         std::vector<std::string> lines;
         WrapBalanced(font, size, subs[ids[n]].text, maxW, lines);
@@ -4161,11 +4197,7 @@ static void BurnSubtitles(uint8_t* canvas, int cw, int ch, float t) {
         for (const auto& raw : lines) {
             std::string ln = HasHebrew(raw) ? ReverseUtf8(raw) : raw;
             float x = (cw - TextWidth(font, size, ln)) * 0.5f;
-            if (edge > 0.2f) {
-                for (int k = 0; k < 8; k++)
-                    DrawTextLine(canvas, cw, ch, font, size, x + oxs[k] * edge, y + oys[k] * edge, ln, br, bgc, bb);
-            }
-            DrawTextLine(canvas, cw, ch, font, size, x, y, ln, tr, tg, tb);
+            DrawTextLine(canvas, cw, ch, font, size, x, y, ln, tr, tg, tb, br, bgc, bb, edge);
             y += lineH;
         }
         yBottom -= blockH + size * 0.35f;
@@ -5612,6 +5644,8 @@ void DrawPreviewSubs(ImVec2 pic0, ImVec2 pic1) {
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glEnable(GL_TEXTURE_2D);
     glBindTexture(GL_TEXTURE_2D, (GLuint)(intptr_t)io.Fonts->TexID);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     if (previewFrameValid) {
         glEnable(GL_SCISSOR_TEST);
         float sx0 = std::max(0.0f, previewFrameMin.x);
@@ -5627,8 +5661,6 @@ void DrawPreviewSubs(ImVec2 pic0, ImVec2 pic1) {
     glMatrixMode(GL_MODELVIEW);
     glPushMatrix();
     glLoadIdentity();
-    const float oxs[8] = {-1, 1, 0, 0, -1, 1, -1, 1};
-    const float oys[8] = {0, 0, -1, 1, -1, -1, 1, 1};
     float edge = subStyle.border ? std::max(1.0f, subStyle.borderPx * (size / 48.0f)) : 0.0f;
     float yBottom = pic1.y - (pic1.y - pic0.y) * 0.06f;
     for (int n = (int)ids.size() - 1; n >= 0; n--) {
@@ -5659,7 +5691,13 @@ void DrawPreviewSubs(ImVec2 pic0, ImVec2 pic1) {
             if (edge > 0.2f) {
                 glColor4f(subStyle.edge[0], subStyle.edge[1], subStyle.edge[2], 1);
                 glBegin(GL_QUADS);
-                for (int k = 0; k < 8; k++) DrawLineGL(font, size, x + oxs[k] * edge, yy + oys[k] * edge, ln);
+                for (int ring = 1; ring <= 2; ring++) {
+                    float rad = edge * ((float)ring / 2.0f);
+                    for (int k = 0; k < 12; k++) {
+                        float ang = (float)k * 6.2831853f / 12.0f + (ring == 2 ? 0.26f : 0.0f);
+                        DrawLineGL(font, size, x + std::cos(ang) * rad, yy + std::sin(ang) * rad, ln);
+                    }
+                }
                 glEnd();
             }
             glColor4f(subStyle.text[0], subStyle.text[1], subStyle.text[2], 1);
@@ -8216,11 +8254,11 @@ int main(int argc, char* argv[]) {
             io.Fonts->AddFontDefault();
         ImFontConfig subCfg;
         subCfg.OversampleH = 3;
-        subCfg.OversampleV = 2;
+        subCfg.OversampleV = 3;
         subCfg.PixelSnapH = false;
-        subtitleFont = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", 112.0f, &subCfg, ranges);
+        subtitleFont = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", 160.0f, &subCfg, ranges);
         if (!subtitleFont)
-            subtitleFont = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\arial.ttf", 112.0f, &subCfg, ranges);
+            subtitleFont = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\arial.ttf", 160.0f, &subCfg, ranges);
     }
     ImGui_ImplSDL2_InitForOpenGL(window, gl_context);
     ImGui_ImplOpenGL3_Init("#version 130");
