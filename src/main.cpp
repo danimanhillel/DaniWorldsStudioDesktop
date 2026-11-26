@@ -8699,7 +8699,7 @@ int main(int argc, char* argv[]) {
             if (contentEnd > 0.5f) tlSeconds = std::max(tlSeconds, contentEnd * 1.20f);
         }
         float timeW = tlSeconds * pixelsPerSecond;
-        ImGui::BeginChild("Timeline", ImVec2(0, tlH), true, ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_AlwaysHorizontalScrollbar | ImGuiWindowFlags_AlwaysVerticalScrollbar);
+        ImGui::BeginChild("Timeline", ImVec2(0, tlH), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
         tlViewW = ImGui::GetWindowWidth();
         const char* trackNames[] = {"V1", "V2", "V3", "A1", "A2", "A3"};
         const float kBodyH = kClipBody;
@@ -8710,39 +8710,13 @@ int main(int argc, char* argv[]) {
         float openH = kBodyH + kWaveGap + kWaveH + 26.0f;
         tlTrackH = kBodyH + 8.0f;
         ImVec2 trackPositions[6];
-
-        ImGui::BeginChild("ruler", ImVec2(timeW + 90.0f, 26.0f), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-        ImGui::Dummy(ImVec2(4, 14));
-        ImGui::SameLine(46.0f);
-        float rulerOrigin = ImGui::GetCursorScreenPos().x;
-        ImGui::InvisibleButton("rulerhit", ImVec2(std::max(10.0f, timeW), 14.0f));
-        {
-            ImDrawList* rdl = ImGui::GetWindowDrawList();
-            ImVec2 rr0 = ImGui::GetItemRectMin();
-            ImVec2 rr1 = ImGui::GetItemRectMax();
-            for (int s = 0; s <= (int)tlSeconds; s++) {
-                float x = rulerOrigin + s * pixelsPerSecond;
-                bool major = (s % 5) == 0;
-                rdl->AddLine(ImVec2(x, rr0.y + (major ? 0.0f : 8.0f)), ImVec2(x, rr1.y), IM_COL32(180, 180, 180, major ? 230 : 110));
-                if (major) {
-                    char lab[16];
-                    snprintf(lab, sizeof(lab), "%d:%02d", s / 60, s % 60);
-                    rdl->AddText(ImVec2(x + 2.0f, rr0.y - 2.0f), IM_COL32(210, 210, 210, 255), lab);
-                }
-            }
-            if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(0)) {
-                float nt = (ImGui::GetMousePos().x - rulerOrigin) / pixelsPerSecond;
-                if (nt < 0) nt = 0;
-                currentTime = nt;
-                shownLocal = -1000.0f;
-                draggingPlayhead = true;
-#ifdef HAVE_FFMPEG
-                ResetAudioSync();
-                if (player) player->lastPts = -1;
-#endif
-            }
-        }
-        ImGui::EndChild();
+        const float rulerH = 26.0f;
+        ImVec2 rulerCursor = ImGui::GetCursorPos();
+        ImGui::Dummy(ImVec2(1.0f, rulerH));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+        ImGui::BeginChild("tlbody", ImVec2(0, 0), false, ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_AlwaysHorizontalScrollbar | ImGuiWindowFlags_AlwaysVerticalScrollbar);
+        ImGui::PopStyleVar();
+        float bodyScrollX = ImGui::GetScrollX();
 
         busHover = false;
         ImGui::BeginChild("buslane", ImVec2(timeW + 90.0f, 58.0f), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
@@ -9657,6 +9631,49 @@ int main(int argc, char* argv[]) {
         }
 
         ImGui::Dummy(ImVec2(timeW + 90.0f, 1.0f));
+        ImGui::EndChild();
+
+        ImGui::SetCursorPos(rulerCursor);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+        ImGui::SetNextWindowScroll(ImVec2(bodyScrollX, 0.0f));
+        ImGui::BeginChild("ruler", ImVec2(0.0f, rulerH), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        ImGui::PopStyleVar();
+        float gutter = 46.0f;
+        ImGui::SetCursorPos(ImVec2(gutter, 4.0f));
+        float rulerOrigin = ImGui::GetCursorScreenPos().x;
+        ImGui::InvisibleButton("rulerhit", ImVec2(std::max(10.0f, timeW), 16.0f));
+        {
+            ImDrawList* rdl = ImGui::GetWindowDrawList();
+            ImVec2 rr0 = ImGui::GetItemRectMin();
+            ImVec2 rr1 = ImGui::GetItemRectMax();
+            for (int s = 0; s <= (int)tlSeconds; s++) {
+                float x = rulerOrigin + s * pixelsPerSecond;
+                bool major = (s % 5) == 0;
+                rdl->AddLine(ImVec2(x, rr0.y + (major ? 0.0f : 8.0f)), ImVec2(x, rr1.y), IM_COL32(180, 180, 180, major ? 230 : 110));
+                if (major) {
+                    char lab[16];
+                    snprintf(lab, sizeof(lab), "%d:%02d", s / 60, s % 60);
+                    rdl->AddText(ImVec2(x + 2.0f, rr0.y - 2.0f), IM_COL32(210, 210, 210, 255), lab);
+                }
+            }
+            if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(0)) {
+                float nt = (ImGui::GetMousePos().x - rulerOrigin) / pixelsPerSecond;
+                if (nt < 0) nt = 0;
+                currentTime = nt;
+                shownLocal = -1000.0f;
+                draggingPlayhead = true;
+#ifdef HAVE_FFMPEG
+                ResetAudioSync();
+                if (player) player->lastPts = -1;
+#endif
+            }
+            ImVec2 wp = ImGui::GetWindowPos();
+            float ph = rulerOrigin + currentTime * pixelsPerSecond;
+            rdl->AddLine(ImVec2(ph, wp.y), ImVec2(ph, wp.y + ImGui::GetWindowSize().y), IM_COL32(255, 50, 50, 255), 2.0f);
+        }
+        ImGui::SetCursorPos(ImVec2(timeW + 90.0f + ImGui::GetStyle().ScrollbarSize, 0.0f));
+        ImGui::Dummy(ImVec2(1.0f, 1.0f));
+        ImGui::EndChild();
         ImGui::EndChild();
 
         if (openClipMenu) {

@@ -39,6 +39,8 @@ ripple insert, or panels-above-timeline.
   Dust, Cassette, Frame, Film Dust, Retro Dust, Old Film, and Record are
   19–25 (shader in preview, `FilmGrade` on export). The Media, Effects, and
   Solids tabs stay pinned; only the cards under them scroll.
+- The timeline ruler stays pinned while the channels scroll vertically.
+  Horizontal scroll stays shared (`tlbody` scroll, ruler follows).
 - Preview keeps more seconds ahead (small clips 14s, large clips 9s / 11s
   source). An empty click unselects only when more than one object is
   selected. Dropping an effect does not open its side panel.

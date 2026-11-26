@@ -154,7 +154,10 @@ In order, they asked for and accepted:
     `OverlayStamp`. Do not renumber kinds. The library grid shows 19–25,
     then Zoom In / Zoom Out, then the older effects. The Media / Effects /
     Solids tab bar does not scroll. Each tab's cards sit in their own child
-    (`libmedia`, `libfx`, `libsolids`).
+    (`libmedia`, `libfx`, `libsolids`). The timeline ruler stays pinned.
+    Vertical scroll is only `tlbody` (the channels). Horizontal scroll is
+    that same body; the ruler copies it with `SetNextWindowScroll`. Do not
+    put the ruler back inside the vertical scroller.
 
 They build on Windows themselves. The Linux sandbox has no MSVC. After an
 exe change, the reply ends with `taskkill`, `git pull`, and
