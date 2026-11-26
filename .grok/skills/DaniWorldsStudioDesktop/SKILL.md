@@ -613,18 +613,19 @@ Opacity (`RampAt` — the user asked to flip the previous curve):
   still sets the fade and moves that same point.
 - The wave strip is **per clip** and **closed by default** (`audioOpen`,
   not saved) on V1–V3 and GS. A yellow arrow in the center of the clip
-  body toggles it. Click again to close. A1, A2 and A3 always show the
-  strip and the same yellow volume line. There is no arrow on those
-  lanes, and the lane stays the open height. Double-click the wave to
-  add a point, drag a point to change level, Ctrl + drag an edge of the
-  wave for the fade. Do not open every video clip's strip. A video or GS
-  lane is the tall height only while some clip on it is open
+  body toggles it. Click again to close. A1, A2 and A3 do **not** grow.
+  The waveform, the yellow volume line, and the volume points sit on the
+  clip body itself. There is no arrow and no Shift opacity on those lanes
+  (there is no picture). Double-click the body to add a point, drag a
+  point to change level, Ctrl + drag an edge for the volume fade. A body
+  edge without Ctrl still trims. Do not open every video clip's strip. A
+  video or GS lane is the tall height only while some clip on it is open
   (`LaneHasAudioOpen`, `trackLaneH`, `gsChildH`). Marquee height follows
-  that clip's strip, and an audio-track clip always includes the wave.
-- Shift on the body still wins for opacity. Ctrl on the body does not
-  fade. Shift on the wave does not fade. A body edge without Shift still
-  trims. A click on the open wave body drags the clip. The arrow click
-  does not.
+  that clip's strip. An audio-track clip is only the body height.
+- Shift on a video or GS body still wins for opacity. It does nothing
+  on A1–A3. Ctrl on the body does not fade. Shift on the wave does not
+  fade. A body edge without Shift still trims. A click on the open wave
+  body drags the clip. The arrow click does not.
 - The drag does **not** change the clip bounds. It is not a trim.
 - Handle the fade **before** Shift-click `ToggleSelect`, or it never starts.
 - State: `fadeDragClip`, `fadeDragSide` (-1 start / +1 end), `fadeDragKind`
@@ -632,10 +633,11 @@ Opacity (`RampAt` — the user asked to flip the previous curve):
   mouse x, clamp `0 .. duration-0.05`. Under ~0.03s clears the fade.
 - Draw the white opacity ramp on the clip body. 0 is the bottom, 1 is the
   top. Handle circles sit on the curve. Draw it on every clip that has an
-  opacity fade, not only the selected one. The selected envelope points
-  that are **not** inside a volume fade sit on the wave strip.
-  `dragVol` maps gain across `kWaveH`, not the whole track. Skip points
-  `VolPointHidden` hides.
+  opacity fade, not only the selected one. On video and GS the selected
+  envelope points that are **not** inside a volume fade sit on the wave
+  strip, and `dragVol` maps gain across `kWaveH`. On A1–A3 those points
+  sit on the clip body, and `dragVol` maps gain across `kBodyH`. Skip
+  points `VolPointHidden` hides.
 - `OpacityAt` is `RampAt` of `opIn` / `opOut`. `BlitVideo` takes `float cover`.
   Below 0.999 it blends. The grade shader alpha uniform is `cover` (a graded
   clip used to ignore the fade). Ungraded blit sets `GL_MODULATE` so
@@ -645,9 +647,10 @@ Opacity (`RampAt` — the user asked to flip the previous curve):
   and something is underneath, so a faded body shows that clip and not black.
   GS opacity is `gsOpacity * OpacityAt`.
 
-Waveform: white vertical bars, centered, in the dark strip **under** the
-clip, and only while that clip's audio strip is open. Video, audio, and
-GS. Peaks are per file path, built once on a background thread
+Waveform: white vertical bars, centered. On V1–V3 and GS they are in the
+dark strip **under** the clip, and only while that clip's audio strip is
+open. On A1–A3 they are drawn on the clip body, and the lane does not
+grow. Peaks are per file path, built once on a background thread
 (`DecodeWavePeaks`, about 2 buckets/second, 32–2000, packet cap 8000).
 `wave` state 2 with an empty vector means no audio — do not retry every
 frame. Map through `sourceOffset` and `speed`.
