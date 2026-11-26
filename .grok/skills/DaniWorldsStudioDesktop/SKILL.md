@@ -479,9 +479,12 @@ Other res values 0–4 are 720 / 1080 / 1440 / 2160 / 4320. 16:9 widths
 Phases:
 
 0. Render the timeline into an mp4 at the chosen export size.
-1. RIFE (`BeginRifePass` / `StepRife`), only if `exRife` and fps `>= 48` and even.
-   The render is at `fps/2` into `outPath + ".rife-tmp.mp4"`, then RIFE writes
-   the final file at `outFps`. `RifeRun` **refuses** `w` or `h` `> 3840`.
+1. RIFE (`BeginRifePass` / `StepRife`), only if `exRife` and fps is even and `>= 48`.
+   50 and 60 still render at half (`fps/2`) and insert one midpoint (`t = 0.5`).
+   120 and 240 always turn RIFE on: the movie is rendered at 60, then RIFE
+   inserts one frame for 120 (`t = 0.5`) or three for 240 (`t = 0.25`, `0.5`,
+   `0.75`). `exFpsIdx` 0–3 stay 24, 30, 50, 60. 4 is 120, 5 is 240. Do not
+   renumber them. The final file is `outFps`. `RifeRun` **refuses** `w` or `h` `> 3840`.
    The UI treats `phase == 1` as the GPU step (max 16 steps / 80ms).
 
 Subtitles: burned during phase 0 only when `burnSubs && !rifeOn`. If RIFE is on,

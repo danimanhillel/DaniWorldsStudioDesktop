@@ -2362,6 +2362,8 @@ struct ExportSession {
     std::vector<uint8_t> prevRGBA, nextRGBA, rifeMid;
     bool haveNext = false;
     bool emitMid = false;
+    int rifeFactor = 2;
+    int rifeSlot = 0;
 
     void CloseAll();
     bool Begin(const std::string& outPath, int width, int height, int framesPerSec, bool useRife, bool burn);
@@ -2440,6 +2442,8 @@ void ExportSession::CloseAll() {
     phase = 0;
     outFps = 0;
     baseFps = 0;
+    rifeFactor = 2;
+    rifeSlot = 0;
     finalPath.clear();
 }
 
@@ -2820,11 +2824,22 @@ bool ExportSession::Begin(const std::string& outPath, int width, int height, int
     phase = 0;
     outFps = 0;
     baseFps = framesPerSec;
+    rifeFactor = 2;
+    rifeSlot = 0;
     finalPath.clear();
     tempPath.clear();
-    if (useRife && framesPerSec >= 48 && (framesPerSec % 2) == 0) {
+    bool highFps = framesPerSec == 120 || framesPerSec == 240;
+    if (highFps) useRife = true;
+    if (useRife && (highFps || (framesPerSec >= 48 && (framesPerSec % 2) == 0))) {
         outFps = framesPerSec;
-        baseFps = framesPerSec / 2;
+        if (highFps) {
+            baseFps = 60;
+            rifeFactor = framesPerSec / 60;
+        } else {
+            baseFps = framesPerSec / 2;
+            rifeFactor = 2;
+        }
+        if (rifeFactor < 2) rifeFactor = 2;
         finalPath = outPath;
         tempPath = outPath + ".rife-tmp.mp4";
         path = tempPath;
@@ -4462,6 +4477,7 @@ bool ExportSession::BeginRifePass() {
     if (!ReadRifeFrame(prevRGBA)) { Fail("Rendered video is empty"); return false; }
     haveNext = ReadRifeFrame(nextRGBA);
     emitMid = false;
+    rifeSlot = 0;
 
     if (avformat_alloc_output_context2(&fmt, nullptr, "mp4", finalPath.c_str()) < 0 || !fmt) {
         Fail("Cannot create the final mp4");
@@ -4554,16 +4570,13 @@ bool ExportSession::BeginRifePass() {
 void ExportSession::StepRife() {
     if (frameIndex >= total) { Finish(true); return; }
     double t = (double)frameIndex / (double)std::max(1, outFps);
-    const uint8_t* src = prevRGBA.data();
-    if (emitMid && haveNext && !nextRGBA.empty() && nextRGBA.size() == prevRGBA.size()) {
+    const uint8_t* src = prevRGBA.empty() ? nullptr : prevRGBA.data();
+    int factor = rifeFactor < 2 ? 2 : rifeFactor;
+    if (rifeSlot > 0 && haveNext && !nextRGBA.empty() && nextRGBA.size() == prevRGBA.size()) {
+        float ts = (float)rifeSlot / (float)factor;
         rifeMid.assign(prevRGBA.size(), 255);
-        if (!RifeRun(prevRGBA.data(), nextRGBA.data(), w, h, 0.5f, rifeMid.data())) rifeMid = prevRGBA;
+        if (!RifeRun(prevRGBA.data(), nextRGBA.data(), w, h, ts, rifeMid.data())) rifeMid = prevRGBA;
         src = rifeMid.data();
-        prevRGBA.swap(nextRGBA);
-        haveNext = ReadRifeFrame(nextRGBA);
-        emitMid = false;
-    } else if (haveNext) {
-        emitMid = true;
     }
     if (src && canvas.size() == prevRGBA.size()) memcpy(canvas.data(), src, canvas.size());
     if (burnSubs) BurnSubtitles(canvas.data(), w, h, (float)t);
@@ -4574,6 +4587,14 @@ void ExportSession::StepRife() {
     vframe->pts = frameIndex;
     if (avcodec_send_frame(vctx, vframe) < 0) { Fail("Video encode failed"); return; }
     if (!WriteEncoded(vctx, vst)) { Fail("Video write failed"); return; }
+    if (haveNext) {
+        rifeSlot++;
+        if (rifeSlot >= factor) {
+            prevRGBA.swap(nextRGBA);
+            haveNext = ReadRifeFrame(nextRGBA);
+            rifeSlot = 0;
+        }
+    }
     frameIndex++;
     int pct = total ? (frameIndex * 100) / total : 0;
     char buf[160];
@@ -9910,15 +9931,26 @@ int main(int argc, char* argv[]) {
             if (ImGui::RadioButton("50", exFpsIdx == 2)) exFpsIdx = 2;
             ImGui::SameLine();
             if (ImGui::RadioButton("60", exFpsIdx == 3)) exFpsIdx = 3;
+            ImGui::SameLine();
+            if (ImGui::RadioButton("120", exFpsIdx == 4)) exFpsIdx = 4;
+            ImGui::SameLine();
+            if (ImGui::RadioButton("240", exFpsIdx == 5)) exFpsIdx = 5;
             int ew = 0, eh = 0;
-            const int fpsVals[] = {24, 30, 50, 60};
-            int fps = fpsVals[exFpsIdx < 0 || exFpsIdx > 3 ? 1 : exFpsIdx];
+            const int fpsVals[] = {24, 30, 50, 60, 120, 240};
+            int fps = fpsVals[exFpsIdx < 0 || exFpsIdx > 5 ? 1 : exFpsIdx];
+            bool highFps = fps >= 120;
+            if (highFps) exRife = true;
             ExportDims(exAspect, exRes, ew, eh);
             ImGui::Separator();
             ImGui::Text("Output: %d x %d   @ %d fps", ew, eh, fps);
             if (exRes == 3 || exRes == 4) ImGui::TextDisabled("4K and 8K take a long time.");
+            ImGui::BeginDisabled(highFps);
             ImGui::Checkbox("Frame interpolation", &exRife);
-            ImGui::TextDisabled("Renders the movie first, then fills frames on the GPU. 50 or 60 fps. Subtitles are added after.");
+            ImGui::EndDisabled();
+            if (highFps)
+                ImGui::TextDisabled("120 and 240 are made with RIFE from a 60 fps render. Subtitles are added after.");
+            else
+                ImGui::TextDisabled("Renders the movie first, then fills frames on the GPU. 50 or 60 fps. Subtitles are added after.");
             ImGui::TextDisabled("%s", RifeProbe().detail.c_str());
             ImGui::Spacing();
             ImGui::TextUnformatted("Subtitles");
