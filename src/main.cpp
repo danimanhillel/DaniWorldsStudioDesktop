@@ -3373,13 +3373,12 @@ static void PlaceAtCursor() {
     ImGui::SetNextWindowBgAlpha(0.98f);
 }
 
-static void PlacePanel(float) {
-    float x = previewPanelMax.x - 16.0f;
+static void PlacePanel(float xShift) {
+    float x = previewPanelMax.x - 16.0f - xShift;
     float y = previewPanelMin.y + 36.0f;
     if (x < 280.0f) x = 280.0f;
     if (y < 36.0f) y = 36.0f;
-    ImGui::SetNextWindowPos(ImVec2(x, y), ImGuiCond_Always, ImVec2(1.0f, 0.0f));
-    ImGui::SetNextWindowFocus();
+    ImGui::SetNextWindowPos(ImVec2(x, y), ImGuiCond_Appearing, ImVec2(1.0f, 0.0f));
     ImGui::SetNextWindowBgAlpha(0.98f);
 }
 
@@ -4099,12 +4098,23 @@ static void StampGlyph(uint8_t* canvas, int cw, int ch, const ImFontGlyph* g, fl
     auto sampleAt = [&](float px, float py) -> float {
         float u = (px - x0) / gw;
         float v = (py - y0) / gh;
+        if (u < 0.0f || v < 0.0f || u > 1.0f || v > 1.0f) return 0.0f;
         float ax = (g->U0 + u * (g->U1 - g->U0)) * (float)fontAtlasW;
         float ay = (g->V0 + v * (g->V1 - g->V0)) * (float)fontAtlasH;
+        float minX = g->U0 * (float)fontAtlasW + 0.5f;
+        float maxX = g->U1 * (float)fontAtlasW - 0.5f;
+        float minY = g->V0 * (float)fontAtlasH + 0.5f;
+        float maxY = g->V1 * (float)fontAtlasH - 0.5f;
+        if (maxX < minX) { minX = maxX = (minX + maxX) * 0.5f; }
+        if (maxY < minY) { minY = maxY = (minY + maxY) * 0.5f; }
+        if (ax < minX) ax = minX;
+        if (ax > maxX) ax = maxX;
+        if (ay < minY) ay = minY;
+        if (ay > maxY) ay = maxY;
         return AtlasAlpha(ax, ay);
     };
-    const int rings = pad > 0.2f ? 2 : 0;
-    const int spokes = 12;
+    const int rings = pad > 0.2f ? 1 : 0;
+    const int spokes = 16;
     for (int y = iy0; y < iy1; y++) {
         if (y < 0 || y >= ch) continue;
         for (int x = ix0; x < ix1; x++) {
@@ -5610,10 +5620,18 @@ void BlitKeyed(ImVec2 a, ImVec2 b, GLuint tex, float sim, float soft, float spil
 }
 
 static void DrawGlyphQuad(const ImFontGlyph* g, float x0, float y0, float x1, float y1) {
-    glTexCoord2f(g->U0, g->V0); glVertex2f(x0, y0);
-    glTexCoord2f(g->U1, g->V0); glVertex2f(x1, y0);
-    glTexCoord2f(g->U1, g->V1); glVertex2f(x1, y1);
-    glTexCoord2f(g->U0, g->V1); glVertex2f(x0, y1);
+    float du = 0.0f, dv = 0.0f;
+    if (fontAtlasW > 1 && fontAtlasH > 1) {
+        du = 0.5f / (float)fontAtlasW;
+        dv = 0.5f / (float)fontAtlasH;
+        if (g->U1 - g->U0 < du * 3.0f) du = 0.0f;
+        if (g->V1 - g->V0 < dv * 3.0f) dv = 0.0f;
+    }
+    float u0 = g->U0 + du, v0 = g->V0 + dv, u1 = g->U1 - du, v1 = g->V1 - dv;
+    glTexCoord2f(u0, v0); glVertex2f(x0, y0);
+    glTexCoord2f(u1, v0); glVertex2f(x1, y0);
+    glTexCoord2f(u1, v1); glVertex2f(x1, y1);
+    glTexCoord2f(u0, v1); glVertex2f(x0, y1);
 }
 
 static void DrawLineGL(ImFont* font, float size, float x, float y, const std::string& text) {
@@ -5691,12 +5709,9 @@ void DrawPreviewSubs(ImVec2 pic0, ImVec2 pic1) {
             if (edge > 0.2f) {
                 glColor4f(subStyle.edge[0], subStyle.edge[1], subStyle.edge[2], 1);
                 glBegin(GL_QUADS);
-                for (int ring = 1; ring <= 2; ring++) {
-                    float rad = edge * ((float)ring / 2.0f);
-                    for (int k = 0; k < 12; k++) {
-                        float ang = (float)k * 6.2831853f / 12.0f + (ring == 2 ? 0.26f : 0.0f);
-                        DrawLineGL(font, size, x + std::cos(ang) * rad, yy + std::sin(ang) * rad, ln);
-                    }
+                for (int k = 0; k < 16; k++) {
+                    float ang = (float)k * 6.2831853f / 16.0f;
+                    DrawLineGL(font, size, x + std::cos(ang) * edge, yy + std::sin(ang) * edge, ln);
                 }
                 glEnd();
             }

@@ -278,6 +278,10 @@ is dragged.
   Subtitle, Subtitle style, Audio Effects, Clip color, Library clip.
   **Do not** add menu popups to that list.
 - The preview FRAME scissor is static. Do not let a floating panel change it.
+- `PlacePanel` positions with `ImGuiCond_Appearing` only. Do not use
+  `ImGuiCond_Always` and do not call `SetNextWindowFocus` every frame.
+  The subtitle style window passes a left shift so it does not cover the
+  text window. Title-bar drag and widget selection must keep working.
 - BUS has **no "+" button**. Clicking an empty bus lane creates a segment that
   spans the full timeline range, unless more than one object is already
   selected — then the click only unselects (see below).
@@ -491,9 +495,9 @@ Phases:
    The UI treats `phase == 1` as the GPU step (max 16 steps / 80ms).
 
 Subtitles: burned during phase 0 only when `burnSubs && !rifeOn`. If RIFE is on,
-they burn inside `StepRife`, on the full-rate frames. `StampGlyph` samples
-the atlas with bilinear alpha and a round stroke (two rings). Do not put the
-eight nearest-neighbor copies back. The preview stroke is the same circle,
+they burn inside `StepRife`, on the full-rate frames. `StampGlyph` samples the atlas with bilinear alpha and a round stroke. A
+sample that leaves that glyph's quad is 0, so the border cannot pick up the
+next letter in the atlas. Do not put the eight nearest-neighbor copies back. The preview stroke is the same circle,
 and the font texture is `GL_LINEAR`. The subtitle face is Segoe UI at 160px.
 
 `CloseAll` deletes `*.rife-tmp.mp4` and calls `RifeShutdown()` if RIFE was on.

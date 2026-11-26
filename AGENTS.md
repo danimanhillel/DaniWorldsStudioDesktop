@@ -48,8 +48,10 @@ ripple insert, or panels-above-timeline.
   loaded `onnxruntime.dll` has no CUDA provider, RIFE uses DirectML and the
   status says so. Do not report that as CUDA.
 - Burned subtitles sample the font atlas with bilinear coverage and a round
-  stroke, not eight nearest-neighbor copies. The preview uses the same round
-  stroke and a linear font texture.
+  stroke. A sample outside that glyph is 0, so the border does not pick up
+  the next letter. `PlacePanel` uses `ImGuiCond_Appearing` and does not
+  refocus every frame, so the subtitle windows can be dragged and edited.
+  The style window is shifted left of the text window.
 - Export FPS 120 and 240 always use RIFE. The movie is rendered at 60, then
   RIFE inserts one frame (120) or three (240, at 0.25 / 0.5 / 0.75). 72 is
   multiplier 3 from a 24 fps render (timesteps 1/3 and 2/3), `exFpsIdx` 6.
