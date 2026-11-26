@@ -510,7 +510,14 @@ and not past free minus 512MB), and `use_tf32=1` when the capability is 8
 or newer so cuDNN runs the FP32 convolutions on tensor cores. There is no
 `.cu` file and no `CMAKE_CUDA_ARCHITECTURES`. Do not add nvcc. If the full
 option set is rejected, retry with the memory limit, then with `device_id`
-only. The card is written to `rife.log` and to the RIFE status line. Do not
+only. The card is written to `rife.log` and to the RIFE status line. Every
+`rife.log` line starts with `YYYY-MM-DD HH:MM:SS`. If the CUDA runtime does
+not export the device queries, the card is read from `nvcuda.dll` instead.
+If this `onnxruntime.dll` has no CUDA provider (the error lists DML and not
+CUDA), RIFE attaches DirectML and the status says `RIFE on DirectML`, not
+`RIFE on GPU`. Do not call that CUDA. Real CUDA still needs the GPU build's
+`onnxruntime.dll`, `onnxruntime_providers_shared.dll`, and
+`onnxruntime_providers_cuda.dll` next to the exe. Do not
 `FreeLibrary` the kept preload module. The build does not
 download the DLL or the model. Do not send guessed ONNX Runtime zip URLs.
 

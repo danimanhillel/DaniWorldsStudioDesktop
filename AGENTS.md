@@ -40,10 +40,13 @@ ripple insert, or panels-above-timeline.
   19–25 (shader in preview, `FilmGrade` on export). The Media, Effects, and
   Solids tabs stay pinned; only the cards under them scroll. Effects cards
   show the bundled plate through the real preview shader, not the flat icon.
-- RIFE queries the CUDA runtime for the GPU. A 5090 (compute capability 12.0)
-  wins over a weaker card. TF32 is enabled from capability 8 up so cuDNN can
-  use tensor cores, and the arena limit comes from VRAM. There is no nvcc
-  architecture flag and no `.cu` file.
+- RIFE queries the CUDA runtime for the GPU, or the NVIDIA driver if that
+  runtime cannot name the card. A 5090 (compute capability 12.0) wins over a
+  weaker card. TF32 is enabled from capability 8 up so cuDNN can use tensor
+  cores, and the arena limit comes from VRAM. There is no nvcc architecture
+  flag and no `.cu` file. `rife.log` lines start with a date and time. If the
+  loaded `onnxruntime.dll` has no CUDA provider, RIFE uses DirectML and the
+  status says so. Do not report that as CUDA.
 - Export FPS 120 and 240 always use RIFE. The movie is rendered at 60, then
   RIFE inserts one frame (120) or three (240, at 0.25 / 0.5 / 0.75). 24, 30,
   50 and 60 stay on `exFpsIdx` 0–3. Do not renumber them.

@@ -79,6 +79,12 @@ void Log(const std::wstring& dir, const std::string& line) {
     if (dir.empty()) return;
     FILE* f = _wfopen((dir + L"rife.log").c_str(), L"ab");
     if (!f) return;
+    SYSTEMTIME st{};
+    GetLocalTime(&st);
+    char ts[40];
+    snprintf(ts, sizeof(ts), "%04u-%02u-%02u %02u:%02u:%02u  ",
+             st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+    fwrite(ts, 1, strlen(ts), f);
     fwrite(line.data(), 1, line.size(), f);
     fputc('\n', f);
     fclose(f);
@@ -199,7 +205,20 @@ bool PreloadCuda(const std::wstring& dir, std::string& why) {
             HMODULE m = LoadLibraryExW(item.path.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
             if (!m) m = LoadLibraryW(item.path.c_str());
             if (m) gKeep.push_back(m);
-            if (m && !gCudart && GetProcAddress(m, "cudaGetDeviceCount")) gCudart = m;
+            if (m && !gCudart) {
+                bool count = GetProcAddress(m, "cudaGetDeviceCount") != nullptr;
+                bool full = count
+                    && GetProcAddress(m, "cudaSetDevice")
+                    && GetProcAddress(m, "cudaMemGetInfo")
+                    && GetProcAddress(m, "cudaDeviceGetName")
+                    && GetProcAddress(m, "cudaDeviceGetAttribute");
+                if (full) gCudart = m;
+                else if (count) {
+                    wchar_t path[MAX_PATH] = {};
+                    GetModuleFileNameW(m, path, MAX_PATH);
+                    Log(dir, "Skipped incomplete CUDA runtime: " + Narrow(path));
+                }
+            }
             std::wstring leaf = item.path.substr(item.path.find_last_of(L"\\/") + 1);
             if (_wcsicmp(leaf.c_str(), L"cublas64_13.dll") == 0 || _wcsicmp(leaf.c_str(), L"cudnn64_9.dll") == 0) {
                 if (_wcsicmp(leaf.c_str(), L"cublas64_13.dll") == 0) {
@@ -238,13 +257,109 @@ struct GpuPick {
     std::string name;
 };
 
+void FinishPick(const std::wstring& dir, GpuPick& best) {
+    if (!best.ok) return;
+    size_t reserve = best.totalB / 8;
+    const size_t twoGb = 2ull << 30;
+    if (reserve < twoGb) reserve = twoGb;
+    size_t limit = best.totalB > reserve ? best.totalB - reserve : 0;
+    const size_t head = 512ull << 20;
+    if (best.freeB > head) {
+        size_t cap = best.freeB - head;
+        if (limit == 0 || limit > cap) limit = cap;
+    }
+    if (limit < (256ull << 20)) limit = 0;
+    best.memLimit = limit;
+    Log(dir, "using GPU " + std::to_string(best.index)
+        + " CC " + std::to_string(best.ccMajor) + "." + std::to_string(best.ccMinor)
+        + (best.tensor ? " TF32 tensor cores" : " no TF32")
+        + " mem limit " + std::to_string(best.memLimit >> 20) + " MB");
+}
+
+GpuPick ProbeDriver(const std::wstring& dir) {
+    GpuPick best;
+    HMODULE drv = GetModuleHandleW(L"nvcuda.dll");
+    if (!drv) {
+        drv = LoadLibraryW(L"nvcuda.dll");
+        if (drv) gKeep.push_back(drv);
+    }
+    if (!drv) {
+        Log(dir, "nvcuda.dll was not found, so the GPU was not named.");
+        return best;
+    }
+    using InitFn = int (*)(unsigned);
+    using CountFn = int (*)(int*);
+    using GetFn = int (*)(int*, int);
+    using NameFn = int (*)(char*, int, int);
+    using AttrFn = int (*)(int*, int, int);
+    using TotalFn = int (*)(size_t*, int);
+    using InfoFn = int (*)(size_t*, size_t*);
+    auto cuInit = (InitFn)GetProcAddress(drv, "cuInit");
+    auto cuCount = (CountFn)GetProcAddress(drv, "cuDeviceGetCount");
+    auto cuGet = (GetFn)GetProcAddress(drv, "cuDeviceGet");
+    auto cuName = (NameFn)GetProcAddress(drv, "cuDeviceGetName");
+    auto cuAttr = (AttrFn)GetProcAddress(drv, "cuDeviceGetAttribute");
+    auto cuTotal = (TotalFn)GetProcAddress(drv, "cuDeviceTotalMem_v2");
+    if (!cuTotal) cuTotal = (TotalFn)GetProcAddress(drv, "cuDeviceTotalMem");
+    auto cuInfo = (InfoFn)GetProcAddress(drv, "cuMemGetInfo_v2");
+    if (!cuInfo) cuInfo = (InfoFn)GetProcAddress(drv, "cuMemGetInfo");
+    if (!cuInit || !cuCount || !cuGet || !cuName || !cuAttr) {
+        Log(dir, "nvcuda.dll is missing device queries.");
+        return best;
+    }
+    if (cuInit(0) != 0) {
+        Log(dir, "cuInit failed.");
+        return best;
+    }
+    int count = 0;
+    if (cuCount(&count) != 0 || count < 1) {
+        Log(dir, "cuDeviceGetCount failed.");
+        return best;
+    }
+    if (count > 8) count = 8;
+    int bestScore = -1;
+    for (int i = 0; i < count; i++) {
+        int dev = 0, ccMaj = 0, ccMin = 0;
+        if (cuGet(&dev, i) != 0) continue;
+        if (cuAttr(&ccMaj, 75, dev) != 0 || cuAttr(&ccMin, 76, dev) != 0) continue;
+        size_t totalBytes = 0, freeBytes = 0;
+        if (cuTotal) cuTotal(&totalBytes, dev);
+        size_t infoFree = 0, infoTotal = 0;
+        if (cuInfo && cuInfo(&infoFree, &infoTotal) == 0) {
+            freeBytes = infoFree;
+            if (infoTotal) totalBytes = infoTotal;
+        }
+        char devName[256] = {};
+        cuName(devName, 255, dev);
+        Log(dir, "GPU " + std::to_string(i) + ": " + devName
+            + " CC " + std::to_string(ccMaj) + "." + std::to_string(ccMin)
+            + " VRAM " + std::to_string(totalBytes >> 20) + " MB (driver)");
+        int score = ccMaj * 10 + ccMin;
+        if (score > bestScore || (score == bestScore && totalBytes > best.totalB)) {
+            bestScore = score;
+            best.ok = true;
+            best.index = i;
+            best.ccMajor = ccMaj;
+            best.ccMinor = ccMin;
+            best.totalB = totalBytes;
+            best.freeB = freeBytes;
+            best.name = devName;
+            best.tensor = ccMaj >= 8;
+        }
+    }
+    FinishPick(dir, best);
+    return best;
+}
+
 GpuPick ProbeGpu(const std::wstring& dir) {
     GpuPick best;
     if (!gCudart) gCudart = GetModuleHandleW(L"cudart64_13.dll");
     if (!gCudart) {
-        Log(dir, "CUDA runtime was not loaded, so the GPU was not queried.");
-        return best;
+        Log(dir, "CUDA runtime was not loaded. Asking the NVIDIA driver instead.");
+        return ProbeDriver(dir);
     }
+    wchar_t mod[MAX_PATH] = {};
+    GetModuleFileNameW(gCudart, mod, MAX_PATH);
     using GetCountFn = int (*)(int*);
     using SetDevFn = int (*)(int);
     using MemInfoFn = int (*)(size_t*, size_t*);
@@ -256,13 +371,19 @@ GpuPick ProbeGpu(const std::wstring& dir) {
     auto getName = (GetNameFn)GetProcAddress(gCudart, "cudaDeviceGetName");
     auto getAttr = (GetAttrFn)GetProcAddress(gCudart, "cudaDeviceGetAttribute");
     if (!getCount || !setDev || !memInfo || !getName || !getAttr) {
-        Log(dir, "CUDA runtime is missing device queries.");
-        return best;
+        std::string miss;
+        if (!getCount) miss += " cudaGetDeviceCount";
+        if (!setDev) miss += " cudaSetDevice";
+        if (!memInfo) miss += " cudaMemGetInfo";
+        if (!getName) miss += " cudaDeviceGetName";
+        if (!getAttr) miss += " cudaDeviceGetAttribute";
+        Log(dir, "CUDA runtime is missing device queries:" + miss + " in " + Narrow(mod));
+        return ProbeDriver(dir);
     }
     int count = 0;
     if (getCount(&count) != 0 || count < 1) {
-        Log(dir, "cudaGetDeviceCount failed.");
-        return best;
+        Log(dir, "cudaGetDeviceCount failed in " + Narrow(mod) + ". Asking the NVIDIA driver instead.");
+        return ProbeDriver(dir);
     }
     if (count > 8) count = 8;
     int bestScore = -1;
@@ -290,23 +411,9 @@ GpuPick ProbeGpu(const std::wstring& dir) {
             best.tensor = ccMaj >= 8;
         }
     }
-    if (!best.ok) return best;
+    if (!best.ok) return ProbeDriver(dir);
     setDev(best.index);
-    size_t reserve = best.totalB / 8;
-    const size_t twoGb = 2ull << 30;
-    if (reserve < twoGb) reserve = twoGb;
-    size_t limit = best.totalB > reserve ? best.totalB - reserve : 0;
-    const size_t head = 512ull << 20;
-    if (best.freeB > head) {
-        size_t cap = best.freeB - head;
-        if (limit == 0 || limit > cap) limit = cap;
-    }
-    if (limit < (256ull << 20)) limit = 0;
-    best.memLimit = limit;
-    Log(dir, "using GPU " + std::to_string(best.index)
-        + " CC " + std::to_string(best.ccMajor) + "." + std::to_string(best.ccMinor)
-        + (best.tensor ? " TF32 tensor cores" : " no TF32")
-        + " mem limit " + std::to_string(best.memLimit >> 20) + " MB");
+    FinishPick(dir, best);
     return best;
 }
 #endif
@@ -475,8 +582,8 @@ bool RifeStartup(std::string& err) {
 #ifdef _WIN32
     SetDllDirectoryW(dir.c_str());
     bool cudaLoaded = PreloadCuda(dir, cudaWhy);
-    GpuPick pick;
-    if (cudaLoaded) pick = ProbeGpu(dir);
+    GpuPick pick = ProbeGpu(dir);
+    bool dmlOn = false;
     auto note = [&](OrtStatus* st) {
         if (!st) return;
         const char* m = gApi->GetErrorMessage(st);
@@ -514,67 +621,117 @@ bool RifeStartup(std::string& err) {
             + (cudaOpt.tf == "1" ? " TF32" : ""));
         OrtStatus* st = gApi->SessionOptionsAppendExecutionProvider(
             opt, "CUDAExecutionProvider", cudaOpt.keys.data(), cudaOpt.vals.data(), cudaOpt.keys.size());
-        if (!st) { gInfo.cuda = true; cudaWhy.clear(); return; }
+        if (!st) {
+            gInfo.cuda = true;
+            cudaWhy.clear();
+            Log(dir, "CUDAExecutionProvider attached.");
+            return;
+        }
         note(st);
         if (gInfo.cuda) return;
         st = gApi->SessionOptionsAppendExecutionProvider(
             opt, "CUDA", cudaOpt.keys.data(), cudaOpt.vals.data(), cudaOpt.keys.size());
-        if (!st) { gInfo.cuda = true; cudaWhy.clear(); }
-        else note(st);
+        if (!st) {
+            gInfo.cuda = true;
+            cudaWhy.clear();
+            Log(dir, "CUDA provider attached.");
+        } else note(st);
     };
     if (cudaLoaded && pick.tensor) { cudaOpt.build(pick, 2); appendNamed(); }
     if (cudaLoaded && !gInfo.cuda && pick.ok) { cudaOpt.build(pick, 1); appendNamed(); }
     if (cudaLoaded && !gInfo.cuda) { cudaOpt.build(pick, 0); appendNamed(); }
-    if (cudaLoaded && !gInfo.cuda && gApiVersion >= 22 && FileExists(dir + L"onnxruntime_providers_cuda.dll")) {
-        std::wstring dll = dir + L"onnxruntime_providers_cuda.dll";
-        OrtStatus* st = gApi->RegisterExecutionProviderLibrary(gEnv, "cuda_ep", dll.c_str());
-        if (st) note(st);
-        else {
-            gCudaRegistered = true;
-            const OrtEpDevice* const* devices = nullptr;
-            size_t count = 0;
-            st = gApi->GetEpDevices(gEnv, &devices, &count);
-            const OrtEpDevice* chosen = nullptr;
-            if (!st && devices) {
-                for (size_t i = 0; i < count; i++) {
-                    const char* name = gApi->EpDevice_EpName(devices[i]);
-                    if (name && std::strstr(name, "CUDA")) { chosen = devices[i]; break; }
-                }
-            } else note(st);
-            if (chosen) {
-                const char* const* k = cudaOpt.keys.empty() ? nullptr : cudaOpt.keys.data();
-                const char* const* v = cudaOpt.vals.empty() ? nullptr : cudaOpt.vals.data();
-                st = gApi->SessionOptionsAppendExecutionProvider_V2(
-                    opt, gEnv, &chosen, 1, k, v, cudaOpt.keys.size());
-                if (!st) { gInfo.cuda = true; cudaWhy.clear(); }
-                else note(st);
-            } else if (cudaWhy.empty()) cudaWhy = "CUDA provider loaded but no GPU device was found";
+    if (!gInfo.cuda && gApiVersion >= 22) {
+        std::wstring plugin = dir + L"onnxruntime_providers_cuda.dll";
+        if (!FileExists(plugin)) {
+            Log(dir, "onnxruntime_providers_cuda.dll is not next to the program.");
+        } else if (cudaOpt.keys.empty()) {
+            cudaOpt.build(pick, 0);
         }
-    }
-    if (cudaLoaded && !gInfo.cuda) {
-        using AppendCuda = OrtStatus*(ORT_API_CALL*)(OrtSessionOptions*, int);
-        auto appendCuda = (AppendCuda)GetProcAddress(gOrt, "OrtSessionOptionsAppendExecutionProvider_CUDA");
-        if (appendCuda) {
-            OrtStatus* cst = appendCuda(opt, pick.ok ? pick.index : 0);
-            gInfo.cuda = cst == nullptr;
-            if (cst) {
-                if (cudaWhy.empty()) cudaWhy = gApi->GetErrorMessage(cst);
-                gApi->ReleaseStatus(cst);
+        if (FileExists(plugin) && !gInfo.cuda) {
+            Log(dir, "Registering onnxruntime_providers_cuda.dll");
+            OrtStatus* st = gApi->RegisterExecutionProviderLibrary(gEnv, "cuda_ep", plugin.c_str());
+            if (st) note(st);
+            else {
+                gCudaRegistered = true;
+                Log(dir, "CUDA plugin registered.");
+                const OrtEpDevice* const* devices = nullptr;
+                size_t count = 0;
+                st = gApi->GetEpDevices(gEnv, &devices, &count);
+                const OrtEpDevice* chosen = nullptr;
+                if (!st && devices) {
+                    for (size_t i = 0; i < count; i++) {
+                        const char* name = gApi->EpDevice_EpName(devices[i]);
+                        Log(dir, std::string("provider device: ") + (name ? name : "(unnamed)"));
+                        if (!chosen && name && std::strstr(name, "CUDA")) chosen = devices[i];
+                    }
+                } else note(st);
+                if (chosen) {
+                    const char* const* k = cudaOpt.keys.empty() ? nullptr : cudaOpt.keys.data();
+                    const char* const* v = cudaOpt.vals.empty() ? nullptr : cudaOpt.vals.data();
+                    st = gApi->SessionOptionsAppendExecutionProvider_V2(
+                        opt, gEnv, &chosen, 1, k, v, cudaOpt.keys.size());
+                    if (!st) {
+                        gInfo.cuda = true;
+                        cudaWhy.clear();
+                        Log(dir, "CUDA plugin attached.");
+                    } else note(st);
+                } else {
+                    Log(dir, "CUDA plugin registered but no CUDA device was listed.");
+                    if (cudaWhy.empty()) cudaWhy = "CUDA provider loaded but no GPU device was found";
+                }
             }
         }
     }
+    if (!gInfo.cuda) {
+        bool namedMissing = cudaWhy.find("Unknown provider") != std::string::npos;
+        using AppendCuda = OrtStatus*(ORT_API_CALL*)(OrtSessionOptions*, int);
+        auto appendCuda = (AppendCuda)GetProcAddress(gOrt, "OrtSessionOptionsAppendExecutionProvider_CUDA");
+        if (namedMissing) {
+            Log(dir, "Skipping legacy CUDA append because this DLL has no CUDA provider.");
+        } else if (!appendCuda) {
+            Log(dir, "OrtSessionOptionsAppendExecutionProvider_CUDA is not in onnxruntime.dll.");
+        } else {
+            OrtStatus* cst = appendCuda(opt, pick.ok ? pick.index : 0);
+            if (cst) {
+                if (cudaWhy.empty()) cudaWhy = gApi->GetErrorMessage(cst);
+                Log(dir, std::string("Legacy CUDA append failed: ") + (gApi->GetErrorMessage(cst) ? gApi->GetErrorMessage(cst) : "failed"));
+                gApi->ReleaseStatus(cst);
+            } else {
+                gInfo.cuda = true;
+                cudaWhy.clear();
+                Log(dir, "Legacy CUDA append attached.");
+            }
+        }
+    }
+    if (!gInfo.cuda && gApiVersion >= 14) {
+        Log(dir, "CUDA is not in this onnxruntime.dll. Trying DirectML.");
+        const char* dk = "device_id";
+        const char* dv = "0";
+        OrtStatus* st = gApi->SessionOptionsAppendExecutionProvider(opt, "DML", &dk, &dv, 1);
+        if (st) {
+            note(st);
+            st = gApi->SessionOptionsAppendExecutionProvider(opt, "DmlExecutionProvider", &dk, &dv, 1);
+            if (st) note(st);
+            else dmlOn = true;
+        } else dmlOn = true;
+        if (dmlOn) {
+            gInfo.cuda = true;
+            Log(dir, "DirectML provider attached.");
+        } else Log(dir, "DirectML was not attached. RIFE stays on CPU.");
+    }
 #endif
-    std::string gpuWhere = gInfo.cuda ? "RIFE on GPU" : "RIFE on CPU. See rife.log";
+    std::string how = dmlOn ? "DirectML" : (gInfo.cuda ? "CUDA" : "");
+    std::string gpuWhere = how.empty() ? "RIFE on CPU. See rife.log" : "RIFE on " + how;
 #ifdef _WIN32
-    if (gInfo.cuda && pick.ok) {
+    if (!how.empty() && pick.ok) {
         std::string n = pick.name.empty() ? "GPU" : pick.name;
         const std::string cut = "NVIDIA GeForce ";
         if (n.compare(0, cut.size(), cut) == 0) n = n.substr(cut.size());
-        gpuWhere = "RIFE on GPU | " + n
+        gpuWhere = "RIFE on " + how + " | " + n
             + " | CC " + std::to_string(pick.ccMajor) + "." + std::to_string(pick.ccMinor);
         if (pick.totalB)
             gpuWhere += " | " + std::to_string((unsigned)((pick.totalB + (1ull << 29)) >> 30)) + "GB";
-        if (pick.tensor) gpuWhere += " | TF32";
+        if (!dmlOn && pick.tensor) gpuWhere += " | TF32";
     }
 #endif
     OrtStatus* created = gApi->CreateSession(gEnv, model.c_str(), opt, &gSession);
