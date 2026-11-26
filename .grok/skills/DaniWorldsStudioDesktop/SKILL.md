@@ -502,7 +502,9 @@ Other res values 0–4 are 720 / 1080 / 1440 / 2160 / 4320. 16:9 widths
 `ExportSession::Begin(out, ew, eh, fps, exRife, exSubMode != 1)`.
 `exOutKind` 0 is that video export. 1 is audio only: `BeginMp3` writes the
 timeline mix (`MixTimeline`, fades and transition crossfade included) as
-MP3, 48 kHz stereo, 192 kbps. No picture and no subtitles. Do not renumber
+MP3, 48 kHz stereo, 192 kbps. No picture and no subtitles. Do not read
+`AVCodec::sample_fmts`; this FFmpeg removed it. Try `S16P`, then `FLTP`,
+then `S16` with `avcodec_open2`. Do not renumber
 `exRes` or `exFpsIdx`.
 
 Phases:

@@ -3049,49 +3049,35 @@ bool ExportSession::BeginMp3(const std::string& outPath) {
         previewStatus = status;
         return false;
     }
-    const AVCodec* acodec = avcodec_find_encoder_by_name("libmp3lame");
-    if (!acodec) acodec = avcodec_find_encoder_by_name("mp3_mf");
-    if (!acodec) acodec = avcodec_find_encoder_by_name("libshine");
-    if (!acodec) acodec = avcodec_find_encoder(AV_CODEC_ID_MP3);
-    if (!acodec) {
-        status = "MP3 encoder not found";
-        previewStatus = status;
-        return false;
-    }
     if (avformat_alloc_output_context2(&fmt, nullptr, "mp3", path.c_str()) < 0 || !fmt) {
         status = "Cannot create mp3";
         previewStatus = status;
         CloseAll();
         return false;
     }
-    AVSampleFormat want = acodec->sample_fmts ? acodec->sample_fmts[0] : AV_SAMPLE_FMT_FLTP;
-    bool gotS16p = false, gotFltp = false, gotS16 = false;
-    if (acodec->sample_fmts) {
-        for (const AVSampleFormat* f = acodec->sample_fmts; *f != AV_SAMPLE_FMT_NONE; ++f) {
-            if (*f == AV_SAMPLE_FMT_S16P) gotS16p = true;
-            else if (*f == AV_SAMPLE_FMT_FLTP) gotFltp = true;
-            else if (*f == AV_SAMPLE_FMT_S16) gotS16 = true;
+    const char* names[] = {"libmp3lame", "mp3_mf", "libshine", nullptr};
+    const AVSampleFormat tries[] = {AV_SAMPLE_FMT_S16P, AV_SAMPLE_FMT_FLTP, AV_SAMPLE_FMT_S16};
+    bool saw = false;
+    for (int n = 0; n < 4 && !actx; n++) {
+        const AVCodec* c = names[n] ? avcodec_find_encoder_by_name(names[n]) : avcodec_find_encoder(AV_CODEC_ID_MP3);
+        if (!c) continue;
+        saw = true;
+        for (int i = 0; i < 3 && !actx; i++) {
+            AVCodecContext* tryA = avcodec_alloc_context3(c);
+            if (!tryA) continue;
+            tryA->sample_rate = 48000;
+            tryA->bit_rate = 192000;
+            tryA->sample_fmt = tries[i];
+            tryA->time_base = AVRational{1, 48000};
+            av_channel_layout_default(&tryA->ch_layout, 2);
+            if (fmt->oformat->flags & AVFMT_GLOBALHEADER)
+                tryA->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+            if (avcodec_open2(tryA, c, nullptr) >= 0) actx = tryA;
+            else avcodec_free_context(&tryA);
         }
     }
-    if (gotS16p) want = AV_SAMPLE_FMT_S16P;
-    else if (gotFltp) want = AV_SAMPLE_FMT_FLTP;
-    else if (gotS16) want = AV_SAMPLE_FMT_S16;
-    actx = avcodec_alloc_context3(acodec);
     if (!actx) {
-        status = "Cannot open MP3 encoder";
-        previewStatus = status;
-        CloseAll();
-        return false;
-    }
-    actx->sample_rate = 48000;
-    actx->bit_rate = 192000;
-    actx->sample_fmt = want;
-    actx->time_base = AVRational{1, 48000};
-    av_channel_layout_default(&actx->ch_layout, 2);
-    if (fmt->oformat->flags & AVFMT_GLOBALHEADER)
-        actx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
-    if (avcodec_open2(actx, acodec, nullptr) < 0) {
-        status = "Cannot open MP3 encoder";
+        status = saw ? "Cannot open MP3 encoder" : "MP3 encoder not found";
         previewStatus = status;
         CloseAll();
         return false;
