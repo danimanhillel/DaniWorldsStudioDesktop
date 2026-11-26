@@ -35,6 +35,10 @@ ripple insert, or panels-above-timeline.
   until the arrow in the middle of the clip; click again to close it. The
   zoom fader sits on the right, next to the aspect combo. Do not bring the
   transition menu back. Do not restore the inverted opacity ramp.
+- Overlay effects stay append-only. Zoom In and Zoom Out are kinds 3 and 4.
+  Dust, Cassette, Frame, Film Dust, Retro Dust, Old Film, and Record are
+  19–25 (shader in preview, `FilmGrade` on export). The Media, Effects, and
+  Solids tabs stay pinned; only the cards under them scroll.
 - Preview keeps more seconds ahead (small clips 14s, large clips 9s / 11s
   source). An empty click unselects only when more than one object is
   selected. Dropping an effect does not open its side panel.

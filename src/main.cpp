@@ -3712,6 +3712,13 @@ static ImU32 FxLaneColor(int kind) {
     case 16: return IM_COL32(110, 110, 110, 235);
     case 17: return IM_COL32(60, 150, 90, 235);
     case 18: return IM_COL32(190, 100, 40, 235);
+    case 19: return IM_COL32(150, 150, 150, 235);
+    case 20: return IM_COL32(140, 90, 50, 235);
+    case 21: return IM_COL32(36, 36, 42, 235);
+    case 22: return IM_COL32(170, 160, 140, 235);
+    case 23: return IM_COL32(176, 110, 70, 235);
+    case 24: return IM_COL32(150, 110, 60, 235);
+    case 25: return IM_COL32(40, 32, 28, 235);
     default: return IM_COL32(140, 70, 110, 235);
     }
 }
@@ -3823,6 +3830,46 @@ static void DrawFxIcon(ImDrawList* dl, ImVec2 a, ImVec2 b, int kind) {
         dl->AddRectFilled(ImVec2(c.x - w * 0.5f, c.y - h * 0.45f), ImVec2(c.x + w * 0.5f, c.y + h * 0.45f), IM_COL32(40, 24, 18, 255), 2.0f);
         float u = std::fmod(t * 0.25f, 1.0f);
         dl->AddCircleFilled(ImVec2(c.x - w * 0.4f + u * w * 0.8f, c.y), h * 0.28f, IM_COL32(255, 140, 50, 180), 16);
+    } else if (kind == 19) {
+        dl->AddRectFilled(ImVec2(c.x - w * 0.5f, c.y - h * 0.45f), ImVec2(c.x + w * 0.5f, c.y + h * 0.45f), IM_COL32(28, 28, 32, 255), 2.0f);
+        for (int i = 0; i < 8; i++) {
+            float u = std::fmod(t * 0.15f + i * 0.17f, 1.0f);
+            float v = std::fmod(i * 0.37f + t * 0.05f, 1.0f);
+            dl->AddCircleFilled(ImVec2(c.x - w * 0.45f + u * w * 0.9f, c.y - h * 0.4f + v * h * 0.8f), 1.4f + (i % 3), IM_COL32(230, 226, 210, 200));
+        }
+    } else if (kind == 20) {
+        ImVec2 p0(c.x - w * 0.5f, c.y - h * 0.28f);
+        ImVec2 p1(c.x + w * 0.5f, c.y + h * 0.28f);
+        dl->AddRectFilled(p0, p1, IM_COL32(92, 58, 32, 255), 3.0f);
+        dl->AddCircleFilled(ImVec2(c.x - w * 0.24f, c.y), h * 0.22f, IM_COL32(210, 170, 90, 255), 16);
+        dl->AddCircleFilled(ImVec2(c.x + w * 0.24f, c.y), h * 0.22f, IM_COL32(210, 170, 90, 255), 16);
+        dl->AddCircleFilled(ImVec2(c.x - w * 0.24f, c.y), h * 0.07f, IM_COL32(40, 28, 18, 255), 10);
+        dl->AddCircleFilled(ImVec2(c.x + w * 0.24f, c.y), h * 0.07f, IM_COL32(40, 28, 18, 255), 10);
+    } else if (kind == 21) {
+        ImVec2 p0(c.x - w * 0.5f, c.y - h * 0.45f);
+        ImVec2 p1(c.x + w * 0.5f, c.y + h * 0.45f);
+        dl->AddRectFilled(p0, p1, IM_COL32(18, 18, 20, 255), 2.0f);
+        dl->AddRectFilled(ImVec2(p0.x + w * 0.16f, p0.y + 3), ImVec2(p1.x - w * 0.16f, p1.y - 3), IM_COL32(70, 78, 90, 255), 1.0f);
+        for (int i = 0; i < 4; i++) {
+            float y = p0.y + 4.0f + i * ((p1.y - p0.y - 8.0f) / 4.0f);
+            dl->AddRectFilled(ImVec2(p0.x + 3, y), ImVec2(p0.x + w * 0.10f, y + 4.0f), IM_COL32(210, 206, 190, 230));
+            dl->AddRectFilled(ImVec2(p1.x - w * 0.10f, y), ImVec2(p1.x - 3, y + 4.0f), IM_COL32(210, 206, 190, 230));
+        }
+    } else if (kind == 22 || kind == 23 || kind == 24) {
+        ImU32 base = kind == 23 ? IM_COL32(150, 90, 55, 255) : (kind == 24 ? IM_COL32(130, 96, 52, 255) : IM_COL32(50, 48, 46, 255));
+        dl->AddRectFilled(ImVec2(c.x - w * 0.5f, c.y - h * 0.45f), ImVec2(c.x + w * 0.5f, c.y + h * 0.45f), base, 2.0f);
+        float s = std::fmod(t * 0.4f, 1.0f);
+        dl->AddLine(ImVec2(c.x - w * 0.35f + s * w * 0.15f, c.y - h * 0.45f), ImVec2(c.x - w * 0.32f + s * w * 0.15f, c.y + h * 0.45f), IM_COL32(240, 236, 220, 180), 1.2f);
+        for (int i = 0; i < 6; i++) {
+            float u = std::fmod(i * 0.19f + t * 0.08f, 1.0f);
+            float v = std::fmod(i * 0.41f, 1.0f);
+            dl->AddCircleFilled(ImVec2(c.x - w * 0.42f + u * w * 0.84f, c.y - h * 0.38f + v * h * 0.76f), 1.3f, IM_COL32(245, 240, 230, 210));
+        }
+    } else if (kind == 25) {
+        dl->AddCircleFilled(c, h * 0.42f, IM_COL32(28, 22, 18, 255), 24);
+        dl->AddCircle(c, h * 0.30f, IM_COL32(180, 140, 70, 200), 20, 1.2f);
+        dl->AddCircle(c, h * 0.18f, IM_COL32(180, 140, 70, 160), 16, 1.0f);
+        dl->AddCircleFilled(c, h * 0.07f, IM_COL32(210, 180, 110, 255), 12);
     } else {
         quad(c, w * 0.7f, h * 0.7f, 0, IM_COL32(120, 120, 120, 255));
     }
@@ -8267,9 +8314,10 @@ int main(int argc, char* argv[]) {
         float topH = availY - tlH - 4.0f;
         if (topH < 220.0f) topH = 220.0f;
 
-        ImGui::BeginChild("Media", ImVec2(io.DisplaySize.x * 0.26f, topH), true);
+        ImGui::BeginChild("Media", ImVec2(io.DisplaySize.x * 0.26f, topH), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
         if (ImGui::BeginTabBar("LibraryTabs")) {
         if (ImGui::BeginTabItem("Media")) {
+        ImGui::BeginChild("libmedia", ImVec2(0, 0), false);
         ImVec2 mediaClip0 = ImGui::GetWindowPos();
         ImVec2 mediaClip1(mediaClip0.x + ImGui::GetWindowSize().x, mediaClip0.y + ImGui::GetWindowSize().y);
         float gap = 6.0f;
@@ -8338,17 +8386,26 @@ int main(int argc, char* argv[]) {
             }
             ImGui::PopID();
         }
+        ImGui::EndChild();
         ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("Effects")) {
             ImGui::TextDisabled("Drag onto the FX lane");
+            ImGui::BeginChild("libfx", ImVec2(0, 0), false);
             ImVec2 mediaClip0 = ImGui::GetWindowPos();
             ImVec2 mediaClip1(mediaClip0.x + ImGui::GetWindowSize().x, mediaClip0.y + ImGui::GetWindowSize().y);
             float gap = 6.0f;
             float cellW = std::max(70.0f, (ImGui::GetContentRegionAvail().x - gap * 2.0f) / 3.0f);
             float thumbH = cellW * 9.0f / 16.0f;
-            for (int i = 0; i < OverlayKindCount(); i++) {
-                if (i % 3 != 0) ImGui::SameLine(0, gap);
+            static const int fxOrder[] = {
+                19, 20, 21, 22, 23, 24, 25, 3, 4,
+                0, 1, 2, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18
+            };
+            int nOrder = (int)(sizeof(fxOrder) / sizeof(fxOrder[0]));
+            int nKind = OverlayKindCount();
+            for (int slot = 0; slot < nKind; slot++) {
+                int i = slot < nOrder ? fxOrder[slot] : slot;
+                if (slot % 3 != 0) ImGui::SameLine(0, gap);
                 ImGui::PushID(1000 + i);
                 ImGui::BeginGroup();
                 ImGui::InvisibleButton("##fxcard", ImVec2(cellW, thumbH));
@@ -8369,11 +8426,13 @@ int main(int argc, char* argv[]) {
                 }
                 ImGui::PopID();
             }
+            ImGui::EndChild();
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("Solids")) {
             EnsureSolidThumbs();
             ImGui::TextDisabled("Drag onto a video track");
+            ImGui::BeginChild("libsolids", ImVec2(0, 0), false);
             float gap = 6.0f;
             float cellW = std::max(70.0f, (ImGui::GetContentRegionAvail().x - gap * 2.0f) / 3.0f);
             float thumbH = cellW * 9.0f / 16.0f;
@@ -8396,6 +8455,7 @@ int main(int argc, char* argv[]) {
                 }
                 ImGui::PopID();
             }
+            ImGui::EndChild();
             ImGui::EndTabItem();
         }
         ImGui::EndTabBar();

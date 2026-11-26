@@ -147,6 +147,14 @@ In order, they asked for and accepted:
     until the arrow in the middle of that clip is clicked. Tracks grow
     only while a strip on them is open, and the timeline scrolls vertically.
     The zoom fader sits on the right, immediately left of the aspect combo.
+    The Effects library is the overlay set dragged onto the FX lane. Kinds
+    stay append-only (`OverlayKindCount` is 26). 3 and 4 are already Zoom In
+    and Zoom Out. 19–25 are Dust, Cassette, Frame, Film Dust, Retro Dust,
+    Old Film, Record. Preview is the GL shader; export is `FilmGrade` in
+    `OverlayStamp`. Do not renumber kinds. The library grid shows 19–25,
+    then Zoom In / Zoom Out, then the older effects. The Media / Effects /
+    Solids tab bar does not scroll. Each tab's cards sit in their own child
+    (`libmedia`, `libfx`, `libsolids`).
 
 They build on Windows themselves. The Linux sandbox has no MSVC. After an
 exe change, the reply ends with `taskkill`, `git pull`, and

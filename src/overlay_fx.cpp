@@ -15,7 +15,7 @@ void OverlayClear() {
     gOverlaySel = -1;
 }
 
-int OverlayKindCount() { return 19; }
+int OverlayKindCount() { return 26; }
 
 const char* OverlayKindName(int kind) {
     switch (kind) {
@@ -38,6 +38,13 @@ const char* OverlayKindName(int kind) {
     case 16: return "Mono";
     case 17: return "Fisheye";
     case 18: return "Light Leak";
+    case 19: return "Dust";
+    case 20: return "Cassette";
+    case 21: return "Frame";
+    case 22: return "Film Dust";
+    case 23: return "Retro Dust";
+    case 24: return "Old Film";
+    case 25: return "Record";
     default: return "Effect";
     }
 }
@@ -203,6 +210,16 @@ static FxEval EvalFx(const OverlayFx& o, float time, float shortSide) {
         e.vhs = 1;
         float n = Hashf(std::floor(time * 12.0f) + 4.0f);
         e.shiftY += (n - 0.5f) * amount * 0.012f;
+    } else if (o.kind == 20) {
+        float n = Hashf(std::floor(time * 18.0f) + 2.2f);
+        e.shiftX += (n - 0.5f) * amount * 0.010f;
+    } else if (o.kind == 21 || o.kind == 24) {
+        float bucket = std::floor(time * (o.kind == 24 ? 12.0f : 8.0f));
+        float n1 = Hashf(bucket + 2.1f);
+        float n2 = Hashf(bucket + 6.7f);
+        float amp = amount * (o.kind == 24 ? 0.010f : 0.004f);
+        e.shiftX += (n1 - 0.5f) * 2.0f * amp;
+        e.shiftY += (n2 - 0.5f) * 2.0f * amp;
     }
     return e;
 }
@@ -287,6 +304,7 @@ static bool EnsureFxShader() {
         "uniform vec2 texel;\n"
         "uniform vec2 shift;\n"
         "uniform float rot, scale, pass, radius, matrix, vhs, opacity, amount, time, mode, dir;\n"
+        "float hn(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }\n"
         "void main() {\n"
         "  if (pass > 0.5) {\n"
         "    vec2 step = pass < 1.5 ? vec2(texel.x, 0.0) : vec2(0.0, texel.y);\n"
@@ -395,6 +413,83 @@ static bool EnsureFxShader() {
         "      float ld = length((src - lc) * vec2(0.65, 1.25));\n"
         "      float leak = exp(-ld * ld * mix(6.0, 2.2, amount));\n"
         "      col += vec3(1.0, 0.42, 0.10) * leak * (0.25 + amount * 0.7);\n"
+        "    }\n"
+        "    if (mode > 18.5 && mode < 19.5) {\n"
+        "      float tq = floor(time * 12.0);\n"
+        "      vec2 g = src * vec2(48.0, 28.0) + vec2(tq * 0.37, tq * 0.11);\n"
+        "      vec2 f = fract(g) - 0.5;\n"
+        "      float n = hn(floor(g) + vec2(tq, 0.0));\n"
+        "      float spec = smoothstep(0.975, 0.995, n) * smoothstep(0.22, 0.02, length(f));\n"
+        "      vec2 bg = src * vec2(9.0, 6.0) + vec2(time * 0.02, time * 0.01);\n"
+        "      float big = hn(floor(src * vec2(9.0, 6.0)) + vec2(0.0, tq * 0.15));\n"
+        "      float mote = smoothstep(0.92, 0.98, big) * smoothstep(0.45, 0.05, length(fract(bg) - 0.5));\n"
+        "      col += vec3(0.85, 0.82, 0.75) * spec * (0.25 + amount * 0.9);\n"
+        "      col = mix(col, col * 0.72 + vec3(0.55, 0.50, 0.42), mote * amount * 0.55);\n"
+        "    }\n"
+        "    if (mode > 19.5 && mode < 20.5) {\n"
+        "      float wob = sin(src.y * 40.0 + time * 9.0) * amount * 0.004;\n"
+        "      vec2 tv = vec2(clamp(src.x + wob, 0.0, 1.0), 1.0 - src.y);\n"
+        "      float shiftPx = (1.0 + amount * 3.0) * texel.x;\n"
+        "      col.r = mix(col.r, texture2D(tex, tv + vec2(shiftPx, 0.0)).r, 0.65);\n"
+        "      col.b = mix(col.b, texture2D(tex, tv - vec2(shiftPx, 0.0)).b, 0.65);\n"
+        "      col *= 0.94 + 0.06 * sin(gl_FragCoord.y * 2.4);\n"
+        "      float l = dot(col, vec3(0.299, 0.587, 0.114));\n"
+        "      col = mix(vec3(l), col, 0.55);\n"
+        "      col = col * (0.92 - amount * 0.08) + vec3(0.08, 0.045, 0.02);\n"
+        "      if (abs(src.y - fract(time * 0.22)) < 0.008) col += vec3(0.15, 0.10, 0.06) * amount;\n"
+        "    }\n"
+        "    if (mode > 20.5 && mode < 21.5) {\n"
+        "      float sideL = 1.0 - smoothstep(0.045, 0.062, src.x);\n"
+        "      float sideR = smoothstep(0.938, 0.955, src.x);\n"
+        "      float side = max(sideL, sideR);\n"
+        "      float row = fract(src.y * 11.0);\n"
+        "      float holeY = (row >= 0.30 && row <= 0.70) ? 1.0 : 0.0;\n"
+        "      float holeL = (src.x >= 0.010 && src.x <= 0.046) ? 1.0 : 0.0;\n"
+        "      float holeR = (src.x >= 0.954 && src.x <= 0.990) ? 1.0 : 0.0;\n"
+        "      float hole = holeY * max(holeL, holeR);\n"
+        "      col = mix(col, vec3(0.02, 0.015, 0.012), side * (0.55 + amount * 0.45));\n"
+        "      col = mix(col, vec3(0.82, 0.80, 0.74), hole);\n"
+        "    }\n"
+        "    if (mode > 21.5 && mode < 24.5) {\n"
+        "      float tq = floor(time * 8.0);\n"
+        "      float s1 = hn(vec2(tq, 1.7));\n"
+        "      float s2 = hn(vec2(tq, 9.2));\n"
+        "      float sc = smoothstep(0.0015, 0.0, abs(src.x - s1)) * (hn(vec2(tq, 3.0)) > 0.15 ? 1.0 : 0.0);\n"
+        "      sc += smoothstep(0.0008, 0.0, abs(src.x - s2)) * (hn(vec2(floor(src.y * 30.0), tq)) < 0.70 ? 1.0 : 0.0);\n"
+        "      float scratchGain = mode < 22.5 ? (0.35 + amount * 0.65) : (mode < 23.5 ? (0.20 + amount * 0.35) : (0.45 + amount * 0.55));\n"
+        "      if (mode > 22.5 && mode < 23.5) {\n"
+        "        float l = dot(col, vec3(0.299, 0.587, 0.114));\n"
+        "        vec3 faded = vec3(l * 1.05 + 0.06, l * 0.78 + 0.05, l * 0.62 + 0.08);\n"
+        "        col = mix(col, faded, 0.35 + amount * 0.50);\n"
+        "        col = col * 0.90 + vec3(0.06, 0.04, 0.05);\n"
+        "        float vig = smoothstep(0.35, 0.85, distance(src, vec2(0.5)));\n"
+        "        col *= 1.0 - vig * (0.15 + amount * 0.35);\n"
+        "      }\n"
+        "      if (mode > 23.5) {\n"
+        "        float l = dot(col, vec3(0.299, 0.587, 0.114));\n"
+        "        col = mix(col, vec3(l * 1.05, l * 0.82, l * 0.55), 0.55 + amount * 0.40);\n"
+        "        col *= 0.86 + 0.14 * hn(vec2(floor(time * 24.0), 4.4));\n"
+        "        float vig = smoothstep(0.25, 0.82, distance(src, vec2(0.5)));\n"
+        "        col *= 1.0 - vig * (0.25 + amount * 0.55);\n"
+        "      }\n"
+        "      col = mix(col, vec3(0.92, 0.90, 0.86), clamp(sc, 0.0, 1.0) * scratchGain);\n"
+        "      float density = mode < 22.5 ? 0.85 : (mode < 23.5 ? 0.45 : 1.0);\n"
+        "      vec2 dg = src * vec2(36.0, 22.0) + vec2(tq * 0.21, tq * 0.07);\n"
+        "      float dn = hn(floor(dg) + vec2(0.0, tq));\n"
+        "      float thresh = 0.992 - density * 0.03;\n"
+        "      float spec = smoothstep(thresh, thresh + 0.012, dn) * smoothstep(0.28, 0.0, length(fract(dg) - 0.5));\n"
+        "      col = mix(col, vec3(1.0, 0.96, 0.90), spec * (0.35 + amount));\n"
+        "      float bn = hn(floor(src * vec2(70.0, 40.0)) + vec2(tq, 0.0));\n"
+        "      col *= 1.0 - smoothstep(0.997, 1.0, bn) * amount * 0.8;\n"
+        "    }\n"
+        "    if (mode > 24.5 && mode < 25.5) {\n"
+        "      float rad = length(src - vec2(0.5));\n"
+        "      float groove = 0.5 + 0.5 * sin(rad * mix(90.0, 220.0, amount) - time * 1.6);\n"
+        "      col *= 1.0 - (0.04 + amount * 0.08) * groove;\n"
+        "      float l = dot(col, vec3(0.299, 0.587, 0.114));\n"
+        "      col = mix(col, vec3(l * 0.95, l * 0.78, l * 0.55), 0.25 + amount * 0.35);\n"
+        "      float hole = 1.0 - smoothstep(0.02, 0.045, rad);\n"
+        "      col = mix(col, vec3(0.08, 0.06, 0.05), hole * 0.85);\n"
         "    }\n"
         "  }\n"
         "  vec3 outc = inside > 0.5 ? col : vec3(0.0);\n"
@@ -654,6 +749,176 @@ static void BoxBlur(const unsigned char* src, unsigned char* dst, int w, int h, 
     }
 }
 
+static float Hash2(float a, float b) {
+    return Fract(std::sin(a * 127.1f + b * 311.7f) * 43758.5453f);
+}
+
+static void FilmGrade(int mode, float amount, float time, float sx, float sy,
+                      int x, int y, int w, int h, const unsigned char* src,
+                      float& r, float& g, float& b) {
+    auto luma = [&]() { return r * 0.299f + g * 0.587f + b * 0.114f; };
+    auto scratchDust = [&](float density, float scratchGain) {
+        float tq = std::floor(time * 8.0f);
+        float s1 = Hash2(tq, 1.7f);
+        float s2 = Hash2(tq, 9.2f);
+        float sc = 0.0f;
+        float d1 = std::fabs(sx - s1);
+        if (d1 < 0.0015f && Hash2(tq, 3.0f) > 0.15f) sc += 1.0f - d1 / 0.0015f;
+        float d2 = std::fabs(sx - s2);
+        if (d2 < 0.0008f && Hash2(std::floor(sy * 30.0f), tq) < 0.70f) sc += 1.0f - d2 / 0.0008f;
+        if (sc > 1.0f) sc = 1.0f;
+        float add = sc * scratchGain;
+        r = r * (1.0f - add) + 0.92f * add;
+        g = g * (1.0f - add) + 0.90f * add;
+        b = b * (1.0f - add) + 0.86f * add;
+        float gx = sx * 36.0f + tq * 0.21f;
+        float gy = sy * 22.0f + tq * 0.07f;
+        float fx = gx - std::floor(gx) - 0.5f;
+        float fy = gy - std::floor(gy) - 0.5f;
+        float n = Hash2(std::floor(gx), std::floor(gy) + tq);
+        float dist = std::sqrt(fx * fx + fy * fy);
+        float thresh = 0.992f - density * 0.03f;
+        float spec = 0.0f;
+        if (n > thresh) spec = std::min(1.0f, (n - thresh) / 0.012f);
+        if (dist >= 0.28f) spec = 0.0f;
+        else spec *= (0.28f - dist) / 0.28f;
+        float spot = spec * (0.35f + amount);
+        r = r * (1.0f - spot) + spot;
+        g = g * (1.0f - spot) + spot * 0.96f;
+        b = b * (1.0f - spot) + spot * 0.90f;
+        float bn = Hash2(std::floor(sx * 70.0f) + tq, std::floor(sy * 40.0f));
+        if (bn > 0.997f) {
+            float dark = std::min(1.0f, (bn - 0.997f) / 0.003f) * amount * 0.8f;
+            r *= 1.0f - dark;
+            g *= 1.0f - dark;
+            b *= 1.0f - dark;
+        }
+    };
+    if (mode == 19) {
+        float tq = std::floor(time * 12.0f);
+        float gx = sx * 48.0f + tq * 0.37f;
+        float gy = sy * 28.0f + tq * 0.11f;
+        float fx = gx - std::floor(gx) - 0.5f;
+        float fy = gy - std::floor(gy) - 0.5f;
+        float n = Hash2(std::floor(gx) + tq, std::floor(gy));
+        float dist = std::sqrt(fx * fx + fy * fy);
+        float spec = 0.0f;
+        if (n > 0.975f) spec = std::min(1.0f, (n - 0.975f) / 0.020f);
+        if (dist >= 0.22f) spec = 0.0f;
+        else spec *= (0.22f - dist) / 0.20f;
+        float bgx = sx * 9.0f + time * 0.02f;
+        float bgy = sy * 6.0f + time * 0.01f;
+        float bfx = bgx - std::floor(bgx) - 0.5f;
+        float bfy = bgy - std::floor(bgy) - 0.5f;
+        float big = Hash2(std::floor(sx * 9.0f), std::floor(sy * 6.0f) + tq * 0.15f);
+        float md = std::sqrt(bfx * bfx + bfy * bfy);
+        float mote = 0.0f;
+        if (big > 0.92f) mote = std::min(1.0f, (big - 0.92f) / 0.06f);
+        if (md >= 0.45f) mote = 0.0f;
+        else mote *= (0.45f - md) / 0.40f;
+        float add = spec * (0.25f + amount * 0.9f);
+        r += 0.85f * add;
+        g += 0.82f * add;
+        b += 0.75f * add;
+        float m = mote * amount * 0.55f;
+        r = r * (1.0f - m) + (r * 0.72f + 0.55f) * m;
+        g = g * (1.0f - m) + (g * 0.72f + 0.50f) * m;
+        b = b * (1.0f - m) + (b * 0.72f + 0.42f) * m;
+    } else if (mode == 20) {
+        float wob = std::sin(sy * 40.0f + time * 9.0f) * amount * 0.004f;
+        float uu = std::clamp(sx + wob, 0.0f, 1.0f);
+        float rr, gg, bb, br, bg, b2;
+        float shift = 1.0f + amount * 3.0f;
+        SampleRGBA(src, w, h, uu * (float)(w - 1) + shift, sy * (float)(h - 1), rr, gg, bb);
+        SampleRGBA(src, w, h, uu * (float)(w - 1) - shift, sy * (float)(h - 1), br, bg, b2);
+        (void)gg; (void)bb; (void)br; (void)bg;
+        r = r * 0.35f + rr * 0.65f;
+        b = b * 0.35f + b2 * 0.65f;
+        float scan = 0.94f + 0.06f * std::sin((float)y * 2.4f);
+        r *= scan; g *= scan; b *= scan;
+        float l = luma();
+        r = l * 0.45f + r * 0.55f;
+        g = l * 0.45f + g * 0.55f;
+        b = l * 0.45f + b * 0.55f;
+        float gain = 0.92f - amount * 0.08f;
+        r = r * gain + 0.08f;
+        g = g * gain + 0.045f;
+        b = b * gain + 0.02f;
+        if (std::fabs(sy - Fract(time * 0.22f)) < 0.008f) {
+            r += 0.15f * amount;
+            g += 0.10f * amount;
+            b += 0.06f * amount;
+        }
+    } else if (mode == 21) {
+        float sideL = sx < 0.045f ? 1.0f : (sx > 0.062f ? 0.0f : (0.062f - sx) / 0.017f);
+        float sideR = sx > 0.955f ? 1.0f : (sx < 0.938f ? 0.0f : (sx - 0.938f) / 0.017f);
+        float side = std::max(sideL, sideR);
+        float row = sy * 11.0f;
+        row -= std::floor(row);
+        float holeY = (row >= 0.30f && row <= 0.70f) ? 1.0f : 0.0f;
+        float holeL = (sx >= 0.010f && sx <= 0.046f) ? 1.0f : 0.0f;
+        float holeR = (sx >= 0.954f && sx <= 0.990f) ? 1.0f : 0.0f;
+        float hole = holeY * std::max(holeL, holeR);
+        float k = side * (0.55f + amount * 0.45f);
+        r = r * (1.0f - k) + 0.02f * k;
+        g = g * (1.0f - k) + 0.015f * k;
+        b = b * (1.0f - k) + 0.012f * k;
+        r = r * (1.0f - hole) + 0.82f * hole;
+        g = g * (1.0f - hole) + 0.80f * hole;
+        b = b * (1.0f - hole) + 0.74f * hole;
+    } else if (mode == 22) {
+        scratchDust(0.85f, 0.35f + amount * 0.65f);
+    } else if (mode == 23) {
+        float l = luma();
+        float k = 0.35f + amount * 0.50f;
+        r = r * (1.0f - k) + (l * 1.05f + 0.06f) * k;
+        g = g * (1.0f - k) + (l * 0.78f + 0.05f) * k;
+        b = b * (1.0f - k) + (l * 0.62f + 0.08f) * k;
+        r = r * 0.90f + 0.06f;
+        g = g * 0.90f + 0.04f;
+        b = b * 0.90f + 0.05f;
+        float dxv = sx - 0.5f, dyv = sy - 0.5f;
+        float dist = std::sqrt(dxv * dxv + dyv * dyv);
+        float vig = dist <= 0.35f ? 0.0f : (dist >= 0.85f ? 1.0f : (dist - 0.35f) / 0.50f);
+        float mul = 1.0f - vig * (0.15f + amount * 0.35f);
+        r *= mul; g *= mul; b *= mul;
+        scratchDust(0.45f, 0.20f + amount * 0.35f);
+    } else if (mode == 24) {
+        float l = luma();
+        float k = 0.55f + amount * 0.40f;
+        r = r * (1.0f - k) + l * 1.05f * k;
+        g = g * (1.0f - k) + l * 0.82f * k;
+        b = b * (1.0f - k) + l * 0.55f * k;
+        float flick = 0.86f + 0.14f * Hash2(std::floor(time * 24.0f), 4.4f);
+        r *= flick; g *= flick; b *= flick;
+        float dxv = sx - 0.5f, dyv = sy - 0.5f;
+        float dist = std::sqrt(dxv * dxv + dyv * dyv);
+        float vig = dist <= 0.25f ? 0.0f : (dist >= 0.82f ? 1.0f : (dist - 0.25f) / 0.57f);
+        float mul = 1.0f - vig * (0.25f + amount * 0.55f);
+        r *= mul; g *= mul; b *= mul;
+        scratchDust(1.0f, 0.45f + amount * 0.55f);
+    } else if (mode == 25) {
+        float dxv = sx - 0.5f, dyv = sy - 0.5f;
+        float rad = std::sqrt(dxv * dxv + dyv * dyv);
+        float groove = 0.5f + 0.5f * std::sin(rad * (90.0f + amount * 130.0f) - time * 1.6f);
+        float gmul = 1.0f - (0.04f + amount * 0.08f) * groove;
+        r *= gmul; g *= gmul; b *= gmul;
+        float l = luma();
+        float k = 0.25f + amount * 0.35f;
+        r = r * (1.0f - k) + l * 0.95f * k;
+        g = g * (1.0f - k) + l * 0.78f * k;
+        b = b * (1.0f - k) + l * 0.55f * k;
+        if (rad < 0.045f) {
+            float hole = rad <= 0.02f ? 1.0f : (0.045f - rad) / 0.025f;
+            hole *= 0.85f;
+            r = r * (1.0f - hole) + 0.08f * hole;
+            g = g * (1.0f - hole) + 0.06f * hole;
+            b = b * (1.0f - hole) + 0.05f * hole;
+        }
+    }
+    (void)x;
+}
+
 void OverlayStamp(unsigned char* canvas, int w, int h, float time) {
     if (!canvas || w < 2 || h < 2) return;
     bool any = false;
@@ -820,6 +1085,8 @@ void OverlayStamp(unsigned char* canvas, int w, int h, float time) {
                         float gain = leak * (0.25f + e.amount * 0.7f);
                         r += gain; g += 0.42f * gain; b += 0.10f * gain;
                     }
+                    if (mode >= 19 && mode <= 25)
+                        FilmGrade(mode, e.amount, time, sx, sy, x, y, w, h, work.data(), r, g, b);
                 }
                 const unsigned char* base = work.data() + ((size_t)y * w + x) * 4;
                 float k = e.opacity;
