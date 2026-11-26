@@ -46,6 +46,9 @@ ripple insert, or panels-above-timeline.
   19–25 (shader in preview, `FilmGrade` on export). The Media, Effects, Solids,
   and Transitions tabs stay pinned; only the cards under them scroll. Effects cards
   show the bundled plate through the real preview shader, not the flat icon.
+  Transition cards play the real effect between the two bundled plates
+  (snow then green), ping-pong over 3s. The orange and blue blocks are only
+  the fallback.
 - RIFE queries the CUDA runtime for the GPU, or the NVIDIA driver if that
   runtime cannot name the card. A 5090 (compute capability 12.0) wins over a
   weaker card. TF32 is enabled from capability 8 up so cuDNN can use tensor

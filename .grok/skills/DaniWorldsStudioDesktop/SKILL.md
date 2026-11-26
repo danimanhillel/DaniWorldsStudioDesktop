@@ -174,7 +174,12 @@ In order, they asked for and accepted:
     bundled plate (`fx_plate.cpp`, the mountain image) through the real
     preview shader (`OverlayPreviewTick`, amount 0.85, ping-pong 3s).
     `DrawFxIcon` is only the fallback if that plate did not upload. Do not
-    put the flat icons back while the plate is there.
+    put the flat icons back while the plate is there. Transition cards play
+    the real effect between two bundled plates (`trans_plates.cpp`): snow is
+    A, green is B, ping-pong over 3s. `DrawTransitionCard` uses `FxEvaluate`
+    (dissolve alpha, wipe clip, zoom UV, dip). The orange and blue blocks
+    are only the fallback if those plates did not upload. Do not put the
+    blocks back while the plates are there.
 
 They build on Windows themselves. The Linux sandbox has no MSVC. After an
 exe change, the reply ends with `taskkill`, `git pull`, and

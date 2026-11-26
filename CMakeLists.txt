@@ -56,6 +56,7 @@ add_executable(DaniWorldsStudioDesktop
     src/effects.cpp
     src/overlay_fx.cpp
     src/fx_plate.cpp
+    src/trans_plates.cpp
     src/rife.cpp
     src/asr.cpp
     ${imgui_SOURCE_DIR}/imgui.cpp

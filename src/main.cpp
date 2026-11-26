@@ -22,6 +22,7 @@
 #include "effects.h"
 #include "overlay_fx.h"
 #include "fx_plate.h"
+#include "trans_plates.h"
 #include "rife.h"
 #include "asr.h"
 
@@ -5377,47 +5378,190 @@ void BlitVideo(ImVec2 p0, ImVec2 p1, GLuint tex, int vw, int vh, ImVec2 clip0, I
     if (graded && pglUseProgram) pglUseProgram(0);
 }
 
+static GLuint gTransTexA = 0;
+static GLuint gTransTexB = 0;
+
+#ifdef _WIN32
+static bool DecodePlateRgba(const unsigned char* bytes, int nbytes, std::vector<unsigned char>& px, int& w, int& h) {
+    px.clear();
+    w = 0;
+    h = 0;
+    if (!bytes || nbytes < 32) return false;
+    HRESULT co = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    bool ownCo = (co == S_OK);
+    HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, (SIZE_T)nbytes);
+    if (!mem) {
+        if (ownCo) CoUninitialize();
+        return false;
+    }
+    void* locked = GlobalLock(mem);
+    if (locked) memcpy(locked, bytes, (size_t)nbytes);
+    GlobalUnlock(mem);
+    IStream* stream = nullptr;
+    if (CreateStreamOnHGlobal(mem, TRUE, &stream) != S_OK) {
+        GlobalFree(mem);
+        if (ownCo) CoUninitialize();
+        return false;
+    }
+    IWICImagingFactory* factory = nullptr;
+    IWICBitmapDecoder* decoder = nullptr;
+    IWICBitmapFrameDecode* frame = nullptr;
+    IWICFormatConverter* conv = nullptr;
+    bool ok = false;
+    HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory));
+    if (SUCCEEDED(hr)) hr = factory->CreateDecoderFromStream(stream, nullptr, WICDecodeMetadataCacheOnLoad, &decoder);
+    if (SUCCEEDED(hr)) hr = decoder->GetFrame(0, &frame);
+    if (SUCCEEDED(hr)) hr = factory->CreateFormatConverter(&conv);
+    if (SUCCEEDED(hr)) {
+        bool bgra = false;
+        hr = conv->Initialize(frame, GUID_WICPixelFormat32bppRGBA, WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom);
+        if (FAILED(hr)) {
+            bgra = true;
+            hr = conv->Initialize(frame, GUID_WICPixelFormat32bppBGRA, WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom);
+        }
+        UINT pw = 0, ph = 0;
+        if (SUCCEEDED(hr)) hr = conv->GetSize(&pw, &ph);
+        if (SUCCEEDED(hr) && pw >= 2 && ph >= 2 && pw <= 4096 && ph <= 4096) {
+            px.resize((size_t)pw * ph * 4);
+            hr = conv->CopyPixels(nullptr, pw * 4, (UINT)px.size(), px.data());
+            if (SUCCEEDED(hr)) {
+                if (bgra) {
+                    for (size_t i = 0; i + 3 < px.size(); i += 4) {
+                        unsigned char tmp = px[i];
+                        px[i] = px[i + 2];
+                        px[i + 2] = tmp;
+                    }
+                }
+                w = (int)pw;
+                h = (int)ph;
+                ok = true;
+            }
+        }
+    }
+    if (conv) conv->Release();
+    if (frame) frame->Release();
+    if (decoder) decoder->Release();
+    if (factory) factory->Release();
+    stream->Release();
+    if (ownCo) CoUninitialize();
+    if (!ok) px.clear();
+    return ok;
+}
+#endif
+
+static void UploadTransTex(GLuint& id, const unsigned char* rgba, int w, int h) {
+    if (!rgba || w < 2 || h < 2) return;
+    if (!id) glGenTextures(1, &id);
+    GLint prev = 0;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &prev);
+    glBindTexture(GL_TEXTURE_2D, id);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    GLint unpack = 4;
+    glGetIntegerv(GL_UNPACK_ALIGNMENT, &unpack);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, unpack);
+    glBindTexture(GL_TEXTURE_2D, (GLuint)prev);
+}
+
+static void EnsureTransPlates() {
+#ifdef _WIN32
+    static int done = 0;
+    if (done) return;
+    done = 1;
+    int na = 0, nb = 0;
+    const unsigned char* ba = TransPlateA(&na);
+    const unsigned char* bb = TransPlateB(&nb);
+    std::vector<unsigned char> pa, pb;
+    int wa = 0, ha = 0, wb = 0, hb = 0;
+    if (!DecodePlateRgba(ba, na, pa, wa, ha)) return;
+    if (!DecodePlateRgba(bb, nb, pb, wb, hb)) return;
+    UploadTransTex(gTransTexA, pa.data(), wa, ha);
+    UploadTransTex(gTransTexB, pb.data(), wb, hb);
+#else
+    (void)0;
+#endif
+}
+
 static void DrawTransitionCard(ImDrawList* dl, ImVec2 p0, ImVec2 p1, const char* id) {
     if (!dl || !id) return;
+    float span = 3.0f;
+    float shown = std::fmod((float)ImGui::GetTime(), span * 2.0f);
+    if (shown < 0.0f) shown += span * 2.0f;
+    if (shown > span) shown = span * 2.0f - shown;
+    float progress = shown / span;
     FxLook look;
-    FxEvaluate(id, 0.42f, look);
-    dl->PushClipRect(p0, p1, true);
-    dl->AddRectFilled(p0, p1, IM_COL32(18, 20, 26, 255), 2.0f);
-    auto box = [&](float sc, ImVec2& a, ImVec2& b) {
-        float cx = (p0.x + p1.x) * 0.5f;
-        float cy = (p0.y + p1.y) * 0.5f;
-        float hw = (p1.x - p0.x) * 0.5f * sc;
-        float hh = (p1.y - p0.y) * 0.5f * sc;
-        a = ImVec2(cx - hw, cy - hh);
-        b = ImVec2(cx + hw, cy + hh);
-    };
-    ImVec2 a0, a1, b0, b1;
-    box(look.scaleA, a0, a1);
-    box(look.scaleB, b0, b1);
+    FxEvaluate(id, progress, look);
     float wb = look.alphaB;
-    if (wb < 0) wb = 0;
-    if (wb > 1) wb = 1;
-    if (look.wipe == 0) {
-        int aa = (int)((1.0f - wb) * 255.0f);
-        if (aa < 0) aa = 0;
-        if (aa > 255) aa = 255;
-        dl->AddRectFilled(a0, a1, IM_COL32(196, 122, 64, aa));
-        int ba = (int)(wb * 255.0f);
-        if (ba > 0) dl->AddRectFilled(b0, b1, IM_COL32(70, 148, 214, ba));
+    if (wb < 0.0f) wb = 0.0f;
+    if (wb > 1.0f) wb = 1.0f;
+    dl->PushClipRect(p0, p1, true);
+    if (gTransTexA && gTransTexB) {
+        auto zoomUv = [](float scale, ImVec2& u0, ImVec2& u1) {
+            if (scale < 1.0f) scale = 1.0f;
+            float half = 0.5f / scale;
+            u0 = ImVec2(0.5f - half, 0.5f - half);
+            u1 = ImVec2(0.5f + half, 0.5f + half);
+        };
+        ImVec2 ua0, ua1, ub0, ub1;
+        zoomUv(look.scaleA, ua0, ua1);
+        zoomUv(look.scaleB, ub0, ub1);
+        ImTextureID texA = (ImTextureID)(intptr_t)gTransTexA;
+        ImTextureID texB = (ImTextureID)(intptr_t)gTransTexB;
+        dl->AddImage(texA, p0, p1, ua0, ua1, IM_COL32_WHITE);
+        if (look.wipe == 0) {
+            int ba = (int)(wb * 255.0f);
+            if (ba > 0) dl->AddImage(texB, p0, p1, ub0, ub1, IM_COL32(255, 255, 255, ba));
+        } else if (wb > 0.001f) {
+            ImVec2 c0 = p0, c1 = p1;
+            if (look.wipe == 1) c1.x = p0.x + (p1.x - p0.x) * wb;
+            else if (look.wipe == 2) c0.x = p1.x - (p1.x - p0.x) * wb;
+            else if (look.wipe == 3) c1.y = p0.y + (p1.y - p0.y) * wb;
+            else c0.y = p1.y - (p1.y - p0.y) * wb;
+            if (c1.x - c0.x >= 1.0f && c1.y - c0.y >= 1.0f) {
+                dl->PushClipRect(c0, c1, true);
+                dl->AddImage(texB, p0, p1, ub0, ub1, IM_COL32_WHITE);
+                dl->PopClipRect();
+            }
+        }
     } else {
-        dl->AddRectFilled(a0, a1, IM_COL32(196, 122, 64, 255));
-        ImVec2 c0 = p0, c1 = p1;
-        if (look.wipe == 1) c1.x = p0.x + (p1.x - p0.x) * wb;
-        else if (look.wipe == 2) c0.x = p1.x - (p1.x - p0.x) * wb;
-        else if (look.wipe == 3) c1.y = p0.y + (p1.y - p0.y) * wb;
-        else c0.y = p1.y - (p1.y - p0.y) * wb;
-        dl->PushClipRect(c0, c1, true);
-        dl->AddRectFilled(b0, b1, IM_COL32(70, 148, 214, 255));
-        dl->PopClipRect();
+        dl->AddRectFilled(p0, p1, IM_COL32(18, 20, 26, 255), 2.0f);
+        auto box = [&](float sc, ImVec2& a, ImVec2& b) {
+            float cx = (p0.x + p1.x) * 0.5f;
+            float cy = (p0.y + p1.y) * 0.5f;
+            float hw = (p1.x - p0.x) * 0.5f * sc;
+            float hh = (p1.y - p0.y) * 0.5f * sc;
+            a = ImVec2(cx - hw, cy - hh);
+            b = ImVec2(cx + hw, cy + hh);
+        };
+        ImVec2 a0, a1, b0, b1;
+        box(look.scaleA, a0, a1);
+        box(look.scaleB, b0, b1);
+        if (look.wipe == 0) {
+            int aa = (int)((1.0f - wb) * 255.0f);
+            if (aa < 0) aa = 0;
+            if (aa > 255) aa = 255;
+            dl->AddRectFilled(a0, a1, IM_COL32(196, 122, 64, aa));
+            int ba = (int)(wb * 255.0f);
+            if (ba > 0) dl->AddRectFilled(b0, b1, IM_COL32(70, 148, 214, ba));
+        } else {
+            dl->AddRectFilled(a0, a1, IM_COL32(196, 122, 64, 255));
+            ImVec2 c0 = p0, c1 = p1;
+            if (look.wipe == 1) c1.x = p0.x + (p1.x - p0.x) * wb;
+            else if (look.wipe == 2) c0.x = p1.x - (p1.x - p0.x) * wb;
+            else if (look.wipe == 3) c1.y = p0.y + (p1.y - p0.y) * wb;
+            else c0.y = p1.y - (p1.y - p0.y) * wb;
+            dl->PushClipRect(c0, c1, true);
+            dl->AddRectFilled(b0, b1, IM_COL32(70, 148, 214, 255));
+            dl->PopClipRect();
+        }
     }
     if (look.dip > 0.001f) {
         float k = look.dip > 1.0f ? 1.0f : look.dip;
-        int a = (int)(k * 220.0f);
+        int a = (int)(k * 255.0f);
         int r = (int)(look.dipR * 255.0f);
         int g = (int)(look.dipG * 255.0f);
         int b = (int)(look.dipB * 255.0f);
@@ -8765,6 +8909,7 @@ int main(int argc, char* argv[]) {
         }
         if (ImGui::BeginTabItem("Transitions")) {
             ImGui::TextDisabled("Select two overlapping clips, then drag");
+            EnsureTransPlates();
             ImGui::BeginChild("libtrans", ImVec2(0, 0), false);
             ImVec2 transClip0 = ImGui::GetWindowPos();
             ImVec2 transClip1(transClip0.x + ImGui::GetWindowSize().x, transClip0.y + ImGui::GetWindowSize().y);
