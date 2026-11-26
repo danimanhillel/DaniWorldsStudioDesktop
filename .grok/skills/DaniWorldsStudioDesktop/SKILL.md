@@ -481,6 +481,9 @@ Phases:
 0. Render the timeline into an mp4 at the chosen export size.
 1. RIFE (`BeginRifePass` / `StepRife`), only if `exRife` and fps is even and `>= 48`.
    50 and 60 still render at half (`fps/2`) and insert one midpoint (`t = 0.5`).
+   72 always turns RIFE on: the movie is rendered at 24, then RIFE inserts two
+   frames (`t = 1/3`, `2/3`). That is the ComfyUI multiplier 3 path. `exFpsIdx`
+   6 is 72. Do not renumber 0–5.
    120 and 240 always turn RIFE on: the movie is rendered at 60, then RIFE
    inserts one frame for 120 (`t = 0.5`) or three for 240 (`t = 0.25`, `0.5`,
    `0.75`). `exFpsIdx` 0–3 stay 24, 30, 50, 60. 4 is 120, 5 is 240. Do not
@@ -513,11 +516,16 @@ option set is rejected, retry with the memory limit, then with `device_id`
 only. The card is written to `rife.log` and to the RIFE status line. Every
 `rife.log` line starts with `YYYY-MM-DD HH:MM:SS`. If the CUDA runtime does
 not export the device queries, the card is read from `nvcuda.dll` instead.
-If this `onnxruntime.dll` has no CUDA provider (the error lists DML and not
-CUDA), RIFE attaches DirectML and the status says `RIFE on DirectML`, not
-`RIFE on GPU`. Do not call that CUDA. Real CUDA still needs the GPU build's
-`onnxruntime.dll`, `onnxruntime_providers_shared.dll`, and
-`onnxruntime_providers_cuda.dll` next to the exe. Do not
+Each in-between frame is the average of `RifeRun(prev, next, t)` and
+`RifeRun(next, prev, 1-t)` (ensemble). Frames are zero-padded to a multiple
+of 64, matching RIFE 4.9. `fast_mode` does nothing on rife49. `scale_factor`
+1 and float32 are what this ONNX already does. The per-block flow ensemble
+inside `rife49.pth` is not in the ONNX graph, so this average is the match
+that the file allows. If this `onnxruntime.dll` has no CUDA provider (the
+error lists DML and not CUDA), RIFE attaches DirectML and the status says
+`RIFE on DirectML`, not `RIFE on GPU`. Do not call that CUDA. Real CUDA still
+needs the GPU build's `onnxruntime.dll`, `onnxruntime_providers_shared.dll`,
+and `onnxruntime_providers_cuda.dll` next to the exe. Do not
 `FreeLibrary` the kept preload module. The build does not
 download the DLL or the model. Do not send guessed ONNX Runtime zip URLs.
 

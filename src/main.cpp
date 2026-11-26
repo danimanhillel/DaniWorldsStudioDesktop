@@ -2829,10 +2829,14 @@ bool ExportSession::Begin(const std::string& outPath, int width, int height, int
     finalPath.clear();
     tempPath.clear();
     bool highFps = framesPerSec == 120 || framesPerSec == 240;
-    if (highFps) useRife = true;
-    if (useRife && (highFps || (framesPerSec >= 48 && (framesPerSec % 2) == 0))) {
+    bool triple = framesPerSec == 72;
+    if (highFps || triple) useRife = true;
+    if (useRife && (highFps || triple || (framesPerSec >= 48 && (framesPerSec % 2) == 0))) {
         outFps = framesPerSec;
-        if (highFps) {
+        if (triple) {
+            baseFps = 24;
+            rifeFactor = 3;
+        } else if (highFps) {
             baseFps = 60;
             rifeFactor = framesPerSec / 60;
         } else {
@@ -9932,25 +9936,30 @@ int main(int argc, char* argv[]) {
             ImGui::SameLine();
             if (ImGui::RadioButton("60", exFpsIdx == 3)) exFpsIdx = 3;
             ImGui::SameLine();
+            if (ImGui::RadioButton("72", exFpsIdx == 6)) exFpsIdx = 6;
+            ImGui::SameLine();
             if (ImGui::RadioButton("120", exFpsIdx == 4)) exFpsIdx = 4;
             ImGui::SameLine();
             if (ImGui::RadioButton("240", exFpsIdx == 5)) exFpsIdx = 5;
             int ew = 0, eh = 0;
-            const int fpsVals[] = {24, 30, 50, 60, 120, 240};
-            int fps = fpsVals[exFpsIdx < 0 || exFpsIdx > 5 ? 1 : exFpsIdx];
+            const int fpsVals[] = {24, 30, 50, 60, 120, 240, 72};
+            int fps = fpsVals[exFpsIdx < 0 || exFpsIdx > 6 ? 1 : exFpsIdx];
             bool highFps = fps >= 120;
-            if (highFps) exRife = true;
+            bool triple = fps == 72;
+            if (highFps || triple) exRife = true;
             ExportDims(exAspect, exRes, ew, eh);
             ImGui::Separator();
             ImGui::Text("Output: %d x %d   @ %d fps", ew, eh, fps);
             if (exRes == 3 || exRes == 4) ImGui::TextDisabled("4K and 8K take a long time.");
-            ImGui::BeginDisabled(highFps);
+            ImGui::BeginDisabled(highFps || triple);
             ImGui::Checkbox("Frame interpolation", &exRife);
             ImGui::EndDisabled();
-            if (highFps)
-                ImGui::TextDisabled("120 and 240 are made with RIFE from a 60 fps render. Subtitles are added after.");
+            if (triple)
+                ImGui::TextDisabled("72 is multiplier 3 from a 24 fps render, ensemble on, like the ComfyUI graph. Subtitles are added after.");
+            else if (highFps)
+                ImGui::TextDisabled("120 and 240 are made with RIFE from a 60 fps render. Ensemble is on. Subtitles are added after.");
             else
-                ImGui::TextDisabled("Renders the movie first, then fills frames on the GPU. 50 or 60 fps. Subtitles are added after.");
+                ImGui::TextDisabled("Renders the movie first, then fills frames on the GPU. Ensemble is on. 50 or 60 fps. Subtitles are added after.");
             ImGui::TextDisabled("%s", RifeProbe().detail.c_str());
             ImGui::Spacing();
             ImGui::TextUnformatted("Subtitles");

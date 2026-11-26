@@ -28,7 +28,7 @@ HMODULE gOrt = nullptr;
 HMODULE gCuda = nullptr;
 HMODULE gCudaShared = nullptr;
 #endif
-std::vector<float> gIn0, gIn1, gTimePlane;
+std::vector<float> gIn0, gIn1, gInSwap, gTimePlane;
 const uint8_t* gLast0 = nullptr;
 const uint8_t* gLast1 = nullptr;
 int gLastW = 0, gLastH = 0;
@@ -438,7 +438,7 @@ void ClearSession() {
     gInfo.cuda = false;
 }
 
-int Pad32(int v) { return (v + 31) & ~31; }
+int Pad64(int v) { return (v + 63) & ~63; }
 
 void ToPlanar(const uint8_t* rgba, int w, int h, int pw, int ph, float* dst, int channelOffset) {
     const float scale = 1.0f / 255.0f;
@@ -446,6 +446,7 @@ void ToPlanar(const uint8_t* rgba, int w, int h, int pw, int ph, float* dst, int
     float* r = dst + (size_t)channelOffset * plane;
     float* gch = r + plane;
     float* b = gch + plane;
+    memset(r, 0, plane * 3 * sizeof(float));
     for (int y = 0; y < h; y++) {
         const uint8_t* row = rgba + ((size_t)y * (size_t)w) * 4;
         float* rr = r + (size_t)y * (size_t)pw;
@@ -457,13 +458,6 @@ void ToPlanar(const uint8_t* rgba, int w, int h, int pw, int ph, float* dst, int
             gg[x] = p[1] * scale;
             bb[x] = p[2] * scale;
         }
-        float er = rr[w - 1], eg = gg[w - 1], eb = bb[w - 1];
-        for (int x = w; x < pw; x++) { rr[x] = er; gg[x] = eg; bb[x] = eb; }
-    }
-    for (int y = h; y < ph; y++) {
-        memcpy(r + (size_t)y * (size_t)pw, r + (size_t)(h - 1) * (size_t)pw, (size_t)pw * sizeof(float));
-        memcpy(gch + (size_t)y * (size_t)pw, gch + (size_t)(h - 1) * (size_t)pw, (size_t)pw * sizeof(float));
-        memcpy(b + (size_t)y * (size_t)pw, b + (size_t)(h - 1) * (size_t)pw, (size_t)pw * sizeof(float));
     }
 }
 
@@ -789,7 +783,7 @@ bool RifeStartup(std::string& err) {
     }
     gInfo.ready = true;
     gInfo.files = true;
-    gInfo.detail = gpuWhere + " (ORT API " + std::to_string(gApiVersion) + ")";
+    gInfo.detail = gpuWhere + " | ensemble (ORT API " + std::to_string(gApiVersion) + ")";
     Log(dir, gInfo.detail);
     if (!cudaWhy.empty()) Log(dir, "detail: " + cudaWhy);
     return true;
@@ -812,8 +806,8 @@ bool RifeRun(const uint8_t* rgba0, const uint8_t* rgba1, int w, int h, float t, 
     if (w > 3840 || h > 3840) return false;
     if (t < 0.0f) t = 0.0f;
     if (t > 1.0f) t = 1.0f;
-    int pw = Pad32(w);
-    int ph = Pad32(h);
+    int pw = Pad64(w);
+    int ph = Pad64(h);
     size_t plane = (size_t)pw * (size_t)ph;
     bool same = rgba0 == gLast0 && rgba1 == gLast1 && w == gLastW && h == gLastH && !gIn0.empty();
     if (!same) {
@@ -821,6 +815,9 @@ bool RifeRun(const uint8_t* rgba0, const uint8_t* rgba1, int w, int h, float t, 
         if (gLayout == 2) {
             ToPlanar(rgba0, w, h, pw, ph, gIn0.data(), 0);
             ToPlanar(rgba1, w, h, pw, ph, gIn0.data(), 3);
+            gInSwap.resize(plane * 6);
+            ToPlanar(rgba1, w, h, pw, ph, gInSwap.data(), 0);
+            ToPlanar(rgba0, w, h, pw, ph, gInSwap.data(), 3);
         } else {
             gIn1.resize(plane * 3);
             ToPlanar(rgba0, w, h, pw, ph, gIn0.data(), 0);
@@ -831,80 +828,97 @@ bool RifeRun(const uint8_t* rgba0, const uint8_t* rgba1, int w, int h, float t, 
         gLastW = w;
         gLastH = h;
     }
-    float timeScalar = t;
     int timeRank = gTimeRank < 0 ? 1 : gTimeRank;
-    if (timeRank >= 4) {
-        gTimePlane.assign(plane, t);
-        timeRank = 4;
-    }
 
-    OrtMemoryInfo* mem = nullptr;
-    if (gApi->CreateCpuMemoryInfo(OrtDeviceAllocator, OrtMemTypeCPU, &mem)) return false;
-    auto make = [&](float* data, size_t count, const int64_t* shape, size_t rank, OrtValue*& out) {
-        return gApi->CreateTensorWithDataAsOrtValue(mem, data, count * sizeof(float), shape, rank,
-                                                     ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &out) == nullptr;
-    };
-    OrtValue* v0 = nullptr;
-    OrtValue* v1 = nullptr;
-    OrtValue* vt = nullptr;
-    int64_t shape3[4] = {1, 3, ph, pw};
-    int64_t shape6[4] = {1, 6, ph, pw};
-    int64_t shapeT1[1] = {1};
-    int64_t shapeT4[4] = {1, 1, ph, pw};
-    bool built = false;
-    if (gLayout == 2) built = make(gIn0.data(), gIn0.size(), shape6, 4, v0);
-    else built = make(gIn0.data(), gIn0.size(), shape3, 4, v0) && make(gIn1.data(), gIn1.size(), shape3, 4, v1);
-    if (built) {
-        if (timeRank >= 4) built = make(gTimePlane.data(), gTimePlane.size(), shapeT4, 4, vt);
-        else built = make(&timeScalar, 1, shapeT1, timeRank == 0 ? 0 : 1, vt);
-    }
-    if (!built) {
-        if (v0) gApi->ReleaseValue(v0);
-        if (v1) gApi->ReleaseValue(v1);
-        if (vt) gApi->ReleaseValue(vt);
-        gApi->ReleaseMemoryInfo(mem);
-        return false;
-    }
-
-    const char* names2[3] = {gName0.c_str(), gNameT.c_str(), nullptr};
-    const char* names3[3] = {gName0.c_str(), gName1.c_str(), gNameT.c_str()};
-    const OrtValue* vals2[2] = {v0, vt};
-    const OrtValue* vals3[3] = {v0, v1, vt};
-    const char* outName = gNameOut.c_str();
-    OrtValue* result = nullptr;
-    OrtStatus* st = nullptr;
-    if (gLayout == 2)
-        st = gApi->Run(gSession, nullptr, names2, vals2, 2, &outName, 1, &result);
-    else
-        st = gApi->Run(gSession, nullptr, names3, vals3, 3, &outName, 1, &result);
-    gApi->ReleaseValue(v0);
-    if (v1) gApi->ReleaseValue(v1);
-    gApi->ReleaseValue(vt);
-    gApi->ReleaseMemoryInfo(mem);
-    if (st || !result) {
-        ReleaseStatus(st);
-        if (result) gApi->ReleaseValue(result);
-        return false;
-    }
-    float* out = nullptr;
-    if (gApi->GetTensorMutableData(result, (void**)&out) || !out) {
-        gApi->ReleaseValue(result);
-        return false;
-    }
-    int ow = pw, oh = ph;
-    OrtTensorTypeAndShapeInfo* info = nullptr;
-    if (!gApi->GetTensorTypeAndShape(result, &info) && info) {
-        size_t rank = 0;
-        gApi->GetDimensionsCount(info, &rank);
-        int64_t dims[6] = {};
-        if (rank >= 4 && !gApi->GetDimensions(info, dims, rank)) {
-            if (dims[3] > 0) ow = (int)dims[3];
-            if (dims[2] > 0) oh = (int)dims[2];
+    auto infer = [&](float ts, bool swapped, uint8_t* dst) -> bool {
+        float timeScalar = ts;
+        if (timeRank >= 4) {
+            gTimePlane.assign(plane, ts);
+            timeRank = 4;
         }
-        gApi->ReleaseTensorTypeAndShapeInfo(info);
+        OrtMemoryInfo* mem = nullptr;
+        if (gApi->CreateCpuMemoryInfo(OrtDeviceAllocator, OrtMemTypeCPU, &mem)) return false;
+        auto make = [&](float* data, size_t count, const int64_t* shape, size_t rank, OrtValue*& out) {
+            return gApi->CreateTensorWithDataAsOrtValue(mem, data, count * sizeof(float), shape, rank,
+                                                         ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &out) == nullptr;
+        };
+        OrtValue* v0 = nullptr;
+        OrtValue* v1 = nullptr;
+        OrtValue* vt = nullptr;
+        int64_t shape3[4] = {1, 3, ph, pw};
+        int64_t shape6[4] = {1, 6, ph, pw};
+        int64_t shapeT1[1] = {1};
+        int64_t shapeT4[4] = {1, 1, ph, pw};
+        float* pack = (gLayout == 2 && swapped) ? gInSwap.data() : gIn0.data();
+        float* a = swapped ? gIn1.data() : gIn0.data();
+        float* b = swapped ? gIn0.data() : gIn1.data();
+        bool built = false;
+        if (gLayout == 2) built = make(pack, plane * 6, shape6, 4, v0);
+        else built = make(a, plane * 3, shape3, 4, v0) && make(b, plane * 3, shape3, 4, v1);
+        if (built) {
+            if (timeRank >= 4) built = make(gTimePlane.data(), gTimePlane.size(), shapeT4, 4, vt);
+            else built = make(&timeScalar, 1, shapeT1, timeRank == 0 ? 0 : 1, vt);
+        }
+        if (!built) {
+            if (v0) gApi->ReleaseValue(v0);
+            if (v1) gApi->ReleaseValue(v1);
+            if (vt) gApi->ReleaseValue(vt);
+            gApi->ReleaseMemoryInfo(mem);
+            return false;
+        }
+        const char* names2[2] = {gName0.c_str(), gNameT.c_str()};
+        const char* names3[3] = {gName0.c_str(), gName1.c_str(), gNameT.c_str()};
+        const OrtValue* vals2[2] = {v0, vt};
+        const OrtValue* vals3[3] = {v0, v1, vt};
+        const char* outName = gNameOut.c_str();
+        OrtValue* result = nullptr;
+        OrtStatus* st = nullptr;
+        if (gLayout == 2)
+            st = gApi->Run(gSession, nullptr, names2, vals2, 2, &outName, 1, &result);
+        else
+            st = gApi->Run(gSession, nullptr, names3, vals3, 3, &outName, 1, &result);
+        gApi->ReleaseValue(v0);
+        if (v1) gApi->ReleaseValue(v1);
+        gApi->ReleaseValue(vt);
+        gApi->ReleaseMemoryInfo(mem);
+        if (st || !result) {
+            ReleaseStatus(st);
+            if (result) gApi->ReleaseValue(result);
+            return false;
+        }
+        float* out = nullptr;
+        if (gApi->GetTensorMutableData(result, (void**)&out) || !out) {
+            gApi->ReleaseValue(result);
+            return false;
+        }
+        int ow = pw, oh = ph;
+        OrtTensorTypeAndShapeInfo* info = nullptr;
+        if (!gApi->GetTensorTypeAndShape(result, &info) && info) {
+            size_t rank = 0;
+            gApi->GetDimensionsCount(info, &rank);
+            int64_t dims[6] = {};
+            if (rank >= 4 && !gApi->GetDimensions(info, dims, rank)) {
+                if (dims[3] > 0) ow = (int)dims[3];
+                if (dims[2] > 0) oh = (int)dims[2];
+            }
+            gApi->ReleaseTensorTypeAndShapeInfo(info);
+        }
+        if (ow < w || oh < h) { ow = pw; oh = ph; }
+        FromPlanar(out, ow, oh, w, h, dst);
+        gApi->ReleaseValue(result);
+        return true;
+    };
+
+    if (!infer(t, false, rgbaOut)) return false;
+    if (t <= 0.001f || t >= 0.999f) return true;
+    std::vector<uint8_t> rev((size_t)w * (size_t)h * 4);
+    if (!infer(1.0f - t, true, rev.data())) return true;
+    size_t n = (size_t)w * (size_t)h * 4;
+    for (size_t i = 0; i < n; i += 4) {
+        rgbaOut[i] = (uint8_t)(((int)rgbaOut[i] + (int)rev[i] + 1) >> 1);
+        rgbaOut[i + 1] = (uint8_t)(((int)rgbaOut[i + 1] + (int)rev[i + 1] + 1) >> 1);
+        rgbaOut[i + 2] = (uint8_t)(((int)rgbaOut[i + 2] + (int)rev[i + 2] + 1) >> 1);
+        rgbaOut[i + 3] = 255;
     }
-    if (ow < w || oh < h) { ow = pw; oh = ph; }
-    FromPlanar(out, ow, oh, w, h, rgbaOut);
-    gApi->ReleaseValue(result);
     return true;
 }

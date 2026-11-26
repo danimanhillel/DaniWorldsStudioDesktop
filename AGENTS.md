@@ -48,8 +48,10 @@ ripple insert, or panels-above-timeline.
   loaded `onnxruntime.dll` has no CUDA provider, RIFE uses DirectML and the
   status says so. Do not report that as CUDA.
 - Export FPS 120 and 240 always use RIFE. The movie is rendered at 60, then
-  RIFE inserts one frame (120) or three (240, at 0.25 / 0.5 / 0.75). 24, 30,
-  50 and 60 stay on `exFpsIdx` 0–3. Do not renumber them.
+  RIFE inserts one frame (120) or three (240, at 0.25 / 0.5 / 0.75). 72 is
+  multiplier 3 from a 24 fps render (timesteps 1/3 and 2/3), `exFpsIdx` 6.
+  24, 30, 50 and 60 stay on `exFpsIdx` 0–3. 4 is 120, 5 is 240. Do not
+  renumber them. Every RIFE frame is an ensemble average of both directions.
 - The timeline ruler stays pinned while the channels scroll vertically.
   Horizontal scroll stays shared (`tlbody` scroll, ruler follows).
 - Preview keeps more seconds ahead (small clips 14s, large clips 9s / 11s
