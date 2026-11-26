@@ -48,7 +48,8 @@ ripple insert, or panels-above-timeline.
   show the bundled plate through the real preview shader, not the flat icon.
   Transition cards play the real effect between the two bundled plates
   (snow then green), ping-pong over 3s. The orange and blue blocks are only
-  the fallback.
+  the fallback. `libtrans` always shows its vertical scrollbar so the cards
+  do not jump between two positions.
 - RIFE queries the CUDA runtime for the GPU, or the NVIDIA driver if that
   runtime cannot name the card. A 5090 (compute capability 12.0) wins over a
   weaker card. TF32 is enabled from capability 8 up so cuDNN can use tensor

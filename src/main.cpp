@@ -8910,7 +8910,7 @@ int main(int argc, char* argv[]) {
         if (ImGui::BeginTabItem("Transitions")) {
             ImGui::TextDisabled("Select two overlapping clips, then drag");
             EnsureTransPlates();
-            ImGui::BeginChild("libtrans", ImVec2(0, 0), false);
+            ImGui::BeginChild("libtrans", ImVec2(0, 0), false, ImGuiWindowFlags_AlwaysVerticalScrollbar);
             ImVec2 transClip0 = ImGui::GetWindowPos();
             ImVec2 transClip1(transClip0.x + ImGui::GetWindowSize().x, transClip0.y + ImGui::GetWindowSize().y);
             float gap = 6.0f;

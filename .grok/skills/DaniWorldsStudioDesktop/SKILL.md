@@ -179,7 +179,9 @@ In order, they asked for and accepted:
     A, green is B, ping-pong over 3s. `DrawTransitionCard` uses `FxEvaluate`
     (dissolve alpha, wipe clip, zoom UV, dip). The orange and blue blocks
     are only the fallback if those plates did not upload. Do not put the
-    blocks back while the plates are there.
+    blocks back while the plates are there. `libtrans` keeps
+    `AlwaysVerticalScrollbar`, so the card grid does not jump between two
+    widths when the scrollbar appears and disappears.
 
 They build on Windows themselves. The Linux sandbox has no MSVC. After an
 exe change, the reply ends with `taskkill`, `git pull`, and
