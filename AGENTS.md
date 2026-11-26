@@ -38,7 +38,8 @@ ripple insert, or panels-above-timeline.
 - Overlay effects stay append-only. Zoom In and Zoom Out are kinds 3 and 4.
   Dust, Cassette, Frame, Film Dust, Retro Dust, Old Film, and Record are
   19–25 (shader in preview, `FilmGrade` on export). The Media, Effects, and
-  Solids tabs stay pinned; only the cards under them scroll.
+  Solids tabs stay pinned; only the cards under them scroll. Effects cards
+  show the bundled plate through the real preview shader, not the flat icon.
 - The timeline ruler stays pinned while the channels scroll vertically.
   Horizontal scroll stays shared (`tlbody` scroll, ruler follows).
 - Preview keeps more seconds ahead (small clips 14s, large clips 9s / 11s

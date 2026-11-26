@@ -674,6 +674,203 @@ void OverlayDrawGL(float x0, float y0, float x1, float y1, float time, int scree
     glMatrixMode(GL_MODELVIEW);
 }
 
+static GLuint plateTex = 0;
+static int plateW = 0, plateH = 0;
+static int plateReady = 0;
+static GLuint previewFbo = 0;
+static GLuint previewScratch[2] = {0, 0};
+static std::vector<GLuint> previewTex;
+static int previewGotW = 0, previewGotH = 0;
+static int previewReady = 0;
+static int previewFailed = 0;
+static int previewGl = 0;
+static float previewStamp = -1.0f;
+
+typedef void (APIENTRY *PFN_BindFbo)(unsigned int, unsigned int);
+typedef void (APIENTRY *PFN_GenFbo)(int, unsigned int*);
+typedef void (APIENTRY *PFN_FboTex)(unsigned int, unsigned int, unsigned int, unsigned int, int);
+typedef unsigned int (APIENTRY *PFN_CheckFbo)(unsigned int);
+typedef void (APIENTRY *PFN_ActiveTex)(unsigned int);
+static PFN_BindFbo pBindFbo = nullptr;
+static PFN_GenFbo pGenFbo = nullptr;
+static PFN_FboTex pFboTex = nullptr;
+static PFN_CheckFbo pCheckFbo = nullptr;
+static PFN_ActiveTex pActiveTex = nullptr;
+
+static bool EnsurePreviewGl() {
+    if (previewGl == 1) return true;
+    if (previewGl < 0) return false;
+    pBindFbo = (PFN_BindFbo)SDL_GL_GetProcAddress("glBindFramebuffer");
+    pGenFbo = (PFN_GenFbo)SDL_GL_GetProcAddress("glGenFramebuffers");
+    pFboTex = (PFN_FboTex)SDL_GL_GetProcAddress("glFramebufferTexture2D");
+    pCheckFbo = (PFN_CheckFbo)SDL_GL_GetProcAddress("glCheckFramebufferStatus");
+    pActiveTex = (PFN_ActiveTex)SDL_GL_GetProcAddress("glActiveTexture");
+    if (!pBindFbo || !pGenFbo || !pFboTex || !pCheckFbo) {
+        previewGl = -1;
+        return false;
+    }
+    previewGl = 1;
+    return true;
+}
+
+static void AllocPreviewTex(GLuint& id, int w, int h) {
+    if (!id) glGenTextures(1, &id);
+    glBindTexture(GL_TEXTURE_2D, id);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+}
+
+void OverlaySetPreviewPlate(const unsigned char* rgba, int w, int h) {
+    if (!rgba || w < 2 || h < 2 || w > 4096 || h > 4096) return;
+    std::vector<unsigned char> flip((size_t)w * h * 4);
+    int stride = w * 4;
+    for (int y = 0; y < h; y++)
+        std::memcpy(flip.data() + (size_t)y * stride, rgba + (size_t)(h - 1 - y) * stride, (size_t)stride);
+    EnsurePreviewGl();
+    GLint prevActive = 0, prevTex = 0, unpack = 4;
+    glGetIntegerv(0x84E0, &prevActive);
+    if (pActiveTex) pActiveTex(0x84C0);
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &prevTex);
+    glGetIntegerv(GL_UNPACK_ALIGNMENT, &unpack);
+    if (!plateTex) glGenTextures(1, &plateTex);
+    glBindTexture(GL_TEXTURE_2D, plateTex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, flip.data());
+    glPixelStorei(GL_UNPACK_ALIGNMENT, unpack);
+    glBindTexture(GL_TEXTURE_2D, (GLuint)prevTex);
+    if (pActiveTex) pActiveTex((unsigned int)prevActive);
+    plateW = w;
+    plateH = h;
+    plateReady = 1;
+    previewReady = 0;
+}
+
+static void PreviewPass(GLuint src, GLuint dst, const FxEval& e, float pass, float time) {
+    glBindTexture(GL_TEXTURE_2D, 0);
+    pBindFbo(0x8D40, previewFbo);
+    pFboTex(0x8D40, 0x8CE0, GL_TEXTURE_2D, dst, 0);
+    glDrawBuffer(0x8CE0);
+    glViewport(0, 0, plateW, plateH);
+    glDisable(GL_BLEND);
+    glDisable(GL_SCISSOR_TEST);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glClearColor(0, 0, 0, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glEnable(GL_TEXTURE_2D);
+    glBindTexture(GL_TEXTURE_2D, src);
+    glColor4f(1, 1, 1, 1);
+    DrawFxQuad(0, 0, (float)plateW, (float)plateH, e, pass, time, plateW, plateH);
+}
+
+void OverlayPreviewTick(float time) {
+    if (previewFailed) return;
+    if (!plateReady || !plateTex || plateW < 2 || plateH < 2) return;
+    if (previewReady && previewStamp >= 0.0f && (time - previewStamp) < 0.05f) return;
+    if (!EnsureFxShader() || !pUse || !EnsurePreviewGl()) return;
+    int n = OverlayKindCount();
+    if (n < 1) return;
+
+    const unsigned int kFboBind = 0x8CA6;
+    const unsigned int kProg = 0x8B8D;
+    const unsigned int kActive = 0x84E0;
+    GLint prevFbo = 0, prevProg = 0, prevTex = 0, prevActive = 0, prevVp[4] = {0, 0, 0, 0};
+    glGetIntegerv(kFboBind, &prevFbo);
+    glGetIntegerv(kProg, &prevProg);
+    glGetIntegerv(kActive, &prevActive);
+    glGetIntegerv(GL_VIEWPORT, prevVp);
+    glPushAttrib(GL_ALL_ATTRIB_BITS);
+    if (pActiveTex) pActiveTex(0x84C0);
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &prevTex);
+
+    bool rebuild = previewGotW != plateW || previewGotH != plateH || (int)previewTex.size() != n;
+    if (rebuild) {
+        for (GLuint id : previewTex) if (id) glDeleteTextures(1, &id);
+        if (previewScratch[0]) glDeleteTextures(1, &previewScratch[0]);
+        if (previewScratch[1]) glDeleteTextures(1, &previewScratch[1]);
+        previewTex.assign((size_t)n, 0);
+        previewScratch[0] = 0;
+        previewScratch[1] = 0;
+        previewGotW = plateW;
+        previewGotH = plateH;
+        previewReady = 0;
+    }
+    if (!previewFbo) pGenFbo(1, &previewFbo);
+    for (int i = 0; i < n; i++) if (!previewTex[(size_t)i]) AllocPreviewTex(previewTex[(size_t)i], plateW, plateH);
+    if (!previewScratch[0]) AllocPreviewTex(previewScratch[0], plateW, plateH);
+    if (!previewScratch[1]) AllocPreviewTex(previewScratch[1], plateW, plateH);
+
+    glMatrixMode(GL_PROJECTION);
+    glPushMatrix();
+    glLoadIdentity();
+    glOrtho(0.0, (double)plateW, 0.0, (double)plateH, -1.0, 1.0);
+    glMatrixMode(GL_MODELVIEW);
+    glPushMatrix();
+    glLoadIdentity();
+
+    float span = 3.0f;
+    float shown = std::fmod(time, span * 2.0f);
+    if (shown < 0) shown += span * 2.0f;
+    if (shown > span) shown = span * 2.0f - shown;
+    bool fboOk = true;
+    for (int kind = 0; kind < n; kind++) {
+        OverlayFx o;
+        o.kind = kind;
+        o.start = 0;
+        o.duration = span;
+        o.scale = 1;
+        o.opacity = 1;
+        o.amount = 0.85f;
+        o.dir = 1;
+        FxEval e = EvalFx(o, shown, (float)std::min(plateW, plateH));
+        GLuint dst = previewTex[(size_t)kind];
+        if (e.radius >= 0.8f) {
+            PreviewPass(plateTex, previewScratch[0], e, 0, shown);
+            PreviewPass(previewScratch[0], previewScratch[1], e, 1, shown);
+            PreviewPass(previewScratch[1], dst, e, 2, shown);
+        } else {
+            PreviewPass(plateTex, dst, e, 0, shown);
+        }
+        if (kind == 0 && pCheckFbo(0x8D40) != 0x8CD5) fboOk = false;
+        if (!fboOk) break;
+    }
+
+    glPopMatrix();
+    glMatrixMode(GL_PROJECTION);
+    glPopMatrix();
+    glMatrixMode(GL_MODELVIEW);
+    pBindFbo(0x8D40, (unsigned int)prevFbo);
+    glPopAttrib();
+    glViewport(prevVp[0], prevVp[1], prevVp[2], prevVp[3]);
+    if (pActiveTex) pActiveTex(0x84C0);
+    glBindTexture(GL_TEXTURE_2D, (GLuint)prevTex);
+    if (pActiveTex) pActiveTex((unsigned int)prevActive);
+    if (pUse) pUse((unsigned int)prevProg);
+    if (fboOk) {
+        previewReady = 1;
+        previewStamp = time;
+    } else {
+        previewReady = 0;
+        previewFailed = 1;
+    }
+}
+
+unsigned int OverlayPreviewTex(int kind) {
+    if (!previewReady || kind < 0 || kind >= (int)previewTex.size()) return 0;
+    return previewTex[(size_t)kind];
+}
+
+int OverlayPreviewW() { return plateW; }
+int OverlayPreviewH() { return plateH; }
+
 static void SampleRGBA(const unsigned char* src, int w, int h, float fx, float fy, float& r, float& g, float& b) {
     if (fx < 0 || fy < 0 || fx > (float)(w - 1) || fy > (float)(h - 1)) { r = g = b = 0; return; }
     int x0 = (int)fx;

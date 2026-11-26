@@ -157,7 +157,11 @@ In order, they asked for and accepted:
     (`libmedia`, `libfx`, `libsolids`). The timeline ruler stays pinned.
     Vertical scroll is only `tlbody` (the channels). Horizontal scroll is
     that same body; the ruler copies it with `SetNextWindowScroll`. Do not
-    put the ruler back inside the vertical scroller.
+    put the ruler back inside the vertical scroller. Effects cards show the
+    bundled plate (`fx_plate.cpp`, the mountain image) through the real
+    preview shader (`OverlayPreviewTick`, amount 0.85, ping-pong 3s).
+    `DrawFxIcon` is only the fallback if that plate did not upload. Do not
+    put the flat icons back while the plate is there.
 
 They build on Windows themselves. The Linux sandbox has no MSVC. After an
 exe change, the reply ends with `taskkill`, `git pull`, and

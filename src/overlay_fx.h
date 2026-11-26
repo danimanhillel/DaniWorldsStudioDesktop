@@ -37,3 +37,8 @@ void OverlayWrite(OverlayFx& o, int channel, float before, float now, float time
 void OverlayResetAnim(OverlayFx& o);
 void OverlayDrawGL(float x0, float y0, float x1, float y1, float time, int screenW, int screenH);
 void OverlayStamp(unsigned char* canvas, int w, int h, float time);
+void OverlaySetPreviewPlate(const unsigned char* rgba, int w, int h);
+void OverlayPreviewTick(float time);
+unsigned int OverlayPreviewTex(int kind);
+int OverlayPreviewW();
+int OverlayPreviewH();

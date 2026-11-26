@@ -21,6 +21,7 @@
 #include <sstream>
 #include "effects.h"
 #include "overlay_fx.h"
+#include "fx_plate.h"
 #include "rife.h"
 #include "asr.h"
 
@@ -41,8 +42,10 @@ extern "C" {
 #include <windows.h>
 #include <commdlg.h>
 #include <objbase.h>
+#include <wincodec.h>
 #pragma comment(lib, "comdlg32.lib")
 #pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "windowscodecs.lib")
 #endif
 
 struct MediaItem {
@@ -3873,6 +3876,73 @@ static void DrawFxIcon(ImDrawList* dl, ImVec2 a, ImVec2 b, int kind) {
     } else {
         quad(c, w * 0.7f, h * 0.7f, 0, IM_COL32(120, 120, 120, 255));
     }
+}
+
+static void EnsureFxPlate() {
+#ifdef _WIN32
+    static int done = 0;
+    if (done) return;
+    done = 1;
+    int nbytes = 0;
+    const unsigned char* bytes = FxPlatePng(&nbytes);
+    if (!bytes || nbytes < 32) return;
+    HRESULT co = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    bool ownCo = (co == S_OK);
+    HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, (SIZE_T)nbytes);
+    if (!mem) {
+        if (ownCo) CoUninitialize();
+        return;
+    }
+    void* locked = GlobalLock(mem);
+    if (locked) memcpy(locked, bytes, (size_t)nbytes);
+    GlobalUnlock(mem);
+    IStream* stream = nullptr;
+    if (CreateStreamOnHGlobal(mem, TRUE, &stream) != S_OK) {
+        GlobalFree(mem);
+        if (ownCo) CoUninitialize();
+        return;
+    }
+    IWICImagingFactory* factory = nullptr;
+    IWICBitmapDecoder* decoder = nullptr;
+    IWICBitmapFrameDecode* frame = nullptr;
+    IWICFormatConverter* conv = nullptr;
+    HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory));
+    if (SUCCEEDED(hr)) hr = factory->CreateDecoderFromStream(stream, nullptr, WICDecodeMetadataCacheOnLoad, &decoder);
+    if (SUCCEEDED(hr)) hr = decoder->GetFrame(0, &frame);
+    if (SUCCEEDED(hr)) hr = factory->CreateFormatConverter(&conv);
+    if (SUCCEEDED(hr)) {
+        bool bgra = false;
+        hr = conv->Initialize(frame, GUID_WICPixelFormat32bppRGBA, WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom);
+        if (FAILED(hr)) {
+            bgra = true;
+            hr = conv->Initialize(frame, GUID_WICPixelFormat32bppBGRA, WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom);
+        }
+        UINT pw = 0, ph = 0;
+        if (SUCCEEDED(hr)) hr = conv->GetSize(&pw, &ph);
+        if (SUCCEEDED(hr) && pw >= 2 && ph >= 2 && pw <= 4096 && ph <= 4096) {
+            std::vector<unsigned char> px((size_t)pw * ph * 4);
+            hr = conv->CopyPixels(nullptr, pw * 4, (UINT)px.size(), px.data());
+            if (SUCCEEDED(hr)) {
+                if (bgra) {
+                    for (size_t i = 0; i + 3 < px.size(); i += 4) {
+                        unsigned char tmp = px[i];
+                        px[i] = px[i + 2];
+                        px[i + 2] = tmp;
+                    }
+                }
+                OverlaySetPreviewPlate(px.data(), (int)pw, (int)ph);
+            }
+        }
+    }
+    if (conv) conv->Release();
+    if (frame) frame->Release();
+    if (decoder) decoder->Release();
+    if (factory) factory->Release();
+    stream->Release();
+    if (ownCo) CoUninitialize();
+#else
+    (void)0;
+#endif
 }
 
 static void RenderFloatingOnTop() {
@@ -8391,6 +8461,8 @@ int main(int argc, char* argv[]) {
         }
         if (ImGui::BeginTabItem("Effects")) {
             ImGui::TextDisabled("Drag onto the FX lane");
+            EnsureFxPlate();
+            OverlayPreviewTick((float)ImGui::GetTime());
             ImGui::BeginChild("libfx", ImVec2(0, 0), false);
             ImVec2 mediaClip0 = ImGui::GetWindowPos();
             ImVec2 mediaClip1(mediaClip0.x + ImGui::GetWindowSize().x, mediaClip0.y + ImGui::GetWindowSize().y);
@@ -8413,7 +8485,12 @@ int main(int argc, char* argv[]) {
                 ImVec2 p0 = ImGui::GetItemRectMin();
                 ImVec2 p1 = ImGui::GetItemRectMax();
                 bool vis = p1.y > mediaClip0.y && p0.y < mediaClip1.y && p1.x > mediaClip0.x && p0.x < mediaClip1.x;
-                if (vis) DrawFxIcon(dl, p0, p1, i);
+                unsigned int pv = OverlayPreviewTex(i);
+                if (vis && pv) {
+                    dl->AddRectFilled(p0, p1, IM_COL32(8, 8, 10, 255), 2.0f);
+                    DrawThumb(dl, p0, p1, mediaClip0, mediaClip1, (GLuint)pv, OverlayPreviewW(), OverlayPreviewH());
+                    dl->AddRect(p0, p1, IM_COL32(80, 80, 90, 255), 2.0f);
+                } else if (vis) DrawFxIcon(dl, p0, p1, i);
                 ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + cellW);
                 ImGui::TextUnformatted(OverlayKindName(i));
                 ImGui::PopTextWrapPos();

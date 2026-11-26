@@ -55,6 +55,7 @@ add_executable(DaniWorldsStudioDesktop
     src/main.cpp
     src/effects.cpp
     src/overlay_fx.cpp
+    src/fx_plate.cpp
     src/rife.cpp
     src/asr.cpp
     ${imgui_SOURCE_DIR}/imgui.cpp
@@ -96,7 +97,7 @@ target_link_libraries(DaniWorldsStudioDesktop
 )
 
 if(WIN32)
-    target_link_libraries(DaniWorldsStudioDesktop PRIVATE SDL2::SDL2main)
+    target_link_libraries(DaniWorldsStudioDesktop PRIVATE SDL2::SDL2main windowscodecs)
     set_target_properties(DaniWorldsStudioDesktop PROPERTIES WIN32_EXECUTABLE TRUE)
 endif()
 
