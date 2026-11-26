@@ -67,6 +67,8 @@ ripple insert, or panels-above-timeline.
   multiplier 3 from a 24 fps render (timesteps 1/3 and 2/3), `exFpsIdx` 6.
   24, 30, 50 and 60 stay on `exFpsIdx` 0–3. 4 is 120, 5 is 240. Do not
   renumber them. Every RIFE frame is an ensemble average of both directions.
+  Export can also write audio only (`exOutKind` 1): MP3 of the timeline mix,
+  48 kHz stereo. Video radios stay unchanged.
 - The timeline ruler stays pinned while the channels scroll vertically.
   Horizontal scroll stays shared (`tlbody` scroll, ruler follows).
 - Preview keeps more seconds ahead (small clips 14s, large clips 9s / 11s

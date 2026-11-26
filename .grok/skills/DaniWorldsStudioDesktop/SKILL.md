@@ -500,6 +500,10 @@ Other res values 0–4 are 720 / 1080 / 1440 / 2160 / 4320. 16:9 widths
 ## Export pipeline
 
 `ExportSession::Begin(out, ew, eh, fps, exRife, exSubMode != 1)`.
+`exOutKind` 0 is that video export. 1 is audio only: `BeginMp3` writes the
+timeline mix (`MixTimeline`, fades and transition crossfade included) as
+MP3, 48 kHz stereo, 192 kbps. No picture and no subtitles. Do not renumber
+`exRes` or `exFpsIdx`.
 
 Phases:
 

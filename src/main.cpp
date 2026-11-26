@@ -231,6 +231,7 @@ int exRes = 1;
 int exFpsIdx = 1;
 bool exRife = false;
 int exSubMode = 0;
+int exOutKind = 0;
 bool asrOn = false;
 int asrPhase = 0;
 int asrLang = 0;
@@ -2364,6 +2365,8 @@ struct ExportSession {
     std::vector<uint8_t> canvas;
     std::vector<int16_t> afifo;
     bool rifeOn = false;
+    bool audioOnly = false;
+    int64_t audioTotal = 0;
     bool burnSubs = true;
     int rifeFails = 0;
     int phase = 0;
@@ -2386,7 +2389,9 @@ struct ExportSession {
 
     void CloseAll();
     bool Begin(const std::string& outPath, int width, int height, int framesPerSec, bool useRife, bool burn);
+    bool BeginMp3(const std::string& outPath);
     void Step();
+    void StepMp3();
     void StepRife();
     bool BeginRifePass();
     void SealPass();
@@ -2453,6 +2458,8 @@ void ExportSession::CloseAll() {
     canvas.clear();
     afifo.clear();
     headerWritten = false;
+    audioOnly = false;
+    audioTotal = 0;
     ReleasePassDecoder();
     if (!tempPath.empty()) { ::remove(tempPath.c_str()); tempPath.clear(); }
     if (rifeOn) RifeShutdown();
@@ -3029,6 +3036,135 @@ bool ExportSession::Begin(const std::string& outPath, int width, int height, int
     const char* later = rifeOn ? " then RIFE" : "";
     snprintf(buf, sizeof(buf), "Exporting %dx%d %d fps %s%s%s", showW, showH, showFps, encLabel, videoOnly ? " (no audio)" : "", later);
     status = buf;
+    previewStatus = status;
+    return true;
+}
+
+bool ExportSession::BeginMp3(const std::string& outPath) {
+    CloseAll();
+    path = outPath;
+    timelineEnd = ProjectEnd();
+    if (timelineEnd < 0.05 || clips.empty()) {
+        status = "Nothing to export";
+        previewStatus = status;
+        return false;
+    }
+    const AVCodec* acodec = avcodec_find_encoder_by_name("libmp3lame");
+    if (!acodec) acodec = avcodec_find_encoder_by_name("mp3_mf");
+    if (!acodec) acodec = avcodec_find_encoder_by_name("libshine");
+    if (!acodec) acodec = avcodec_find_encoder(AV_CODEC_ID_MP3);
+    if (!acodec) {
+        status = "MP3 encoder not found";
+        previewStatus = status;
+        return false;
+    }
+    if (avformat_alloc_output_context2(&fmt, nullptr, "mp3", path.c_str()) < 0 || !fmt) {
+        status = "Cannot create mp3";
+        previewStatus = status;
+        CloseAll();
+        return false;
+    }
+    AVSampleFormat want = acodec->sample_fmts ? acodec->sample_fmts[0] : AV_SAMPLE_FMT_FLTP;
+    bool gotS16p = false, gotFltp = false, gotS16 = false;
+    if (acodec->sample_fmts) {
+        for (const AVSampleFormat* f = acodec->sample_fmts; *f != AV_SAMPLE_FMT_NONE; ++f) {
+            if (*f == AV_SAMPLE_FMT_S16P) gotS16p = true;
+            else if (*f == AV_SAMPLE_FMT_FLTP) gotFltp = true;
+            else if (*f == AV_SAMPLE_FMT_S16) gotS16 = true;
+        }
+    }
+    if (gotS16p) want = AV_SAMPLE_FMT_S16P;
+    else if (gotFltp) want = AV_SAMPLE_FMT_FLTP;
+    else if (gotS16) want = AV_SAMPLE_FMT_S16;
+    actx = avcodec_alloc_context3(acodec);
+    if (!actx) {
+        status = "Cannot open MP3 encoder";
+        previewStatus = status;
+        CloseAll();
+        return false;
+    }
+    actx->sample_rate = 48000;
+    actx->bit_rate = 192000;
+    actx->sample_fmt = want;
+    actx->time_base = AVRational{1, 48000};
+    av_channel_layout_default(&actx->ch_layout, 2);
+    if (fmt->oformat->flags & AVFMT_GLOBALHEADER)
+        actx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+    if (avcodec_open2(actx, acodec, nullptr) < 0) {
+        status = "Cannot open MP3 encoder";
+        previewStatus = status;
+        CloseAll();
+        return false;
+    }
+    AVChannelLayout inLay;
+    av_channel_layout_default(&inLay, 2);
+    int swrOk = swr_alloc_set_opts2(&swr, &actx->ch_layout, actx->sample_fmt, 48000,
+                                    &inLay, AV_SAMPLE_FMT_S16, 48000, 0, nullptr);
+    av_channel_layout_uninit(&inLay);
+    if (swrOk < 0 || !swr || swr_init(swr) < 0) {
+        status = "Cannot open MP3 encoder";
+        previewStatus = status;
+        CloseAll();
+        return false;
+    }
+    aFrameSize = actx->frame_size > 0 ? actx->frame_size : 1152;
+    ast = avformat_new_stream(fmt, nullptr);
+    if (!ast) {
+        status = "Cannot add audio stream";
+        previewStatus = status;
+        CloseAll();
+        return false;
+    }
+    avcodec_parameters_from_context(ast->codecpar, actx);
+    ast->time_base = actx->time_base;
+    aframe = av_frame_alloc();
+    if (!aframe) {
+        status = "Audio buffer failed";
+        previewStatus = status;
+        CloseAll();
+        return false;
+    }
+    aframe->format = actx->sample_fmt;
+    aframe->nb_samples = aFrameSize;
+    aframe->sample_rate = 48000;
+    av_channel_layout_copy(&aframe->ch_layout, &actx->ch_layout);
+    if (av_frame_get_buffer(aframe, 0) < 0) {
+        status = "Audio buffer failed";
+        previewStatus = status;
+        CloseAll();
+        return false;
+    }
+    if (avio_open(&fmt->pb, path.c_str(), AVIO_FLAG_WRITE) < 0) {
+        status = "Cannot open output file";
+        previewStatus = status;
+        CloseAll();
+        return false;
+    }
+    if (avformat_write_header(fmt, nullptr) < 0) {
+        status = "Cannot write mp3 header";
+        previewStatus = status;
+        CloseAll();
+        return false;
+    }
+    headerWritten = true;
+    pkt = av_packet_alloc();
+    audioOnly = true;
+    rifeOn = false;
+    phase = 0;
+    fps = 0;
+    w = 0;
+    h = 0;
+    audioWritten = 0;
+    aPts = 0;
+    audioTotal = (int64_t)std::ceil(timelineEnd * 48000.0);
+    if (audioTotal < 1) audioTotal = 1;
+    total = (int)((audioTotal + aFrameSize - 1) / aFrameSize);
+    if (total < 1) total = 1;
+    frameIndex = 0;
+    active = true;
+    SetPlaying(false);
+    ResetAudioSync();
+    status = "Exporting audio MP3";
     previewStatus = status;
     return true;
 }
@@ -4236,8 +4372,41 @@ static void BurnSubtitles(uint8_t* canvas, int cw, int ch, float t) {
 #ifdef _MSC_VER
 #pragma optimize("", off)
 #endif
+void ExportSession::StepMp3() {
+    if (!active) return;
+    if (audioWritten >= audioTotal) {
+        Finish(true);
+        return;
+    }
+    int chunk = aFrameSize > 0 ? aFrameSize : 1152;
+    int64_t left = audioTotal - audioWritten;
+    int n = left < chunk ? (int)left : chunk;
+    if (n < 1) {
+        Finish(true);
+        return;
+    }
+    double t = (double)audioWritten / 48000.0;
+    std::vector<int16_t> tmp((size_t)n * 2);
+    MixTimeline(t, n, tmp.data());
+    afifo.insert(afifo.end(), tmp.begin(), tmp.end());
+    audioWritten += n;
+    if (!DrainAudio(false)) {
+        Fail("Audio encode failed");
+        return;
+    }
+    frameIndex = (int)(audioWritten / chunk);
+    if (frameIndex > total) frameIndex = total;
+    int pct = total ? (frameIndex * 100) / total : 0;
+    if (pct > 100) pct = 100;
+    char buf[128];
+    snprintf(buf, sizeof(buf), "Audio MP3 %d%%", pct);
+    status = buf;
+    previewStatus = status;
+}
+
 void ExportSession::Step() {
     if (!active) return;
+    if (audioOnly) { StepMp3(); return; }
     if (phase == 1) { StepRife(); return; }
     if (frameIndex >= total) {
         if (rifeOn && outFps > baseFps) { BeginRifePass(); return; }
@@ -10294,13 +10463,21 @@ int main(int argc, char* argv[]) {
         ImGui::End();
 
         if (requestExport) {
-            ImGui::OpenPopup("Export Video");
+            ImGui::OpenPopup("Export");
             requestExport = false;
         }
         ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-        if (ImGui::BeginPopupModal("Export Video", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-            ImGui::TextUnformatted("Export video");
+        if (ImGui::BeginPopupModal("Export", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::TextUnformatted(exOutKind == 1 ? "Export audio" : "Export video");
             ImGui::Separator();
+            ImGui::TextUnformatted("Output");
+            if (ImGui::RadioButton("Video", exOutKind == 0)) exOutKind = 0;
+            ImGui::SameLine();
+            if (ImGui::RadioButton("Audio MP3", exOutKind == 1)) exOutKind = 1;
+            ImGui::Spacing();
+            int ew = 0, eh = 0;
+            int fps = 30;
+            if (exOutKind == 0) {
             ImGui::TextUnformatted("Aspect");
             if (ImGui::RadioButton("16:9", exAspect == 0) && exAspect != 0) { exAspect = 0; RefitAutoGsImages(); }
             ImGui::SameLine();
@@ -10339,9 +10516,8 @@ int main(int argc, char* argv[]) {
             if (ImGui::RadioButton("120", exFpsIdx == 4)) exFpsIdx = 4;
             ImGui::SameLine();
             if (ImGui::RadioButton("240", exFpsIdx == 5)) exFpsIdx = 5;
-            int ew = 0, eh = 0;
             const int fpsVals[] = {24, 30, 50, 60, 120, 240, 72};
-            int fps = fpsVals[exFpsIdx < 0 || exFpsIdx > 6 ? 1 : exFpsIdx];
+            fps = fpsVals[exFpsIdx < 0 || exFpsIdx > 6 ? 1 : exFpsIdx];
             bool highFps = fps >= 120;
             bool triple = fps == 72;
             if (highFps || triple) exRife = true;
@@ -10366,8 +10542,22 @@ int main(int argc, char* argv[]) {
             if (ImGui::RadioButton("SRT file", exSubMode == 1)) exSubMode = 1;
             ImGui::SameLine();
             if (ImGui::RadioButton("Both", exSubMode == 2)) exSubMode = 2;
+            } else {
+                ImGui::TextUnformatted("Timeline mix, 48 kHz stereo, 192 kbps.");
+                ImGui::TextDisabled("Video, resolution and subtitles are not written.");
+            }
             if (ImGui::Button("Choose file and export")) {
                 ImGui::CloseCurrentPopup();
+                if (exOutKind == 1) {
+                    std::string out = SaveDialog(hwnd, "MP3 audio (*.mp3)\0*.mp3\0", "mp3", "Export Audio");
+                    if (!out.empty()) {
+#ifdef HAVE_FFMPEG
+                        gExport.BeginMp3(out);
+#else
+                        previewStatus = "FFmpeg not linked";
+#endif
+                    }
+                } else {
                 std::string out = SaveDialog(hwnd, "MP4 video (*.mp4)\0*.mp4\0", "mp4", "Export Video");
                 if (!out.empty()) {
                     if (exSubMode != 0) {
@@ -10379,6 +10569,7 @@ int main(int argc, char* argv[]) {
 #else
                     previewStatus = "FFmpeg not linked";
 #endif
+                }
                 }
             }
             ImGui::SameLine();
@@ -10398,13 +10589,14 @@ int main(int argc, char* argv[]) {
             if (ImGui::Button("Cancel export")) gExport.Cancel();
             ImGui::End();
             bool gpu = gExport.phase == 1;
+            bool audioOut = gExport.audioOnly;
             Uint32 slice = SDL_GetTicks();
             int guard = 0;
-            int limit = gpu ? 16 : (gExport.w * gExport.h >= 3840 * 2160 ? 1 : (gExport.w * gExport.h <= 1280 * 720 ? 4 : 2));
+            int limit = audioOut ? 64 : (gpu ? 16 : (gExport.w * gExport.h >= 3840 * 2160 ? 1 : (gExport.w * gExport.h <= 1280 * 720 ? 4 : 2)));
             do {
                 gExport.Step();
                 guard++;
-            } while (gExport.active && guard < limit && (!gpu || SDL_GetTicks() - slice < 80));
+            } while (gExport.active && guard < limit && (audioOut ? SDL_GetTicks() - slice < 80 : (!gpu || SDL_GetTicks() - slice < 80)));
         } else if (!asrOn) {
             RoutePreviewClip(currentTime, topClip, previewPlate, driveClip);
             if (driveClip >= 0 && playingClip != driveClip) EnsurePlayerForClip(driveClip);
