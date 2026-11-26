@@ -148,7 +148,18 @@ In order, they asked for and accepted:
     crossfades only A and B during that span (`cos` / `sin` of `p * pi/2`).
     Other overlaps are unchanged. Cards: Cross Dissolve (smoothstep), Blend
     (linear), Dip to Black, Dip to White, Wipe Left / Right / Down / Up,
-    Zoom In, Zoom Out. Wipe is `FxLook.wipe` 1 right, 2 left, 3 down, 4 up.
+    Zoom In, Zoom Out. Twenty more are appended after those ten. Do not
+    reorder or remove the original ten. `FxLook.shape` 0 stays the classic
+    path. Shapes 1–20 are `FxPaint`: Flash Cut, Color Pop, Paint In, Blocks,
+    Center Hold, Detail Hold, Page Peel, Whip Up, Whip Down, Soft Blobs,
+    Iris, Venetian, Shatter, Light Leak, Glitch, Zoom Blur, Clock, Film Burn,
+    Split, Ripple. There is no person detector. Center Hold keeps a middle
+    ellipse; Detail Hold keeps high-contrast pixels of A longer. Cards with
+    `shape != 0` composite the snow/green plates at 192×108. Preview
+    (`DrawShapePreview`) reads both frames back, paints the same function
+    at a width cap of 960, and returns before the classic blit. A frame
+    above 3840×2160 falls back to the dissolve. Export uses `FxComposite`,
+    including the gap path when `shape != 0`. Wipe is `FxLook.wipe` 1 right, 2 left, 3 down, 4 up.
     Dip uses `dip` plus `dipR/G/B`. Opacity is Left Shift on the
     clip-body edge, and it is the opposite of the earlier inverted ramp:
     the left edge rises from the bottom (0) to the top (100) at the handle
@@ -177,7 +188,8 @@ In order, they asked for and accepted:
     put the flat icons back while the plate is there. Transition cards play
     the real effect between two bundled plates (`trans_plates.cpp`): snow is
     A, green is B, ping-pong over 3s. `DrawTransitionCard` uses `FxEvaluate`
-    (dissolve alpha, wipe clip, zoom UV, dip). The orange and blue blocks
+    (dissolve alpha, wipe clip, zoom UV, dip). A card whose `shape` is not 0
+    paints the plates with `FxPaint` at 192×108 instead of that GL path. The orange and blue blocks
     are only the fallback if those plates did not upload. Do not put the
     blocks back while the plates are there. `libtrans` keeps
     `AlwaysVerticalScrollbar`, so the card grid does not jump between two
@@ -377,7 +389,8 @@ int y = (int)(v * (float)h);
 
 Preview reveal inside `BlitFxPair` only when
 `haveB && look.wipe == 0 && bgShowN > 0 && previewFrameValid &&` stencil bits `> 0`.
-A wipe uses a scissor on B (`wipe` 1 from the left, 2 from the right, 3 from the top, 4 from the bottom). A dip draws a color quad over the frame after the pair.
+`look.shape != 0` does not take that path: `DrawShapePreview` paints `FxPaint`
+and returns. A wipe uses a scissor on B (`wipe` 1 from the left, 2 from the right, 3 from the top, 4 from the bottom). A dip draws a color quad over the frame after the pair.
 `SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8)` **before** `SDL_CreateWindow`.
 `revealTex` is declared in the outer `if`, not inside the stencil block
 (it is used later). Cap the `glGetError` drain at 8.

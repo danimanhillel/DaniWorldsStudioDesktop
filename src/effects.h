@@ -13,6 +13,7 @@ struct FxLook {
     float dipG = 0.0f;
     float dipB = 0.0f;
     int wipe = 0;
+    int shape = 0;
 };
 
 class ClipEffect {
@@ -29,6 +30,10 @@ ClipEffect* FxAt(int index);
 ClipEffect* FxFind(const char* id);
 bool FxKnown(const char* id);
 void FxEvaluate(const char* id, float progress, FxLook& look);
+void FxPaint(const FxLook& look,
+             uint8_t* dst, int dw, int dh,
+             const uint8_t* a, int aw, int ah,
+             const uint8_t* b, int bw, int bh);
 void FxComposite(const char* id, float progress,
                  uint8_t* dst, int dw, int dh,
                  const uint8_t* a, int aw, int ah,

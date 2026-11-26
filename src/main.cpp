@@ -4496,7 +4496,9 @@ void ExportSession::Step() {
             std::fill(canvas.begin(), canvas.end(), 0);
             if (blitClip(tb, t)) frameB = canvas;
             else frameB.assign(canvas.size(), 0);
-            if (!gaps) {
+            FxLook early;
+            FxEvaluate(tid.c_str(), tp, early);
+            if (!gaps || early.shape != 0) {
                 FxComposite(tid.c_str(), tp, canvas.data(), w, h,
                             frameA.data(), w, h, frameB.data(), w, h);
             } else {
@@ -5549,6 +5551,8 @@ void BlitVideo(ImVec2 p0, ImVec2 p1, GLuint tex, int vw, int vh, ImVec2 clip0, I
 
 static GLuint gTransTexA = 0;
 static GLuint gTransTexB = 0;
+static std::vector<unsigned char> gPlateA, gPlateB;
+static int gPlateAw = 0, gPlateAh = 0, gPlateBw = 0, gPlateBh = 0;
 
 #ifdef _WIN32
 static bool DecodePlateRgba(const unsigned char* bytes, int nbytes, std::vector<unsigned char>& px, int& w, int& h) {
@@ -5650,6 +5654,12 @@ static void EnsureTransPlates() {
     if (!DecodePlateRgba(bb, nb, pb, wb, hb)) return;
     UploadTransTex(gTransTexA, pa.data(), wa, ha);
     UploadTransTex(gTransTexB, pb.data(), wb, hb);
+    gPlateA.swap(pa);
+    gPlateB.swap(pb);
+    gPlateAw = wa;
+    gPlateAh = ha;
+    gPlateBw = wb;
+    gPlateBh = hb;
 #else
     (void)0;
 #endif
@@ -5664,6 +5674,41 @@ static void DrawTransitionCard(ImDrawList* dl, ImVec2 p0, ImVec2 p1, const char*
     float progress = shown / span;
     FxLook look;
     FxEvaluate(id, progress, look);
+    if (look.shape != 0 && !gPlateA.empty() && !gPlateB.empty()) {
+        const int tw = 192, th = 108;
+        static std::vector<unsigned char> pix;
+        pix.resize((size_t)tw * (size_t)th * 4);
+        FxPaint(look, pix.data(), tw, th, gPlateA.data(), gPlateAw, gPlateAh, gPlateB.data(), gPlateBw, gPlateBh);
+        struct Slot { const char* id; GLuint tex; };
+        static Slot slots[64];
+        GLuint tex = 0;
+        for (int i = 0; i < 64; i++) {
+            if (slots[i].id == id) { tex = slots[i].tex; break; }
+            if (!slots[i].id) {
+                slots[i].id = id;
+                glGenTextures(1, &slots[i].tex);
+                tex = slots[i].tex;
+                break;
+            }
+        }
+        if (tex) {
+            GLint prev = 0;
+            glGetIntegerv(GL_TEXTURE_BINDING_2D, &prev);
+            glBindTexture(GL_TEXTURE_2D, tex);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tw, th, 0, GL_RGBA, GL_UNSIGNED_BYTE, pix.data());
+            glBindTexture(GL_TEXTURE_2D, (GLuint)prev);
+            dl->PushClipRect(p0, p1, true);
+            dl->AddImage((ImTextureID)(intptr_t)tex, p0, p1, ImVec2(0, 0), ImVec2(1, 1), IM_COL32_WHITE);
+            dl->AddRect(p0, p1, IM_COL32(90, 96, 110, 255), 2.0f);
+            dl->PopClipRect();
+            return;
+        }
+    }
     float wb = look.alphaB;
     if (wb < 0.0f) wb = 0.0f;
     if (wb > 1.0f) wb = 1.0f;
@@ -5740,7 +5785,136 @@ static void DrawTransitionCard(ImDrawList* dl, ImVec2 p0, ImVec2 p1, const char*
     dl->PopClipRect();
 }
 
+static bool DrawShapePreview(ImVec2 p0, ImVec2 p1, GLuint texA, int aw, int ah, GLuint texB, int bw, int bh, const FxLook& look) {
+    if (look.shape == 0 || !texA || !texB || aw < 1 || ah < 1 || bw < 1 || bh < 1) return false;
+    if ((long long)aw * ah > 3840LL * 2160LL || (long long)bw * bh > 3840LL * 2160LL) return false;
+    static std::vector<unsigned char> pixA, pixB, out;
+    pixA.resize((size_t)aw * (size_t)ah * 4);
+    pixB.resize((size_t)bw * (size_t)bh * 4);
+    GLint prevTex = 0;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &prevTex);
+    GLint pack = 4, unpack = 4;
+    glGetIntegerv(GL_PACK_ALIGNMENT, &pack);
+    glGetIntegerv(GL_UNPACK_ALIGNMENT, &unpack);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    for (int n = 0; n < 8 && glGetError() != GL_NO_ERROR; n++) {}
+    glBindTexture(GL_TEXTURE_2D, texA);
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixA.data());
+    glBindTexture(GL_TEXTURE_2D, texB);
+    glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixB.data());
+    bool readOk = glGetError() == GL_NO_ERROR;
+    glPixelStorei(GL_PACK_ALIGNMENT, pack);
+    if (!readOk) {
+        glPixelStorei(GL_UNPACK_ALIGNMENT, unpack);
+        glBindTexture(GL_TEXTURE_2D, (GLuint)prevTex);
+        return false;
+    }
+    int dw = aw;
+    int dh = ah;
+    if (dw > 960) {
+        dh = (int)((double)ah * 960.0 / (double)aw + 0.5);
+        dw = 960;
+    }
+    if (dw < 2) dw = 2;
+    if (dh < 2) dh = 2;
+    dw &= ~1;
+    dh &= ~1;
+    if (dw < 2) dw = 2;
+    if (dh < 2) dh = 2;
+    out.resize((size_t)dw * (size_t)dh * 4);
+    FxPaint(look, out.data(), dw, dh, pixA.data(), aw, ah, pixB.data(), bw, bh);
+    static GLuint mixTex = 0;
+    static int mixW = 0, mixH = 0;
+    if (!mixTex) glGenTextures(1, &mixTex);
+    glBindTexture(GL_TEXTURE_2D, mixTex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    if (mixW != dw || mixH != dh) {
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, dw, dh, 0, GL_RGBA, GL_UNSIGNED_BYTE, out.data());
+        mixW = dw;
+        mixH = dh;
+    } else {
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, dw, dh, GL_RGBA, GL_UNSIGNED_BYTE, out.data());
+    }
+    glPixelStorei(GL_UNPACK_ALIGNMENT, unpack);
+    ImGuiIO& io = ImGui::GetIO();
+    float areaW = p1.x - p0.x;
+    float areaH = p1.y - p0.y;
+    if (areaW < 4.0f || areaH < 4.0f) {
+        glBindTexture(GL_TEXTURE_2D, (GLuint)prevTex);
+        return true;
+    }
+    ImVec2 box0 = p0, box1 = p1;
+    float aspect = (float)dw / (float)dh;
+    float areaAspect = areaW / areaH;
+    if (aspect > areaAspect) {
+        float hh = areaW / aspect;
+        float off = (areaH - hh) * 0.5f;
+        box0.y += off;
+        box1.y -= off;
+    } else {
+        float ww = areaH * aspect;
+        float off = (areaW - ww) * 0.5f;
+        box0.x += off;
+        box1.x -= off;
+    }
+    if (recordFit) { fitA = box0; fitB = box1; fitValid = true; }
+    float sx0 = std::max(p0.x, 0.0f);
+    float sy0 = std::max(p0.y, 0.0f);
+    float sx1 = std::min(p1.x, io.DisplaySize.x);
+    float sy1 = std::min(p1.y, io.DisplaySize.y);
+    if (previewFrameValid) {
+        sx0 = std::max(sx0, previewFrameMin.x);
+        sy0 = std::max(sy0, previewFrameMin.y);
+        sx1 = std::min(sx1, previewFrameMax.x);
+        sy1 = std::min(sy1, previewFrameMax.y);
+    }
+    if (pglUseProgram) pglUseProgram(0);
+    GLboolean blendOn = glIsEnabled(GL_BLEND);
+    GLboolean scissorOn = glIsEnabled(GL_SCISSOR_TEST);
+    GLboolean texOn = glIsEnabled(GL_TEXTURE_2D);
+    GLboolean depthOn = glIsEnabled(GL_DEPTH_TEST);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_BLEND);
+    glEnable(GL_TEXTURE_2D);
+    if (sx1 - sx0 >= 1.0f && sy1 - sy0 >= 1.0f) {
+        glEnable(GL_SCISSOR_TEST);
+        glScissor((int)sx0, (int)(io.DisplaySize.y - sy1), std::max(1, (int)(sx1 - sx0)), std::max(1, (int)(sy1 - sy0)));
+        glMatrixMode(GL_PROJECTION);
+        glPushMatrix();
+        glLoadIdentity();
+        glOrtho(0, io.DisplaySize.x, io.DisplaySize.y, 0, -1, 1);
+        glMatrixMode(GL_MODELVIEW);
+        glPushMatrix();
+        glLoadIdentity();
+        glBindTexture(GL_TEXTURE_2D, mixTex);
+        glColor4f(1.f, 1.f, 1.f, 1.f);
+        glBegin(GL_QUADS);
+        glTexCoord2f(0, 0); glVertex2f(box0.x, box0.y);
+        glTexCoord2f(1, 0); glVertex2f(box1.x, box0.y);
+        glTexCoord2f(1, 1); glVertex2f(box1.x, box1.y);
+        glTexCoord2f(0, 1); glVertex2f(box0.x, box1.y);
+        glEnd();
+        glPopMatrix();
+        glMatrixMode(GL_PROJECTION);
+        glPopMatrix();
+        glMatrixMode(GL_MODELVIEW);
+    }
+    if (blendOn) glEnable(GL_BLEND); else glDisable(GL_BLEND);
+    if (scissorOn) glEnable(GL_SCISSOR_TEST); else glDisable(GL_SCISSOR_TEST);
+    if (texOn) glEnable(GL_TEXTURE_2D); else glDisable(GL_TEXTURE_2D);
+    if (depthOn) glEnable(GL_DEPTH_TEST); else glDisable(GL_DEPTH_TEST);
+    glColor4f(1.f, 1.f, 1.f, 1.f);
+    glBindTexture(GL_TEXTURE_2D, (GLuint)prevTex);
+    if (pglUseProgram) pglUseProgram(0);
+    return true;
+}
+
 void BlitFxPair(ImVec2 p0, ImVec2 p1, GLuint texA, int aw, int ah, GLuint texB, int bw, int bh, const FxLook& look, const Clip* ca = nullptr, const Clip* cb = nullptr) {
+    if (look.shape != 0 && DrawShapePreview(p0, p1, texA, aw, ah, texB, bw, bh, look)) return;
     if (!texA || aw <= 0 || ah <= 0) return;
     ImGuiIO& io = ImGui::GetIO();
     float areaW = p1.x - p0.x;
