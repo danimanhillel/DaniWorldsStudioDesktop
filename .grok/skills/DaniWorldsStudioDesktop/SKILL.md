@@ -659,6 +659,11 @@ Tracks: body about 52px. The wave (about 36px) is not part of the lane
 until a clip on it is open. FX and SUBS stay 42. Do not force every lane
 to the open height. The timeline child has `AlwaysVerticalScrollbar` and
 its height is capped near half the window, so open channels still scroll.
+A master meter sits to the right of the channels (`masterout`), not in
+the scroller. The colored bars are the output level (green, then yellow,
+then red). The fader under them is `masterGain`, 0 to 1.5, saved as
+`master`. It scales `MixTimeline`, so preview and export both follow it.
+Do not move that fader onto a video lane.
 
 Zoom: `SliderFloat` `##tlzoom` on the **right**, immediately to the left of
 the aspect combo (`##previewaspect`), not beside the transport buttons.

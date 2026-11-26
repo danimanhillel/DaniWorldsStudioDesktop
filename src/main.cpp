@@ -190,6 +190,9 @@ SubStyle subStyle;
 std::vector<ThumbBlit> thumbBlits;
 float currentTime = 0.0f;
 float pixelsPerSecond = 50.0f;
+float masterGain = 1.0f;
+float masterRawL = 0.0f;
+float masterRawR = 0.0f;
 bool isPlaying = false;
 bool repeatOn = false;
 bool snapEnabled = true;
@@ -1778,12 +1781,23 @@ void MixTimeline(double timelineTime, int sampleCount, int16_t* dst) {
             mix[i * 2 + 1] += (int32_t)(shaped[i * 2 + 1] * g);
         }
     }
-    for (int i = 0; i < sampleCount * 2; i++) {
-        int v = mix[i];
-        if (v > 32767) v = 32767;
-        if (v < -32768) v = -32768;
-        dst[i] = (int16_t)v;
+    float mg = masterGain;
+    if (mg < 0.0f) mg = 0.0f;
+    if (mg > 1.5f) mg = 1.5f;
+    float pkL = 0.0f, pkR = 0.0f;
+    for (int i = 0; i < sampleCount; i++) {
+        for (int ch = 0; ch < 2; ch++) {
+            float s = (float)mix[i * 2 + ch] * mg;
+            if (s > 32767.0f) s = 32767.0f;
+            if (s < -32768.0f) s = -32768.0f;
+            dst[i * 2 + ch] = (int16_t)s;
+            float a = std::fabs(s) / 32768.0f;
+            if (ch == 0) { if (a > pkL) pkL = a; }
+            else if (a > pkR) pkR = a;
+        }
     }
+    if (pkL > masterRawL) masterRawL = pkL;
+    if (pkR > masterRawR) masterRawR = pkR;
 }
 
 static double ProjectEnd() {
@@ -7599,6 +7613,9 @@ void ClearProject() {
     trimmingOv = -1;
     currentTime = 0;
     shownLocal = -1000.0f;
+    masterGain = 1.0f;
+    masterRawL = 0.0f;
+    masterRawR = 0.0f;
     repeatOn = false;
 #ifdef HAVE_FFMPEG
     SetPlaying(false);
@@ -7732,6 +7749,7 @@ bool SaveProject(const std::string& path) {
     fprintf(f, "snap %d\n", snapEnabled ? 1 : 0);
     fprintf(f, "repeat %d\n", repeatOn ? 1 : 0);
     fprintf(f, "pps %.3f\n", pixelsPerSecond);
+    fprintf(f, "master %.4f\n", masterGain);
     fprintf(f, "aspect %d\n", exAspect);
     for (const auto& m : media) {
         std::string p = m.path;
@@ -8097,6 +8115,11 @@ bool LoadProject(const std::string& path) {
         } else if (strncmp(line, "pps ", 4) == 0) {
             float p = (float)atof(line + 4);
             if (p >= 1.0f && p <= 400.0f) pixelsPerSecond = p;
+        } else if (strncmp(line, "master ", 7) == 0) {
+            float g = (float)atof(line + 7);
+            if (g < 0.0f) g = 0.0f;
+            if (g > 1.5f) g = 1.5f;
+            masterGain = g;
         } else if (strncmp(line, "aspect ", 7) == 0) {
             int a = atoi(line + 7);
             if (a >= 0 && a <= 4) exAspect = a;
@@ -9339,7 +9362,8 @@ int main(int argc, char* argv[]) {
         }
         float timeW = tlSeconds * pixelsPerSecond;
         ImGui::BeginChild("Timeline", ImVec2(0, tlH), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-        tlViewW = ImGui::GetWindowWidth();
+        const float meterW = 78.0f;
+        tlViewW = ImGui::GetWindowWidth() - meterW;
         const char* trackNames[] = {"V1", "V2", "V3", "A1", "A2", "A3"};
         const float kBodyH = kClipBody;
         const float kWaveH = kClipWave;
@@ -9353,7 +9377,7 @@ int main(int argc, char* argv[]) {
         ImVec2 rulerCursor = ImGui::GetCursorPos();
         ImGui::Dummy(ImVec2(1.0f, rulerH));
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
-        ImGui::BeginChild("tlbody", ImVec2(0, 0), false, ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_AlwaysHorizontalScrollbar | ImGuiWindowFlags_AlwaysVerticalScrollbar);
+        ImGui::BeginChild("tlbody", ImVec2(-meterW, 0), false, ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_AlwaysHorizontalScrollbar | ImGuiWindowFlags_AlwaysVerticalScrollbar);
         ImGui::PopStyleVar();
         float bodyScrollX = ImGui::GetScrollX();
 
@@ -10299,7 +10323,7 @@ int main(int argc, char* argv[]) {
         ImGui::SetCursorPos(rulerCursor);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
         ImGui::SetNextWindowScroll(ImVec2(bodyScrollX, 0.0f));
-        ImGui::BeginChild("ruler", ImVec2(0.0f, rulerH), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        ImGui::BeginChild("ruler", ImVec2(-meterW, rulerH), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
         ImGui::PopStyleVar();
         float gutter = 46.0f;
         ImGui::SetCursorPos(ImVec2(gutter, 4.0f));
@@ -10337,6 +10361,90 @@ int main(int argc, char* argv[]) {
         ImGui::SetCursorPos(ImVec2(timeW + 90.0f + ImGui::GetStyle().ScrollbarSize, 0.0f));
         ImGui::Dummy(ImVec2(1.0f, 1.0f));
         ImGui::EndChild();
+        {
+            static float showL = 0.0f, showR = 0.0f, hold = 0.0f;
+            float fall = std::exp(-std::max(0.0f, io.DeltaTime) * 8.0f);
+            float holdFall = std::exp(-std::max(0.0f, io.DeltaTime) * 1.4f);
+            if (masterRawL > showL) showL = masterRawL; else showL *= fall;
+            if (masterRawR > showR) showR = masterRawR; else showR *= fall;
+            float loud = showL > showR ? showL : showR;
+            if (loud >= hold) hold = loud; else hold *= holdFall;
+            masterRawL = 0.0f;
+            masterRawR = 0.0f;
+            ImVec2 host = ImGui::GetWindowPos();
+            ImVec2 hostSz = ImGui::GetWindowSize();
+            float pad = ImGui::GetStyle().WindowPadding.x;
+            ImGui::SetCursorScreenPos(ImVec2(host.x + hostSz.x - meterW - pad * 0.5f, host.y + rulerH + 2.0f));
+            float colH = hostSz.y - rulerH - 10.0f;
+            if (colH < 48.0f) colH = 48.0f;
+            ImGui::BeginChild("masterout", ImVec2(meterW - 4.0f, colH), false, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoBackground);
+            float meterH = colH * 0.46f;
+            if (meterH < 36.0f) meterH = 36.0f;
+            if (meterH > colH - 48.0f) meterH = colH - 48.0f;
+            ImVec2 m0 = ImGui::GetCursorScreenPos();
+            float mW = ImGui::GetContentRegionAvail().x;
+            ImGui::InvisibleButton("meterhit", ImVec2(mW, meterH));
+            ImDrawList* mdl = ImGui::GetWindowDrawList();
+            ImVec2 m1(m0.x + mW, m0.y + meterH);
+            mdl->AddRectFilled(m0, m1, IM_COL32(22, 22, 22, 255), 3.0f);
+            auto segColor = [](float t) -> ImU32 {
+                if (t >= 0.86f) return IM_COL32(220, 36, 32, 255);
+                if (t >= 0.62f) return IM_COL32(230, 196, 32, 255);
+                return IM_COL32(36, 196, 64, 255);
+            };
+            float levels[2] = {showL, showR};
+            float gap = 3.0f;
+            float barW = (mW - 16.0f - gap) * 0.5f;
+            if (barW < 6.0f) barW = 6.0f;
+            float x0 = m0.x + (mW - (barW * 2.0f + gap)) * 0.5f;
+            float innerTop = m0.y + 5.0f;
+            float innerBot = m1.y - 5.0f;
+            float innerH = innerBot - innerTop;
+            int segs = (int)(innerH / 4.0f);
+            if (segs < 8) segs = 8;
+            if (segs > 48) segs = 48;
+            for (int ch = 0; ch < 2; ch++) {
+                float bx = x0 + ch * (barW + gap);
+                for (int s = 0; s < segs; s++) {
+                    float t0 = (float)s / (float)segs;
+                    float t1 = (float)(s + 1) / (float)segs;
+                    bool on = levels[ch] >= t0 + 0.5f / (float)segs;
+                    float y1 = innerBot - t0 * innerH;
+                    float y0 = innerBot - t1 * innerH;
+                    mdl->AddRectFilled(ImVec2(bx, y0 + 0.6f), ImVec2(bx + barW, y1 - 0.4f), on ? segColor(t0) : IM_COL32(40, 40, 40, 255));
+                }
+            }
+            if (hold > 0.02f && innerH > 4.0f) {
+                float hy = innerBot - std::min(1.0f, hold) * innerH;
+                mdl->AddLine(ImVec2(x0, hy), ImVec2(x0 + barW * 2.0f + gap, hy), IM_COL32(245, 245, 245, 230), 1.4f);
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Output");
+            float faderH = ImGui::GetContentRegionAvail().y;
+            if (faderH < 36.0f) faderH = 36.0f;
+            float sliderW = 18.0f;
+            ImGui::SetCursorPosX((mW - sliderW) * 0.5f);
+            ImVec2 f0 = ImGui::GetCursorScreenPos();
+            ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.10f, 0.10f, 0.10f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_SliderGrab, ImVec4(0.78f, 0.78f, 0.80f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, ImVec4(0.92f, 0.92f, 0.94f, 1.0f));
+            ImGui::PushStyleVar(ImGuiStyleVar_GrabMinSize, 14.0f);
+            bool moved = ImGui::VSliderFloat("##master", ImVec2(sliderW, faderH), &masterGain, 0.0f, 1.5f, "");
+            ImGui::PopStyleVar();
+            ImGui::PopStyleColor(3);
+            if (moved) {
+                if (masterGain < 0.0f) masterGain = 0.0f;
+                if (masterGain > 1.5f) masterGain = 1.5f;
+#ifdef HAVE_FFMPEG
+                ResetAudioSync();
+#endif
+            }
+            ImVec2 f1 = ImGui::GetItemRectMax();
+            float unity = 1.0f / 1.5f;
+            float uy = f1.y - unity * (f1.y - f0.y);
+            mdl->AddLine(ImVec2(f0.x - 7.0f, uy), ImVec2(f0.x - 2.0f, uy), IM_COL32(220, 220, 220, 220), 1.2f);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Master %d%%", (int)std::lround(masterGain * 100.0f));
+            ImGui::EndChild();
+        }
         ImGui::EndChild();
 
         if (openClipMenu) {
