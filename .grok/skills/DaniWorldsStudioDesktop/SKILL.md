@@ -497,8 +497,18 @@ There is no second upscale pass.
 
 Windows-only, `onnxruntime.dll` loaded dynamically, model
 `models/rife49.onnx` or `rife.onnx` next to the exe (same folder the user
-already uses). CUDA via `PreloadCuda` (zlibwapi, CUDA 13, cuDNN). Log
-`rife.log`. Do not `FreeLibrary` the kept preload module. The build does not
+already uses). CUDA via `PreloadCuda` (zlibwapi, CUDA 13, cuDNN). After
+cudart loads, `ProbeGpu` calls `cudaGetDeviceCount`, `cudaDeviceGetAttribute`
+(compute capability major is attribute 75, minor is 76), `cudaDeviceGetName`,
+and `cudaMemGetInfo`. It keeps the NVIDIA GPU with the highest compute
+capability (an RTX 5090 is 12.0), then the most VRAM, and `cudaSetDevice`s
+that index. ORT gets `device_id`, `gpu_mem_limit` (total minus one eighth,
+and not past free minus 512MB), and `use_tf32=1` when the capability is 8
+or newer so cuDNN runs the FP32 convolutions on tensor cores. There is no
+`.cu` file and no `CMAKE_CUDA_ARCHITECTURES`. Do not add nvcc. If the full
+option set is rejected, retry with the memory limit, then with `device_id`
+only. The card is written to `rife.log` and to the RIFE status line. Do not
+`FreeLibrary` the kept preload module. The build does not
 download the DLL or the model. Do not send guessed ONNX Runtime zip URLs.
 
 ### Whisper subs (already shipped)

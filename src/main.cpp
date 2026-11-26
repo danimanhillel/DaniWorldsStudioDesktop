@@ -4546,7 +4546,7 @@ bool ExportSession::BeginRifePass() {
     if (total < 1) total = 1;
     phase = 1;
     fps = outFps;
-    status = RifeProbe().cuda ? "RIFE GPU" : RifeProbe().detail;
+    status = RifeProbe().detail;
     previewStatus = status;
     return true;
 }

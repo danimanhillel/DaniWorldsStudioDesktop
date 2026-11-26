@@ -40,6 +40,10 @@ ripple insert, or panels-above-timeline.
   19–25 (shader in preview, `FilmGrade` on export). The Media, Effects, and
   Solids tabs stay pinned; only the cards under them scroll. Effects cards
   show the bundled plate through the real preview shader, not the flat icon.
+- RIFE queries the CUDA runtime for the GPU. A 5090 (compute capability 12.0)
+  wins over a weaker card. TF32 is enabled from capability 8 up so cuDNN can
+  use tensor cores, and the arena limit comes from VRAM. There is no nvcc
+  architecture flag and no `.cu` file.
 - The timeline ruler stays pinned while the channels scroll vertically.
   Horizontal scroll stays shared (`tlbody` scroll, ruler follows).
 - Preview keeps more seconds ahead (small clips 14s, large clips 9s / 11s
