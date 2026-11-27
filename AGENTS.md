@@ -46,8 +46,9 @@ ripple insert, or panels-above-timeline.
   transition menu back. Do not restore the inverted opacity ramp.
 - Overlay effects stay append-only. Zoom In and Zoom Out are kinds 3 and 4.
   Dust, Cassette, Frame, Film Dust, Retro Dust, Old Film, and Record are
-  19–25. Motion Blur is 26 and Gradient Blur is 27 (`OverlayKindCount` is 28).
-  Do not renumber them. Direction does not rotate those two layers. Their
+  19–25. Motion Blur is 26, Gradient Blur is 27, and Sharpen is 28
+  (`OverlayKindCount` is 29). Do not renumber them. Direction does not rotate
+  the blur layers. Sharpen is a strong luminance unsharp mask. Their
   extra knobs are project line `N`. Isotropic Blur / Blur In / Blur Out stay
   5 / 6 / 7. The Media, Effects, Solids,
   and Transitions tabs stay pinned; only the cards under them scroll. Effects cards
@@ -63,8 +64,8 @@ ripple insert, or panels-above-timeline.
   Subtitle style, and Overlay have SAVE and LOAD. SAVE is a name only. The
   file lands in `%USERPROFILE%\DaniWorldsStudio\Looks\<kind>\<name>.dlook`,
   not a picked path, and it is not part of the project. Startup scans that
-  folder so LOAD is the list inside the panel. Click a name to load it. Do not
-  put that list in a popup. Bus and clip color share one file kind. Do not
+  folder so LOAD is a list of buttons inside the panel. Click a name to load it.
+  The label is white and not clipped. Do not put that list in a popup. Bus and clip color share one file kind. Do not
   put SAVE/LOAD on the clip menu.
 - RIFE queries the CUDA runtime for the GPU, or the NVIDIA driver if that
   runtime cannot name the card. A 5090 (compute capability 12.0) wins over a

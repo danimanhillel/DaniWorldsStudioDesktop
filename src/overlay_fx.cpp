@@ -15,7 +15,7 @@ void OverlayClear() {
     gOverlaySel = -1;
 }
 
-int OverlayKindCount() { return 28; }
+int OverlayKindCount() { return 29; }
 
 const char* OverlayKindName(int kind) {
     switch (kind) {
@@ -47,6 +47,7 @@ const char* OverlayKindName(int kind) {
     case 25: return "Record";
     case 26: return "Motion Blur";
     case 27: return "Gradient Blur";
+    case 28: return "Sharpen";
     default: return "Effect";
     }
 }
@@ -72,6 +73,9 @@ void OverlayAdd(int kind, float start) {
         o.knob[1] = 0.20f;
         o.knob[2] = 0.65f;
         o.knob[3] = 1.0f;
+    } else if (kind == 28) {
+        o.amount = 0.75f;
+        o.knob[0] = 0.45f;
     } else o.amount = 0.75f;
     o.dir = 1;
     gOverlays.push_back(o);
@@ -244,6 +248,11 @@ static FxEval EvalFx(const OverlayFx& o, float time, float shortSide) {
             e.curve[i] = v;
         }
         if (o.kind == 26 && e.curve[0] < 0.05f) e.curve[0] = 0.55f;
+    } else if (o.kind == 28) {
+        float v = o.knob[0];
+        if (v < 0.05f) v = 0.05f;
+        if (v > 1.0f) v = 1.0f;
+        e.curve[0] = v;
     }
     return e;
 }
@@ -550,6 +559,18 @@ static bool EnsureFxShader() {
         "        len = ramp4(curve, along) * amount * 0.14;\n"
         "      }\n"
         "      if (len > 0.0008) col = smear(src, dirv, len, fall);\n"
+        "    }\n"
+        "    if (mode > 27.5 && mode < 28.5) {\n"
+        "      float rad = curve.x < 0.05 ? 0.45 : curve.x;\n"
+        "      vec2 px = texel * (1.0 + rad * 2.5);\n"
+        "      vec3 blurc = texture2D(tex, tuv + vec2(px.x, 0.0)).rgb;\n"
+        "      blurc += texture2D(tex, tuv - vec2(px.x, 0.0)).rgb;\n"
+        "      blurc += texture2D(tex, tuv + vec2(0.0, px.y)).rgb;\n"
+        "      blurc += texture2D(tex, tuv - vec2(0.0, px.y)).rgb;\n"
+        "      blurc *= 0.25;\n"
+        "      float lc = dot(col, vec3(0.299, 0.587, 0.114));\n"
+        "      float lb = dot(blurc, vec3(0.299, 0.587, 0.114));\n"
+        "      col = clamp(col + vec3(lc - lb) * (amount * 4.0), 0.0, 1.0);\n"
         "    }\n"
         "  }\n"
         "  vec3 outc = inside > 0.5 ? col : vec3(0.0);\n"
@@ -906,6 +927,9 @@ void OverlayPreviewTick(float time) {
             o.knob[1] = 0.15f;
             o.knob[2] = 0.55f;
             o.knob[3] = 1.0f;
+        } else if (kind == 28) {
+            o.amount = 0.9f;
+            o.knob[0] = 0.5f;
         }
         FxEval e = EvalFx(o, shown, (float)std::min(plateW, plateH));
         GLuint dst = previewTex[(size_t)kind];
@@ -1061,6 +1085,45 @@ static void DirectionalBlur(const unsigned char* src, int w, int h, float sx, fl
     r = accR / wsum;
     g = accG / wsum;
     b = accB / wsum;
+}
+
+static void SharpenPixel(const unsigned char* src, int w, int h, float sx, float sy,
+                         float amount, float rad, float& r, float& g, float& b) {
+    if (rad < 0.05f) rad = 0.45f;
+    float px = 1.0f + rad * 2.5f;
+    float accR = 0, accG = 0, accB = 0;
+    const float ox[4] = {px, -px, 0.0f, 0.0f};
+    const float oy[4] = {0.0f, 0.0f, px, -px};
+    float cx = sx * (float)(w - 1);
+    float cy = sy * (float)(h - 1);
+    for (int i = 0; i < 4; i++) {
+        float fx = cx + ox[i];
+        float fy = cy + oy[i];
+        if (fx < 0) fx = 0;
+        if (fy < 0) fy = 0;
+        if (fx > (float)(w - 1)) fx = (float)(w - 1);
+        if (fy > (float)(h - 1)) fy = (float)(h - 1);
+        float rr, gg, bb;
+        SampleRGBA(src, w, h, fx, fy, rr, gg, bb);
+        accR += rr;
+        accG += gg;
+        accB += bb;
+    }
+    accR *= 0.25f;
+    accG *= 0.25f;
+    accB *= 0.25f;
+    float lc = r * 0.299f + g * 0.587f + b * 0.114f;
+    float lb = accR * 0.299f + accG * 0.587f + accB * 0.114f;
+    float d = (lc - lb) * (amount * 4.0f);
+    r += d;
+    g += d;
+    b += d;
+    if (r < 0) r = 0;
+    if (g < 0) g = 0;
+    if (b < 0) b = 0;
+    if (r > 1) r = 1;
+    if (g > 1) g = 1;
+    if (b > 1) b = 1;
 }
 
 static void FilmGrade(int mode, float amount, float time, float sx, float sy,
@@ -1412,6 +1475,8 @@ void OverlayStamp(unsigned char* canvas, int w, int h, float time) {
                         }
                         DirectionalBlur(work.data(), w, h, sx, sy, ax, ay, len, fall, r, g, b);
                     }
+                    if (mode == 28)
+                        SharpenPixel(work.data(), w, h, sx, sy, e.amount, e.curve[0], r, g, b);
                 }
                 const unsigned char* base = work.data() + ((size_t)y * w + x) * 4;
                 float k = e.opacity;

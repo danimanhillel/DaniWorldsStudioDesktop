@@ -3938,6 +3938,7 @@ static ImU32 FxLaneColor(int kind) {
     case 25: return IM_COL32(40, 32, 28, 235);
     case 26: return IM_COL32(64, 112, 168, 235);
     case 27: return IM_COL32(72, 146, 126, 235);
+    case 28: return IM_COL32(214, 220, 232, 235);
     default: return IM_COL32(140, 70, 110, 235);
     }
 }
@@ -4106,6 +4107,11 @@ static void DrawFxIcon(ImDrawList* dl, ImVec2 a, ImVec2 b, int kind) {
             float x1 = x0 + (p1.x - p0.x) / 6.0f - 1.0f;
             dl->AddRectFilled(ImVec2(x0, p0.y), ImVec2(x1, p1.y), IM_COL32(90, 170, 150, a));
         }
+    } else if (kind == 28) {
+        dl->AddRectFilled(ImVec2(c.x - w * 0.46f, c.y - h * 0.40f), ImVec2(c.x + w * 0.46f, c.y + h * 0.40f), IM_COL32(36, 40, 48, 255), 2.0f);
+        dl->AddLine(ImVec2(c.x - w * 0.34f, c.y), ImVec2(c.x + w * 0.34f, c.y), IM_COL32(236, 240, 246, 255), 1.6f);
+        dl->AddLine(ImVec2(c.x, c.y - h * 0.30f), ImVec2(c.x, c.y + h * 0.30f), IM_COL32(236, 240, 246, 255), 1.6f);
+        dl->AddCircle(c, h * 0.16f, IM_COL32(236, 240, 246, 255), 16, 1.4f);
     } else {
         quad(c, w * 0.7f, h * 0.7f, 0, IM_COL32(120, 120, 120, 255));
     }
@@ -8160,6 +8166,9 @@ static bool ReadFxLook(const std::string& path, OverlayFx& o) {
         o.knob[1] = 0.20f;
         o.knob[2] = 0.65f;
         o.knob[3] = 1.0f;
+    } else if (kind == 28) {
+        o.knob[0] = 0.45f;
+        o.knob[1] = o.knob[2] = o.knob[3] = 0;
     }
     return true;
 }
@@ -8212,33 +8221,31 @@ static void RunLook(const char* kind, SaveFn save, LoadFn load) {
     }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Saves under your Windows profile");
     ImGui::TextUnformatted("LOAD");
-    float line = ImGui::GetTextLineHeightWithSpacing();
-    int n = (int)bin->names.size();
-    float rows = n < 1 ? 1.0f : (n > 6 ? 6.0f : (float)n);
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.22f, 0.24f, 0.28f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.45f, 0.48f, 0.54f, 1.0f));
-    ImGui::BeginChild("##savedlooks", ImVec2(260.0f, rows * line + 8.0f), true);
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.22f, 0.26f, 0.34f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.34f, 0.50f, 0.74f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.26f, 0.42f, 0.64f, 1.0f));
     if (bin->names.empty()) {
-        ImGui::TextColored(ImVec4(0.82f, 0.84f, 0.88f, 1.0f), "Nothing saved yet");
+        ImGui::TextUnformatted("Nothing saved yet");
     } else {
         int idx = 0;
+        int shownN = (int)bin->names.size();
+        bool scroll = shownN > 6;
+        if (scroll) ImGui::BeginChild("##savedlooks", ImVec2(260.0f, 6.0f * ImGui::GetFrameHeightWithSpacing() + 4.0f), false);
         for (const std::string& name : bin->names) {
             std::string shown = HasHebrew(name) ? ReverseUtf8(name) : name;
             ImGui::PushID(idx++);
-            float w = ImGui::GetContentRegionAvail().x;
-            ImVec2 p = ImGui::GetCursorScreenPos();
-            if (ImGui::Selectable("##row", false, 0, ImVec2(w, ImGui::GetTextLineHeight()))) {
+            if (ImGui::Button(shown.c_str(), ImVec2(248.0f, 0.0f))) {
                 snprintf(bin->typed, sizeof(bin->typed), "%s", shown.c_str());
                 bin->chars = (int)strlen(bin->typed);
                 bin->arm = HasHebrew(shown);
                 previewStatus = load(LookFilePath(kind, name)) ? "Look loaded" : "Could not load look";
             }
-            ImGui::GetWindowDrawList()->AddText(ImVec2(p.x + 4.0f, p.y), IM_COL32(245, 247, 250, 255), shown.c_str());
             ImGui::PopID();
         }
+        if (scroll) ImGui::EndChild();
     }
-    ImGui::EndChild();
-    ImGui::PopStyleColor(2);
+    ImGui::PopStyleColor(4);
 }
 
 void ClearProject() {
@@ -8448,7 +8455,7 @@ bool SaveProject(const std::string& path) {
     for (const auto& o : gOverlays) {
         fprintf(f, "O %d %.4f %.4f %.3f %.3f %.3f %.2f %.3f %.3f %d\n",
                 o.kind, o.start, o.duration, o.x, o.y, o.scale, o.rot, o.opacity, o.amount, o.dir < 0 ? -1 : 1);
-        if (o.kind == 26 || o.kind == 27)
+        if (o.kind == 26 || o.kind == 27 || o.kind == 28)
             fprintf(f, "N %.4f %.4f %.4f %.4f\n", o.knob[0], o.knob[1], o.knob[2], o.knob[3]);
         for (int ch = 0; ch < 7; ch++) {
             if (o.holdOn[ch]) fprintf(f, "H %d %.5f\n", ch, o.hold[ch]);
@@ -9701,7 +9708,7 @@ int main(int argc, char* argv[]) {
             float cellW = std::max(70.0f, (ImGui::GetContentRegionAvail().x - gap * 2.0f) / 3.0f);
             float thumbH = cellW * 9.0f / 16.0f;
             static const int fxOrder[] = {
-                26, 27,
+                28, 26, 27,
                 19, 20, 21, 22, 23, 24, 25, 3, 4,
                 0, 1, 2, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18
             };
@@ -11612,6 +11619,8 @@ int main(int argc, char* argv[]) {
                     if (o.kind == 26 || o.kind == 27) {
                         FxSlider(o, "Direction", &o.rot, 3, -180.0f, 180.0f, "%.1f");
                         FxSlider(o, "Strength", &o.amount, 4, 0.0f, 1.0f, "%.2f");
+                    } else if (o.kind == 28) {
+                        FxSlider(o, "Strength", &o.amount, 4, 0.0f, 1.0f, "%.2f");
                     } else {
                         FxSlider(o, "Rotate", &o.rot, 3, -180.0f, 180.0f, "%.1f");
                         FxSlider(o, "Amount", &o.amount, 4, 0.0f, 1.0f, "%.2f");
@@ -11624,6 +11633,10 @@ int main(int argc, char* argv[]) {
                         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Soft edge of the trail");
                     }
                     if (o.kind == 27) DrawBlurGraph(o.knob);
+                    if (o.kind == 28) {
+                        SliderTyped("Radius", &o.knob[0], 0.05f, 1.0f, "%.2f");
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("How wide the sharpen reaches");
+                    }
                     if (o.kind == 1) {
                         int cw = o.dir < 0 ? 1 : 0;
                         int prev = o.dir;

@@ -172,10 +172,10 @@ In order, they asked for and accepted:
     only while a strip on them is open, and the timeline scrolls vertically.
     The zoom fader sits on the right, immediately left of the aspect combo.
     The Effects library is the overlay set dragged onto the FX lane. Kinds
-    stay append-only (`OverlayKindCount` is 28). 3 and 4 are already Zoom In
+    stay append-only (`OverlayKindCount` is 29). 3 and 4 are already Zoom In
     and Zoom Out. 5, 6 and 7 stay the isotropic Blur / Blur In / Blur Out.
     19–25 are Dust, Cassette, Frame, Film Dust, Retro Dust, Old Film, Record.
-    26 is Motion Blur and 27 is Gradient Blur. Do not renumber kinds.
+    26 is Motion Blur, 27 is Gradient Blur, and 28 is Sharpen. Do not renumber kinds.
     Direction for 26 and 27 is the rotate channel, but `EvalFx` zeros `e.rot`
     and stores radians in `FxEval.axis`, so the layer does not spin.
     Strength is `amount`. Motion Blur shutter is `knob[0]` (0.05–1; a stored
@@ -186,9 +186,11 @@ In order, they asked for and accepted:
     GL shader (`smear` / `ramp4`, uniforms `axis` and `vec4 curve`); export is
     `DirectionalBlur` in `OverlayStamp` after `FilmGrade`, sampling `work`.
     Do not set `e.radius` for these (that starts the old box blur). Shutter,
-    falloff, and the graph are plain sliders, not REC channels. Project save
-    writes optional line `N a b c d` only for kinds 26 and 27. Old projects
-    omit it. The library grid shows 26 and 27 first, then 19–25, then Zoom
+    falloff, and the graph are plain sliders, not REC channels. Sharpen is an
+    unsharp mask on luminance: Strength is `amount` (gain `amount * 4`),
+    Radius is `knob[0]`. Do not set `e.radius` for it. Project save
+    writes optional line `N a b c d` for kinds 26, 27, and 28. Old projects
+    omit it. The library grid shows Sharpen, then 26 and 27, then 19–25, then Zoom
     In / Zoom Out, then the older effects. The Media / Effects /
     Solids / Transitions tab bar does not scroll. Each tab's cards sit in
     their own child (`libmedia`, `libfx`, `libsolids`, `libtrans`). The timeline ruler stays pinned.
@@ -344,9 +346,9 @@ is dragged.
   Hebrew name round-trips. The name field uses the same visual reverse as
   subtitle text; the file stores logical UTF-8. `RefreshAllLooks` scans the
   folders once at startup, and again after SAVE. LOAD is the list drawn
-  inside the panel (not a popup). A click on a name loads it. Names are drawn
-  bright white on a lighter list background, not the default selectable color.
-  A popup would sit outside the panel rect, and `ClickOutsidePanels` would close the panel
+  inside the panel (not a popup). A click on a name loads it. Each name is a
+  normal button with white text, tall enough that the label is not clipped.
+  Do not draw the name with `AddText` into a short child. A popup would sit outside the panel rect, and `ClickOutsidePanels` would close the panel
   on that click. The list does not apply a look by itself at startup.
   Same name overwrites. The file is not inside the project, so it loads in
   another project. Bus grade and Clip color share `grade` (and the typed
@@ -354,7 +356,7 @@ is dragged.
   set `gsFit` to 2. Audio load calls `fx.clear()`. Overlay saves the kind,
   the sliders, and `k0`–`k3` (the knobs). It does not save recorded keys or
   the start and duration. An old overlay look without `k0` still loads;
-  kinds 26 and 27 get their defaults if the knobs are missing. Subtitle
+  kinds 26, 27, and 28 get their defaults if the knobs are missing. Subtitle
   text and the library preview have no SAVE/LOAD. Do not put these buttons
   on the clip right-click menu.
 
