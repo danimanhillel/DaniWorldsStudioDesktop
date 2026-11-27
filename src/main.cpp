@@ -8215,23 +8215,30 @@ static void RunLook(const char* kind, SaveFn save, LoadFn load) {
     float line = ImGui::GetTextLineHeightWithSpacing();
     int n = (int)bin->names.size();
     float rows = n < 1 ? 1.0f : (n > 6 ? 6.0f : (float)n);
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.22f, 0.24f, 0.28f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.45f, 0.48f, 0.54f, 1.0f));
     ImGui::BeginChild("##savedlooks", ImVec2(260.0f, rows * line + 8.0f), true);
-    if (bin->names.empty()) ImGui::TextDisabled("Nothing saved yet");
-    else {
+    if (bin->names.empty()) {
+        ImGui::TextColored(ImVec4(0.82f, 0.84f, 0.88f, 1.0f), "Nothing saved yet");
+    } else {
         int idx = 0;
         for (const std::string& name : bin->names) {
             std::string shown = HasHebrew(name) ? ReverseUtf8(name) : name;
             ImGui::PushID(idx++);
-            if (ImGui::Selectable(shown.c_str(), false)) {
+            float w = ImGui::GetContentRegionAvail().x;
+            ImVec2 p = ImGui::GetCursorScreenPos();
+            if (ImGui::Selectable("##row", false, 0, ImVec2(w, ImGui::GetTextLineHeight()))) {
                 snprintf(bin->typed, sizeof(bin->typed), "%s", shown.c_str());
                 bin->chars = (int)strlen(bin->typed);
                 bin->arm = HasHebrew(shown);
                 previewStatus = load(LookFilePath(kind, name)) ? "Look loaded" : "Could not load look";
             }
+            ImGui::GetWindowDrawList()->AddText(ImVec2(p.x + 4.0f, p.y), IM_COL32(245, 247, 250, 255), shown.c_str());
             ImGui::PopID();
         }
     }
     ImGui::EndChild();
+    ImGui::PopStyleColor(2);
 }
 
 void ClearProject() {

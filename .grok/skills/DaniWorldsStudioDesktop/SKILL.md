@@ -344,8 +344,9 @@ is dragged.
   Hebrew name round-trips. The name field uses the same visual reverse as
   subtitle text; the file stores logical UTF-8. `RefreshAllLooks` scans the
   folders once at startup, and again after SAVE. LOAD is the list drawn
-  inside the panel (not a popup). A click on a name loads it. A popup would
-  sit outside the panel rect, and `ClickOutsidePanels` would close the panel
+  inside the panel (not a popup). A click on a name loads it. Names are drawn
+  bright white on a lighter list background, not the default selectable color.
+  A popup would sit outside the panel rect, and `ClickOutsidePanels` would close the panel
   on that click. The list does not apply a look by itself at startup.
   Same name overwrites. The file is not inside the project, so it loads in
   another project. Bus grade and Clip color share `grade` (and the typed
