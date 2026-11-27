@@ -63,7 +63,8 @@ ripple insert, or panels-above-timeline.
   Subtitle style, and Overlay have SAVE and LOAD. SAVE is a name only. The
   file lands in `%USERPROFILE%\DaniWorldsStudio\Looks\<kind>\<name>.dlook`,
   not a picked path, and it is not part of the project. Startup scans that
-  folder so LOAD is a list. Bus and clip color share one file kind. Do not
+  folder so LOAD is the list inside the panel. Click a name to load it. Do not
+  put that list in a popup. Bus and clip color share one file kind. Do not
   put SAVE/LOAD on the clip menu.
 - RIFE queries the CUDA runtime for the GPU, or the NVIDIA driver if that
   runtime cannot name the card. A 5090 (compute capability 12.0) wins over a

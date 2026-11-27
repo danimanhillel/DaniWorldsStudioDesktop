@@ -8211,34 +8211,27 @@ static void RunLook(const char* kind, SaveFn save, LoadFn load) {
         }
     }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Saves under your Windows profile");
-    ImGui::SameLine();
-    if (ImGui::Button("LOAD")) {
-        RefreshLookBin(*bin);
-        ImGui::OpenPopup("##looklist");
-    }
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Pick a saved look");
-    if (ImGui::BeginPopup("##looklist")) {
-        if (bin->names.empty()) ImGui::TextDisabled("Nothing saved yet");
-        else {
-            float h = bin->names.size() > 8 ? 180.0f : 0.0f;
-            if (h > 0) ImGui::BeginChild("##lookscroll", ImVec2(220.0f, h), false);
-            int idx = 0;
-            for (const std::string& name : bin->names) {
-                std::string shown = HasHebrew(name) ? ReverseUtf8(name) : name;
-                ImGui::PushID(idx++);
-                if (ImGui::Selectable(shown.c_str())) {
-                    snprintf(bin->typed, sizeof(bin->typed), "%s", shown.c_str());
-                    bin->chars = (int)strlen(bin->typed);
-                    bin->arm = HasHebrew(shown);
-                    previewStatus = load(LookFilePath(kind, name)) ? "Look loaded" : "Could not load look";
-                    ImGui::CloseCurrentPopup();
-                }
-                ImGui::PopID();
+    ImGui::TextUnformatted("LOAD");
+    float line = ImGui::GetTextLineHeightWithSpacing();
+    int n = (int)bin->names.size();
+    float rows = n < 1 ? 1.0f : (n > 6 ? 6.0f : (float)n);
+    ImGui::BeginChild("##savedlooks", ImVec2(260.0f, rows * line + 8.0f), true);
+    if (bin->names.empty()) ImGui::TextDisabled("Nothing saved yet");
+    else {
+        int idx = 0;
+        for (const std::string& name : bin->names) {
+            std::string shown = HasHebrew(name) ? ReverseUtf8(name) : name;
+            ImGui::PushID(idx++);
+            if (ImGui::Selectable(shown.c_str(), false)) {
+                snprintf(bin->typed, sizeof(bin->typed), "%s", shown.c_str());
+                bin->chars = (int)strlen(bin->typed);
+                bin->arm = HasHebrew(shown);
+                previewStatus = load(LookFilePath(kind, name)) ? "Look loaded" : "Could not load look";
             }
-            if (h > 0) ImGui::EndChild();
+            ImGui::PopID();
         }
-        ImGui::EndPopup();
     }
+    ImGui::EndChild();
 }
 
 void ClearProject() {

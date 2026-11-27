@@ -343,8 +343,10 @@ is dragged.
   Wide Win32 APIs (`_wfopen`, `CreateDirectoryW`, `FindFirstFileW`) so a
   Hebrew name round-trips. The name field uses the same visual reverse as
   subtitle text; the file stores logical UTF-8. `RefreshAllLooks` scans the
-  folders once at startup and again after SAVE or when LOAD opens. LOAD is
-  the list of those names. It does not apply a look by itself at startup.
+  folders once at startup, and again after SAVE. LOAD is the list drawn
+  inside the panel (not a popup). A click on a name loads it. A popup would
+  sit outside the panel rect, and `ClickOutsidePanels` would close the panel
+  on that click. The list does not apply a look by itself at startup.
   Same name overwrites. The file is not inside the project, so it loads in
   another project. Bus grade and Clip color share `grade` (and the typed
   name). A file from another panel is rejected. Transform and green screen
