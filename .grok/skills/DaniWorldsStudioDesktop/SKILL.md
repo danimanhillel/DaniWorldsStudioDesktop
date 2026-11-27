@@ -353,8 +353,12 @@ is dragged.
   Same name overwrites. The file is not inside the project, so it loads in
   another project. Bus grade and Clip color share `grade` (and the typed
   name). A file from another panel is rejected. Transform and green screen
-  set `gsFit` to 2. Audio load calls `fx.clear()`. Overlay saves the kind,
-  the sliders, and `k0`–`k3` (the knobs). It does not save recorded keys or
+  set `gsFit` to 2. Audio load calls `fx.clear()`. Overlay looks are per
+  effect, not one shared list. New files go in `Looks/fx<kind>/` (`fx26` is
+  Motion Blur, `fx28` is Sharpen) and the tag stays `DWSLOOK overlay`. Older
+  files saved in `Looks/overlay/` still appear, but only on the effect whose
+  `kind` line matches. Loading one does not change which effect is open.
+  The file stores the sliders and `k0`–`k3` (the knobs). It does not save recorded keys or
   the start and duration. An old overlay look without `k0` still loads;
   kinds 26, 27, and 28 get their defaults if the knobs are missing. Subtitle
   text and the library preview have no SAVE/LOAD. Do not put these buttons

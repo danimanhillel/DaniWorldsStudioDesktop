@@ -8173,6 +8173,73 @@ static bool ReadFxLook(const std::string& path, OverlayFx& o) {
     return true;
 }
 
+static char gFxKindKey[40][8];
+static LookBin gFxLooks[40];
+static int gFxReady = 0;
+static int gFxScan = -2;
+
+static LookBin& FxBin(int kind) {
+    if (!gFxReady) {
+        for (int i = 0; i < 40; i++) {
+            snprintf(gFxKindKey[i], sizeof(gFxKindKey[i]), "fx%d", i);
+            gFxLooks[i].kind = gFxKindKey[i];
+        }
+        gFxReady = 1;
+    }
+    if (kind < 0) kind = 0;
+    if (kind >= 40) kind = 39;
+    return gFxLooks[kind];
+}
+
+static bool LookExists(const std::string& path) {
+    FILE* f = _wfopen(Utf8ToWide(path).c_str(), L"rb");
+    if (!f) return false;
+    fclose(f);
+    return true;
+}
+
+static int OverlayLookKind(const std::string& path) {
+    FILE* f = nullptr;
+    if (!LookOpen(path, "overlay", f)) return -1;
+    int kind = -1;
+    if (!TakeI(f, "kind", kind)) kind = -1;
+    fclose(f);
+    return kind;
+}
+
+static std::string FxSavePath(int kind, const std::string& name) {
+    return LookFilePath(FxBin(kind).kind, name);
+}
+
+static std::string FxLookPath(int kind, const std::string& name) {
+    std::string neu = FxSavePath(kind, name);
+    if (LookExists(neu)) return neu;
+    return LookFilePath("overlay", name);
+}
+
+static void RefreshFxBin(int kind) {
+    LookBin& bin = FxBin(kind);
+    RefreshLookBin(bin);
+    std::wstring pat = LookDirW("overlay") + L"\\*.dlook";
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(pat.c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        std::string name = WideToUtf8(fd.cFileName);
+        if (name.size() > 6 && name.compare(name.size() - 6, 6, ".dlook") == 0)
+            name.resize(name.size() - 6);
+        if (name.empty()) continue;
+        bool have = false;
+        for (const std::string& n : bin.names) if (n == name) have = true;
+        if (have) continue;
+        if (OverlayLookKind(LookFilePath("overlay", name)) == kind)
+            bin.names.push_back(name);
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    std::sort(bin.names.begin(), bin.names.end());
+}
+
 static int LookNameCallback(ImGuiInputTextCallbackData* data) {
     if (data->EventFlag != ImGuiInputTextFlags_CallbackAlways) return 0;
     LookBin* bin = (LookBin*)data->UserData;
@@ -8240,6 +8307,63 @@ static void RunLook(const char* kind, SaveFn save, LoadFn load) {
                 bin->chars = (int)strlen(bin->typed);
                 bin->arm = HasHebrew(shown);
                 previewStatus = load(LookFilePath(kind, name)) ? "Look loaded" : "Could not load look";
+            }
+            ImGui::PopID();
+        }
+        if (scroll) ImGui::EndChild();
+    }
+    ImGui::PopStyleColor(4);
+}
+
+static void RunFxLook(OverlayFx& o) {
+    int kind = o.kind;
+    if (kind < 0 || kind >= OverlayKindCount()) kind = 0;
+    if (gFxScan != kind) {
+        RefreshFxBin(kind);
+        gFxScan = kind;
+    }
+    LookBin& bin = FxBin(kind);
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted("Name");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(128.0f);
+    ImGui::InputText("##lookname", bin.typed, sizeof(bin.typed), ImGuiInputTextFlags_CallbackAlways, LookNameCallback, &bin);
+    ImGui::SameLine();
+    if (ImGui::Button("SAVE")) {
+        std::string visual = bin.typed;
+        std::string logical = HasHebrew(visual) ? ReverseUtf8(visual) : visual;
+        std::string name = CleanLookName(logical.c_str());
+        if (name.empty()) previewStatus = "Type a name";
+        else {
+            previewStatus = WriteFxLook(FxSavePath(kind, name), o) ? "Look saved" : "Could not save look";
+            RefreshFxBin(kind);
+            gFxScan = kind;
+        }
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Saves under your Windows profile");
+    ImGui::TextUnformatted("LOAD");
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.22f, 0.26f, 0.34f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.34f, 0.50f, 0.74f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.26f, 0.42f, 0.64f, 1.0f));
+    if (bin.names.empty()) {
+        ImGui::TextUnformatted("Nothing saved yet");
+    } else {
+        int idx = 0;
+        int shownN = (int)bin.names.size();
+        bool scroll = shownN > 6;
+        if (scroll) ImGui::BeginChild("##savedlooks", ImVec2(260.0f, 6.0f * ImGui::GetFrameHeightWithSpacing() + 4.0f), false);
+        for (const std::string& name : bin.names) {
+            std::string shown = HasHebrew(name) ? ReverseUtf8(name) : name;
+            ImGui::PushID(idx++);
+            if (ImGui::Button(shown.c_str(), ImVec2(248.0f, 0.0f))) {
+                snprintf(bin.typed, sizeof(bin.typed), "%s", shown.c_str());
+                bin.chars = (int)strlen(bin.typed);
+                bin.arm = HasHebrew(shown);
+                int keep = o.kind;
+                bool ok = ReadFxLook(FxLookPath(kind, name), o);
+                o.kind = keep;
+                previewStatus = ok ? "Look loaded" : "Could not load look";
             }
             ImGui::PopID();
         }
@@ -11677,9 +11801,7 @@ int main(int argc, char* argv[]) {
                         gOverlaySel = -1;
                         open = false;
                     }
-                    RunLook("overlay",
-                        [&](const std::string& p) { return WriteFxLook(p, o); },
-                        [&](const std::string& p) { return ReadFxLook(p, o); });
+                    RunFxLook(o);
                     ImVec2 w0 = ImGui::GetWindowPos();
                     ovPanelRect = ImVec4(w0.x, w0.y, w0.x + ImGui::GetWindowSize().x, w0.y + ImGui::GetWindowSize().y);
                     ovPanelHolds = ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem)
