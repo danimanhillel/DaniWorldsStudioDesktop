@@ -3516,6 +3516,47 @@ static void DrawPictureControls(Clip& c) {
     SliderTyped("Rotate", &c.gsRot, -180.0f, 180.0f, "%.1f");
 }
 
+static void DrawBlurGraph(float* k) {
+    ImGui::TextUnformatted("Change");
+    ImVec2 origin = ImGui::GetCursorScreenPos();
+    ImVec2 size(240.0f, 78.0f);
+    ImGui::InvisibleButton("##blurgraph", size);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 a = origin;
+    ImVec2 b(origin.x + size.x, origin.y + size.y);
+    dl->AddRectFilled(a, b, IM_COL32(14, 16, 22, 255), 3.0f);
+    dl->AddRect(a, b, IM_COL32(70, 78, 96, 255), 3.0f);
+    ImVec2 pts[4];
+    for (int i = 0; i < 4; i++) {
+        float u = (float)i / 3.0f;
+        float v = k[i] < 0 ? 0 : (k[i] > 1 ? 1 : k[i]);
+        pts[i] = ImVec2(a.x + 8.0f + u * (size.x - 16.0f), b.y - 8.0f - v * (size.y - 16.0f));
+    }
+    dl->AddPolyline(pts, 4, IM_COL32(120, 186, 255, 255), 0, 2.0f);
+    ImVec2 mouse = ImGui::GetIO().MousePos;
+    static int drag = -1;
+    if (ImGui::IsItemActivated()) {
+        drag = 0;
+        float best = 1.0e9f;
+        for (int i = 0; i < 4; i++) {
+            float dx = mouse.x - pts[i].x;
+            float dy = mouse.y - pts[i].y;
+            float d2 = dx * dx + dy * dy;
+            if (d2 < best) { best = d2; drag = i; }
+        }
+    }
+    if (drag >= 0 && ImGui::IsItemActive()) {
+        float v = (b.y - 8.0f - mouse.y) / (size.y - 16.0f);
+        if (v < 0) v = 0;
+        if (v > 1) v = 1;
+        k[drag] = v;
+    }
+    if (!ImGui::IsItemActive()) drag = -1;
+    for (int i = 0; i < 4; i++) dl->AddCircleFilled(pts[i], 4.5f, IM_COL32(230, 236, 245, 255));
+    const char* labs[4] = {"Start", "Early", "Late", "End"};
+    for (int i = 0; i < 4; i++) SliderTyped(labs[i], &k[i], 0.0f, 1.0f, "%.2f");
+}
+
 static void PlaceAtCursor() {
     ImVec2 m = ImGui::GetMousePos();
     ImGuiIO& pio = ImGui::GetIO();
@@ -3895,6 +3936,8 @@ static ImU32 FxLaneColor(int kind) {
     case 23: return IM_COL32(176, 110, 70, 235);
     case 24: return IM_COL32(150, 110, 60, 235);
     case 25: return IM_COL32(40, 32, 28, 235);
+    case 26: return IM_COL32(64, 112, 168, 235);
+    case 27: return IM_COL32(72, 146, 126, 235);
     default: return IM_COL32(140, 70, 110, 235);
     }
 }
@@ -4046,6 +4089,23 @@ static void DrawFxIcon(ImDrawList* dl, ImVec2 a, ImVec2 b, int kind) {
         dl->AddCircle(c, h * 0.30f, IM_COL32(180, 140, 70, 200), 20, 1.2f);
         dl->AddCircle(c, h * 0.18f, IM_COL32(180, 140, 70, 160), 16, 1.0f);
         dl->AddCircleFilled(c, h * 0.07f, IM_COL32(210, 180, 110, 255), 12);
+    } else if (kind == 26) {
+        ImVec2 p0(c.x - w * 0.46f, c.y);
+        ImVec2 p1(c.x + w * 0.46f, c.y);
+        for (int i = -2; i <= 2; i++) {
+            int a = 40 + (2 - std::abs(i)) * 50;
+            dl->AddLine(ImVec2(p0.x, p0.y + i * 3.2f), ImVec2(p1.x, p1.y + i * 3.2f), IM_COL32(170, 200, 230, a), 2.0f);
+        }
+    } else if (kind == 27) {
+        ImVec2 p0(c.x - w * 0.46f, c.y - h * 0.42f);
+        ImVec2 p1(c.x + w * 0.46f, c.y + h * 0.42f);
+        for (int i = 0; i < 6; i++) {
+            float u = (float)i / 5.0f;
+            int a = 40 + (int)(u * 200.0f);
+            float x0 = p0.x + u * (p1.x - p0.x);
+            float x1 = x0 + (p1.x - p0.x) / 6.0f - 1.0f;
+            dl->AddRectFilled(ImVec2(x0, p0.y), ImVec2(x1, p1.y), IM_COL32(90, 170, 150, a));
+        }
     } else {
         quad(c, w * 0.7f, h * 0.7f, 0, IM_COL32(120, 120, 120, 255));
     }
@@ -7748,15 +7808,118 @@ std::string OpenDialog(HWND owner, const char* filter, const char* title) {
     return {};
 }
 
+static std::wstring Utf8ToWide(const std::string& s) {
+    if (s.empty()) return L"";
+    int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), nullptr, 0);
+    if (n < 1) return L"";
+    std::wstring w((size_t)n, 0);
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), w.data(), n);
+    return w;
+}
+
+static std::string WideToUtf8(const wchar_t* w) {
+    if (!w || !w[0]) return {};
+    int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, nullptr, 0, nullptr, nullptr);
+    if (n < 2) return {};
+    std::string s((size_t)n - 1, 0);
+    WideCharToMultiByte(CP_UTF8, 0, w, -1, s.data(), n, nullptr, nullptr);
+    return s;
+}
+
+static const std::wstring& LookRootW() {
+    static std::wstring root;
+    static int ready = 0;
+    if (!ready) {
+        ready = 1;
+        wchar_t home[MAX_PATH] = {};
+        DWORD n = GetEnvironmentVariableW(L"USERPROFILE", home, MAX_PATH);
+        root = (n > 0 && n < MAX_PATH) ? std::wstring(home) : L".";
+        root += L"\\DaniWorldsStudio";
+        CreateDirectoryW(root.c_str(), nullptr);
+        root += L"\\Looks";
+        CreateDirectoryW(root.c_str(), nullptr);
+    }
+    return root;
+}
+
+static std::wstring LookDirW(const char* kind) {
+    std::wstring d = LookRootW() + L"\\" + Utf8ToWide(kind ? kind : "look");
+    CreateDirectoryW(d.c_str(), nullptr);
+    return d;
+}
+
+static std::string CleanLookName(const char* in) {
+    std::string o;
+    if (!in) return o;
+    for (const unsigned char* p = (const unsigned char*)in; *p && o.size() < 48; ++p) {
+        if (*p < 32) continue;
+        if (*p == '\\' || *p == '/' || *p == ':' || *p == '*' || *p == '?' || *p == '"' || *p == '<' || *p == '>' || *p == '|') continue;
+        o.push_back((char)*p);
+    }
+    size_t a = 0;
+    while (a < o.size() && (o[a] == ' ' || o[a] == '.')) a++;
+    size_t b = o.size();
+    while (b > a && (o[b - 1] == ' ' || o[b - 1] == '.')) b--;
+    return o.substr(a, b - a);
+}
+
+struct LookBin {
+    const char* kind;
+    std::vector<std::string> names;
+    char typed[64];
+    int chars;
+    bool arm;
+};
+
+static LookBin gLooks[] = {
+    {"grade", {}, {}, 0, false},
+    {"xform", {}, {}, 0, false},
+    {"gs", {}, {}, 0, false},
+    {"audio", {}, {}, 0, false},
+    {"style", {}, {}, 0, false},
+    {"overlay", {}, {}, 0, false},
+};
+
+static LookBin* LookBinFor(const char* kind) {
+    for (auto& b : gLooks) if (strcmp(b.kind, kind) == 0) return &b;
+    return &gLooks[0];
+}
+
+static void RefreshLookBin(LookBin& bin) {
+    bin.names.clear();
+    std::wstring pat = LookDirW(bin.kind) + L"\\*.dlook";
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(pat.c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        std::string name = WideToUtf8(fd.cFileName);
+        if (name.size() > 6 && name.compare(name.size() - 6, 6, ".dlook") == 0)
+            name.resize(name.size() - 6);
+        if (!name.empty()) bin.names.push_back(name);
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    std::sort(bin.names.begin(), bin.names.end());
+}
+
+static void RefreshAllLooks() {
+    for (auto& b : gLooks) RefreshLookBin(b);
+}
+
+static std::string LookFilePath(const char* kind, const std::string& name) {
+    std::wstring w = LookDirW(kind) + L"\\" + Utf8ToWide(name) + L".dlook";
+    return WideToUtf8(w.c_str());
+}
+
 static FILE* LookCreate(const std::string& path, const char* kind) {
-    FILE* f = fopen(path.c_str(), "wb");
+    FILE* f = _wfopen(Utf8ToWide(path).c_str(), L"wb");
     if (!f) return nullptr;
     fprintf(f, "DWSLOOK %s\n", kind);
     return f;
 }
 
 static bool LookOpen(const std::string& path, const char* kind, FILE*& f) {
-    f = fopen(path.c_str(), "rb");
+    f = _wfopen(Utf8ToWide(path).c_str(), L"rb");
     if (!f) return false;
     char tag[32] = {};
     char got[32] = {};
@@ -7957,8 +8120,9 @@ static bool ReadStyleLook(const std::string& path, SubStyle& s) {
 static bool WriteFxLook(const std::string& path, const OverlayFx& o) {
     FILE* f = LookCreate(path, "overlay");
     if (!f) return false;
-    fprintf(f, "kind %d\nx %.5f\ny %.5f\nsize %.5f\nrot %.5f\nopacity %.5f\namount %.5f\ndir %d\n",
-            o.kind, o.x, o.y, o.scale, o.rot, o.opacity, o.amount, o.dir < 0 ? -1 : 1);
+    fprintf(f, "kind %d\nx %.5f\ny %.5f\nsize %.5f\nrot %.5f\nopacity %.5f\namount %.5f\ndir %d\nk0 %.5f\nk1 %.5f\nk2 %.5f\nk3 %.5f\n",
+            o.kind, o.x, o.y, o.scale, o.rot, o.opacity, o.amount, o.dir < 0 ? -1 : 1,
+            o.knob[0], o.knob[1], o.knob[2], o.knob[3]);
     fclose(f);
     return true;
 }
@@ -7970,6 +8134,8 @@ static bool ReadFxLook(const std::string& path, OverlayFx& o) {
     float x, y, size, rot, opacity, amount;
     bool ok = TakeI(f, "kind", kind) && TakeF(f, "x", x) && TakeF(f, "y", y) && TakeF(f, "size", size)
         && TakeF(f, "rot", rot) && TakeF(f, "opacity", opacity) && TakeF(f, "amount", amount) && TakeI(f, "dir", dir);
+    float k0 = 0, k1 = 0, k2 = 0, k3 = 0;
+    bool gotK = ok && TakeF(f, "k0", k0) && TakeF(f, "k1", k1) && TakeF(f, "k2", k2) && TakeF(f, "k3", k3);
     fclose(f);
     if (!ok || kind < 0 || kind >= OverlayKindCount()) return false;
     o.kind = kind;
@@ -7980,33 +8146,98 @@ static bool ReadFxLook(const std::string& path, OverlayFx& o) {
     o.opacity = Clamp01(opacity);
     o.amount = Clamp01(amount);
     o.dir = dir < 0 ? -1 : 1;
+    if (gotK) {
+        o.knob[0] = Clamp01(k0);
+        o.knob[1] = Clamp01(k1);
+        o.knob[2] = Clamp01(k2);
+        o.knob[3] = Clamp01(k3);
+    } else if (kind == 26) {
+        o.knob[0] = 0.55f;
+        o.knob[1] = 0.35f;
+        o.knob[2] = o.knob[3] = 0;
+    } else if (kind == 27) {
+        o.knob[0] = 0.0f;
+        o.knob[1] = 0.20f;
+        o.knob[2] = 0.65f;
+        o.knob[3] = 1.0f;
+    }
     return true;
 }
 
-static std::string AskLook(HWND owner, bool save, const char* title) {
-    const char* filter = "DaniWorlds Look (*.dlook)\0*.dlook\0";
-    if (save) return SaveDialog(owner, filter, "dlook", title);
-    return OpenDialog(owner, filter, title);
-}
-
-static int LookButtons() {
-    int n = 0;
-    if (ImGui::Button("SAVE")) n = 1;
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Save these settings to a file");
-    ImGui::SameLine();
-    if (ImGui::Button("LOAD")) n = 2;
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Load settings saved from any project");
-    return n;
+static int LookNameCallback(ImGuiInputTextCallbackData* data) {
+    if (data->EventFlag != ImGuiInputTextFlags_CallbackAlways) return 0;
+    LookBin* bin = (LookBin*)data->UserData;
+    if (!bin) return 0;
+    std::string s(data->Buf, (size_t)data->BufTextLen);
+    bool heb = HasHebrew(s);
+    if (heb && bin->arm) {
+        data->CursorPos = 0;
+        data->SelectionStart = 0;
+        data->SelectionEnd = 0;
+        bin->arm = false;
+    }
+    if (heb && data->BufTextLen > bin->chars) {
+        data->CursorPos = 0;
+        data->SelectionStart = 0;
+        data->SelectionEnd = 0;
+    }
+    if (heb && ImGui::IsKeyPressed(ImGuiKey_Backspace) && data->CursorPos == 0 && data->BufTextLen > 0) {
+        int n = Utf8CharLen(data->Buf);
+        if (n > data->BufTextLen) n = data->BufTextLen;
+        data->DeleteChars(0, n);
+    }
+    bin->chars = data->BufTextLen;
+    return 0;
 }
 
 template <typename SaveFn, typename LoadFn>
-static void RunLook(HWND owner, int act, const char* saveTitle, const char* loadTitle, SaveFn save, LoadFn load) {
-    if (act == 1) {
-        std::string p = AskLook(owner, true, saveTitle);
-        if (!p.empty()) previewStatus = save(p) ? "Look saved" : "Could not save look";
-    } else if (act == 2) {
-        std::string p = AskLook(owner, false, loadTitle);
-        if (!p.empty()) previewStatus = load(p) ? "Look loaded" : "Could not load look";
+static void RunLook(const char* kind, SaveFn save, LoadFn load) {
+    LookBin* bin = LookBinFor(kind);
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted("Name");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(128.0f);
+    ImGui::InputText("##lookname", bin->typed, sizeof(bin->typed), ImGuiInputTextFlags_CallbackAlways, LookNameCallback, bin);
+    ImGui::SameLine();
+    if (ImGui::Button("SAVE")) {
+        std::string visual = bin->typed;
+        std::string logical = HasHebrew(visual) ? ReverseUtf8(visual) : visual;
+        std::string name = CleanLookName(logical.c_str());
+        if (name.empty()) previewStatus = "Type a name";
+        else {
+            std::string path = LookFilePath(kind, name);
+            previewStatus = save(path) ? "Look saved" : "Could not save look";
+            RefreshLookBin(*bin);
+        }
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Saves under your Windows profile");
+    ImGui::SameLine();
+    if (ImGui::Button("LOAD")) {
+        RefreshLookBin(*bin);
+        ImGui::OpenPopup("##looklist");
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Pick a saved look");
+    if (ImGui::BeginPopup("##looklist")) {
+        if (bin->names.empty()) ImGui::TextDisabled("Nothing saved yet");
+        else {
+            float h = bin->names.size() > 8 ? 180.0f : 0.0f;
+            if (h > 0) ImGui::BeginChild("##lookscroll", ImVec2(220.0f, h), false);
+            int idx = 0;
+            for (const std::string& name : bin->names) {
+                std::string shown = HasHebrew(name) ? ReverseUtf8(name) : name;
+                ImGui::PushID(idx++);
+                if (ImGui::Selectable(shown.c_str())) {
+                    snprintf(bin->typed, sizeof(bin->typed), "%s", shown.c_str());
+                    bin->chars = (int)strlen(bin->typed);
+                    bin->arm = HasHebrew(shown);
+                    previewStatus = load(LookFilePath(kind, name)) ? "Look loaded" : "Could not load look";
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::PopID();
+            }
+            if (h > 0) ImGui::EndChild();
+        }
+        ImGui::EndPopup();
     }
 }
 
@@ -8217,6 +8448,8 @@ bool SaveProject(const std::string& path) {
     for (const auto& o : gOverlays) {
         fprintf(f, "O %d %.4f %.4f %.3f %.3f %.3f %.2f %.3f %.3f %d\n",
                 o.kind, o.start, o.duration, o.x, o.y, o.scale, o.rot, o.opacity, o.amount, o.dir < 0 ? -1 : 1);
+        if (o.kind == 26 || o.kind == 27)
+            fprintf(f, "N %.4f %.4f %.4f %.4f\n", o.knob[0], o.knob[1], o.knob[2], o.knob[3]);
         for (int ch = 0; ch < 7; ch++) {
             if (o.holdOn[ch]) fprintf(f, "H %d %.5f\n", ch, o.hold[ch]);
             for (const auto& k : o.anim[ch]) fprintf(f, "P %d %.4f %.5f\n", ch, k.t, k.v);
@@ -8663,6 +8896,16 @@ bool LoadProject(const std::string& path) {
                 o.amount = Clamp01(o.amount);
                 o.dir = (n == 10 && dir < 0) ? -1 : 1;
                 gOverlays.push_back(o);
+            }
+        } else if (line[0] == 'N' && line[1] == ' ' && !gOverlays.empty()) {
+            float a = 0, b = 0, c = 0, d = 0;
+            if (sscanf(line, "N %f %f %f %f", &a, &b, &c, &d) == 4) {
+                auto u01 = [](float v) { return v < 0 ? 0 : (v > 1 ? 1 : v); };
+                OverlayFx& o = gOverlays.back();
+                o.knob[0] = u01(a);
+                o.knob[1] = u01(b);
+                o.knob[2] = u01(c);
+                o.knob[3] = u01(d);
             }
         } else if (line[0] == 'H' && line[1] == ' ' && !gOverlays.empty()) {
             int ch = 0;
@@ -9186,6 +9429,8 @@ int main(int argc, char* argv[]) {
     ImGui_ImplSDL2_InitForOpenGL(window, gl_context);
     ImGui_ImplOpenGL3_Init("#version 130");
 
+    RefreshAllLooks();
+
     bool running = true;
     SDL_Event event;
     int topClip = -1;
@@ -9456,6 +9701,7 @@ int main(int argc, char* argv[]) {
             float cellW = std::max(70.0f, (ImGui::GetContentRegionAvail().x - gap * 2.0f) / 3.0f);
             float thumbH = cellW * 9.0f / 16.0f;
             static const int fxOrder[] = {
+                26, 27,
                 19, 20, 21, 22, 23, 24, 25, 3, 4,
                 0, 1, 2, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18
             };
@@ -10972,7 +11218,7 @@ int main(int argc, char* argv[]) {
                 ImGui::SliderFloat("Film grain", &s.grain, 0.0f, 1.0f, "%.2f");
                 ImGui::SliderFloat("Sharpen", &s.sharpen, 0.0f, 1.0f, "%.2f");
                 ImGui::Separator();
-                RunLook(hwnd, LookButtons(), "Save Bus Grade", "Load Bus Grade",
+                RunLook("grade",
                     [&](const std::string& p) { return WriteGradeLook(p, s); },
                     [&](const std::string& p) { return ReadGradeLook(p, s); });
                 if (ImGui::Button("Reset")) {
@@ -11188,7 +11434,7 @@ int main(int argc, char* argv[]) {
                     colorOpen = true;
                     openedPanelThisFrame = true;
                 }
-                RunLook(hwnd, LookButtons(), "Save Green Screen", "Load Green Screen",
+                RunLook("gs",
                     [&](const std::string& p) { return WriteGsLook(p, c); },
                     [&](const std::string& p) { return ReadGsLook(p, c); });
                 ImVec2 w0 = ImGui::GetWindowPos();
@@ -11215,7 +11461,7 @@ int main(int argc, char* argv[]) {
                         ImGui::TextDisabled("Drag in the preview. Corner sizes, top handle rotates, right edge changes aspect.");
                         ImGui::Separator();
                         DrawPictureControls(clips[xformClip]);
-                        RunLook(hwnd, LookButtons(), "Save Transform", "Load Transform",
+                        RunLook("xform",
                             [&](const std::string& p) { return WriteXformLook(p, clips[xformClip]); },
                             [&](const std::string& p) { return ReadXformLook(p, clips[xformClip]); });
                         ImVec2 w0 = ImGui::GetWindowPos();
@@ -11267,7 +11513,7 @@ int main(int argc, char* argv[]) {
                 ImGui::Checkbox("Background", &subStyle.background);
                 ImGui::ColorEdit3("Background color", subStyle.bg);
                 ImGui::SliderFloat("Background opacity", &subStyle.bgAlpha, 0.0f, 1.0f, "%.2f");
-                RunLook(hwnd, LookButtons(), "Save Subtitle Style", "Load Subtitle Style",
+                RunLook("style",
                     [&](const std::string& p) { return WriteStyleLook(p, subStyle); },
                     [&](const std::string& p) { return ReadStyleLook(p, subStyle); });
                 ImVec2 w0 = ImGui::GetWindowPos();
@@ -11306,7 +11552,7 @@ int main(int argc, char* argv[]) {
                     ImGui::SliderFloat("Time", &c.reverbTime, 0.2f, 5.0f, "%.2f s");
                     if (ImGui::Checkbox("Delay", &c.delayOn)) c.fx.clear();
                     ImGui::SliderFloat("Tempo", &c.delayTempo, 40.0f, 240.0f, "%.0f BPM");
-                    RunLook(hwnd, LookButtons(), "Save Audio Effects", "Load Audio Effects",
+                    RunLook("audio",
                         [&](const std::string& p) { return WriteAudioLook(p, c); },
                         [&](const std::string& p) { return ReadAudioLook(p, c); });
                     ImVec2 w0 = ImGui::GetWindowPos();
@@ -11328,7 +11574,7 @@ int main(int argc, char* argv[]) {
                     ImGui::TextUnformatted("Clip color");
                     ImGui::Separator();
                     DrawGradeSliders(c.gradeLight, c.gradeContrast, c.gradeWarm, c.gradeTint, c.gradeSat, c.gradeShadow, c.gradeGrain, c.gradeSharp);
-                    RunLook(hwnd, LookButtons(), "Save Clip Color", "Load Clip Color",
+                    RunLook("grade",
                         [&](const std::string& p) { return WriteGradeLook(p, ClipGradeOf(c)); },
                         [&](const std::string& p) {
                             BusSegment g = ClipGradeOf(c);
@@ -11363,9 +11609,21 @@ int main(int argc, char* argv[]) {
                     FxSlider(o, "X", &o.x, 0, -1.0f, 1.0f, "%.2f");
                     FxSlider(o, "Y", &o.y, 1, -1.0f, 1.0f, "%.2f");
                     FxSlider(o, "Size", &o.scale, 2, 0.15f, 4.0f, "%.2f");
-                    FxSlider(o, "Rotate", &o.rot, 3, -180.0f, 180.0f, "%.1f");
-                    FxSlider(o, "Amount", &o.amount, 4, 0.0f, 1.0f, "%.2f");
+                    if (o.kind == 26 || o.kind == 27) {
+                        FxSlider(o, "Direction", &o.rot, 3, -180.0f, 180.0f, "%.1f");
+                        FxSlider(o, "Strength", &o.amount, 4, 0.0f, 1.0f, "%.2f");
+                    } else {
+                        FxSlider(o, "Rotate", &o.rot, 3, -180.0f, 180.0f, "%.1f");
+                        FxSlider(o, "Amount", &o.amount, 4, 0.0f, 1.0f, "%.2f");
+                    }
                     FxSlider(o, "Opacity", &o.opacity, 5, 0.0f, 1.0f, "%.2f");
+                    if (o.kind == 26) {
+                        SliderTyped("Shutter", &o.knob[0], 0.05f, 1.0f, "%.2f");
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("How long the trail is");
+                        SliderTyped("Falloff", &o.knob[1], 0.0f, 1.0f, "%.2f");
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Soft edge of the trail");
+                    }
+                    if (o.kind == 27) DrawBlurGraph(o.knob);
                     if (o.kind == 1) {
                         int cw = o.dir < 0 ? 1 : 0;
                         int prev = o.dir;
@@ -11406,7 +11664,7 @@ int main(int argc, char* argv[]) {
                         gOverlaySel = -1;
                         open = false;
                     }
-                    RunLook(hwnd, LookButtons(), "Save Effect", "Load Effect",
+                    RunLook("overlay",
                         [&](const std::string& p) { return WriteFxLook(p, o); },
                         [&](const std::string& p) { return ReadFxLook(p, o); });
                     ImVec2 w0 = ImGui::GetWindowPos();

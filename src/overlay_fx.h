@@ -17,6 +17,7 @@ struct OverlayFx {
     float opacity = 1.0f;
     float amount = 0.7f;
     int dir = 1;
+    float knob[4] = {};
     bool rec = false;
     bool holdOn[7] = {};
     float hold[7] = {};

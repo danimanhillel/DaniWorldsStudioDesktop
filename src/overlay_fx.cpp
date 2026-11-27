@@ -15,7 +15,7 @@ void OverlayClear() {
     gOverlaySel = -1;
 }
 
-int OverlayKindCount() { return 26; }
+int OverlayKindCount() { return 28; }
 
 const char* OverlayKindName(int kind) {
     switch (kind) {
@@ -45,6 +45,8 @@ const char* OverlayKindName(int kind) {
     case 23: return "Retro Dust";
     case 24: return "Old Film";
     case 25: return "Record";
+    case 26: return "Motion Blur";
+    case 27: return "Gradient Blur";
     default: return "Effect";
     }
 }
@@ -60,7 +62,17 @@ void OverlayAdd(int kind, float start) {
     o.opacity = 1.0f;
     if (kind == 12 || kind == 13 || kind == 16) o.amount = 1.0f;
     else if (kind == 0 || kind == 5 || kind == 6 || kind == 7) o.amount = 0.65f;
-    else o.amount = 0.75f;
+    else if (kind == 26) {
+        o.amount = 0.75f;
+        o.knob[0] = 0.55f;
+        o.knob[1] = 0.35f;
+    } else if (kind == 27) {
+        o.amount = 0.85f;
+        o.knob[0] = 0.0f;
+        o.knob[1] = 0.20f;
+        o.knob[2] = 0.65f;
+        o.knob[3] = 1.0f;
+    } else o.amount = 0.75f;
     o.dir = 1;
     gOverlays.push_back(o);
     gOverlaySel = (int)gOverlays.size() - 1;
@@ -150,6 +162,8 @@ struct FxEval {
     float amount = 0.7f;
     float mode = 0;
     float dir = 1;
+    float axis = 0;
+    float curve[4] = {};
 };
 
 static FxEval EvalFx(const OverlayFx& o, float time, float shortSide) {
@@ -220,6 +234,16 @@ static FxEval EvalFx(const OverlayFx& o, float time, float shortSide) {
         float amp = amount * (o.kind == 24 ? 0.010f : 0.004f);
         e.shiftX += (n1 - 0.5f) * 2.0f * amp;
         e.shiftY += (n2 - 0.5f) * 2.0f * amp;
+    } else if (o.kind == 26 || o.kind == 27) {
+        e.rot = 0;
+        e.axis = rot * 0.01745329252f;
+        for (int i = 0; i < 4; i++) {
+            float v = o.knob[i];
+            if (v < 0) v = 0;
+            if (v > 1) v = 1;
+            e.curve[i] = v;
+        }
+        if (o.kind == 26 && e.curve[0] < 0.05f) e.curve[0] = 0.55f;
     }
     return e;
 }
@@ -237,6 +261,7 @@ typedef int (APIENTRY *PFN_glGetUniformLocation_t)(unsigned int, const char*);
 typedef void (APIENTRY *PFN_glUniform1f_t)(int, float);
 typedef void (APIENTRY *PFN_glUniform1i_t)(int, int);
 typedef void (APIENTRY *PFN_glUniform2f_t)(int, float, float);
+typedef void (APIENTRY *PFN_glUniform4f_t)(int, float, float, float, float);
 typedef void (APIENTRY *PFN_glUseProgram_t)(unsigned int);
 
 static PFN_glCreateShader_t pCreateShader = nullptr;
@@ -252,12 +277,13 @@ static PFN_glGetUniformLocation_t pGetUniform = nullptr;
 static PFN_glUniform1f_t pUniform1f = nullptr;
 static PFN_glUniform1i_t pUniform1i = nullptr;
 static PFN_glUniform2f_t pUniform2f = nullptr;
+static PFN_glUniform4f_t pUniform4f = nullptr;
 static PFN_glUseProgram_t pUse = nullptr;
 
 static GLuint fxProg = 0;
 static int fxReady = 0;
 static int uTex = -1, uTexel = -1, uShift = -1, uRot = -1, uScale = -1, uPass = -1, uRadius = -1;
-static int uMatrix = -1, uVhs = -1, uOpacity = -1, uAmount = -1, uTime = -1, uMode = -1, uDir = -1;
+static int uMatrix = -1, uVhs = -1, uOpacity = -1, uAmount = -1, uTime = -1, uMode = -1, uDir = -1, uAxis = -1, uCurve = -1;
 static GLuint grabA = 0, grabB = 0;
 static int grabW = 0, grabH = 0;
 
@@ -287,8 +313,9 @@ static bool EnsureFxShader() {
     pUniform1f = (PFN_glUniform1f_t)SDL_GL_GetProcAddress("glUniform1f");
     pUniform1i = (PFN_glUniform1i_t)SDL_GL_GetProcAddress("glUniform1i");
     pUniform2f = (PFN_glUniform2f_t)SDL_GL_GetProcAddress("glUniform2f");
+    pUniform4f = (PFN_glUniform4f_t)SDL_GL_GetProcAddress("glUniform4f");
     pUse = (PFN_glUseProgram_t)SDL_GL_GetProcAddress("glUseProgram");
-    if (!pCreateShader || !pShaderSource || !pCompileShader || !pCreateProgram || !pAttachShader || !pLinkProgram || !pGetShaderiv || !pGetProgramiv || !pGetUniform || !pUniform1f || !pUniform1i || !pUniform2f || !pUse)
+    if (!pCreateShader || !pShaderSource || !pCompileShader || !pCreateProgram || !pAttachShader || !pLinkProgram || !pGetShaderiv || !pGetProgramiv || !pGetUniform || !pUniform1f || !pUniform1i || !pUniform2f || !pUniform4f || !pUse)
         return false;
     const char* vs =
         "#version 130\n"
@@ -303,8 +330,28 @@ static bool EnsureFxShader() {
         "uniform sampler2D tex;\n"
         "uniform vec2 texel;\n"
         "uniform vec2 shift;\n"
-        "uniform float rot, scale, pass, radius, matrix, vhs, opacity, amount, time, mode, dir;\n"
+        "uniform float rot, scale, pass, radius, matrix, vhs, opacity, amount, time, mode, dir, axis;\n"
+        "uniform vec4 curve;\n"
         "float hn(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }\n"
+        "vec3 smear(vec2 src, vec2 ax, float len, float fall) {\n"
+        "  vec3 acc = vec3(0.0);\n"
+        "  float wsum = 0.0;\n"
+        "  float tight = mix(6.0, 1.1, clamp(fall, 0.0, 1.0));\n"
+        "  for (int i = -6; i <= 6; i++) {\n"
+        "    float t = float(i) / 6.0;\n"
+        "    float w = exp(-t * t * tight);\n"
+        "    vec2 s = clamp(src + ax * (t * len), 0.0, 1.0);\n"
+        "    acc += texture2D(tex, vec2(s.x, 1.0 - s.y)).rgb * w;\n"
+        "    wsum += w;\n"
+        "  }\n"
+        "  return acc / max(wsum, 0.0001);\n"
+        "}\n"
+        "float ramp4(vec4 c, float t) {\n"
+        "  t = clamp(t, 0.0, 1.0);\n"
+        "  if (t < 0.333) return mix(c.x, c.y, t / 0.333);\n"
+        "  if (t < 0.666) return mix(c.y, c.z, (t - 0.333) / 0.333);\n"
+        "  return mix(c.z, c.w, (t - 0.666) / 0.334);\n"
+        "}\n"
         "void main() {\n"
         "  if (pass > 0.5) {\n"
         "    vec2 step = pass < 1.5 ? vec2(texel.x, 0.0) : vec2(0.0, texel.y);\n"
@@ -491,6 +538,19 @@ static bool EnsureFxShader() {
         "      float hole = 1.0 - smoothstep(0.02, 0.045, rad);\n"
         "      col = mix(col, vec3(0.08, 0.06, 0.05), hole * 0.85);\n"
         "    }\n"
+        "    if (mode > 25.5 && mode < 27.5) {\n"
+        "      vec2 dirv = vec2(cos(axis), sin(axis));\n"
+        "      float len = 0.0;\n"
+        "      float fall = 0.45;\n"
+        "      if (mode < 26.5) {\n"
+        "        len = amount * curve.x * 0.12;\n"
+        "        fall = curve.y;\n"
+        "      } else {\n"
+        "        float along = clamp(dot(src - vec2(0.5), dirv) * 1.15 + 0.5, 0.0, 1.0);\n"
+        "        len = ramp4(curve, along) * amount * 0.14;\n"
+        "      }\n"
+        "      if (len > 0.0008) col = smear(src, dirv, len, fall);\n"
+        "    }\n"
         "  }\n"
         "  vec3 outc = inside > 0.5 ? col : vec3(0.0);\n"
         "  outc = mix(base, outc, opacity);\n"
@@ -526,6 +586,8 @@ static bool EnsureFxShader() {
     uTime = pGetUniform(fxProg, "time");
     uMode = pGetUniform(fxProg, "mode");
     uDir = pGetUniform(fxProg, "dir");
+    uAxis = pGetUniform(fxProg, "axis");
+    uCurve = pGetUniform(fxProg, "curve");
     fxReady = 1;
     return true;
 }
@@ -568,6 +630,8 @@ static void DrawFxQuad(float x0, float y0, float x1, float y1, const FxEval& e, 
     if (uTime >= 0) pUniform1f(uTime, time);
     if (uMode >= 0) pUniform1f(uMode, e.mode);
     if (uDir >= 0) pUniform1f(uDir, e.dir);
+    if (uAxis >= 0) pUniform1f(uAxis, e.axis);
+    if (uCurve >= 0 && pUniform4f) pUniform4f(uCurve, e.curve[0], e.curve[1], e.curve[2], e.curve[3]);
     glBegin(GL_QUADS);
     glTexCoord2f(0, 1); glVertex2f(x0, y0);
     glTexCoord2f(1, 1); glVertex2f(x1, y0);
@@ -830,6 +894,19 @@ void OverlayPreviewTick(float time) {
         o.opacity = 1;
         o.amount = 0.85f;
         o.dir = 1;
+        if (kind == 26) {
+            o.rot = 18.0f;
+            o.amount = 0.9f;
+            o.knob[0] = 0.7f;
+            o.knob[1] = 0.4f;
+        } else if (kind == 27) {
+            o.rot = -28.0f;
+            o.amount = 0.95f;
+            o.knob[0] = 0.0f;
+            o.knob[1] = 0.15f;
+            o.knob[2] = 0.55f;
+            o.knob[3] = 1.0f;
+        }
         FxEval e = EvalFx(o, shown, (float)std::min(plateW, plateH));
         GLuint dst = previewTex[(size_t)kind];
         if (e.radius >= 0.8f) {
@@ -948,6 +1025,42 @@ static void BoxBlur(const unsigned char* src, unsigned char* dst, int w, int h, 
 
 static float Hash2(float a, float b) {
     return Fract(std::sin(a * 127.1f + b * 311.7f) * 43758.5453f);
+}
+
+static float CurveAt(const float* c, float t) {
+    if (t < 0) t = 0;
+    if (t > 1) t = 1;
+    if (t < 0.333f) return c[0] + (c[1] - c[0]) * (t / 0.333f);
+    if (t < 0.666f) return c[1] + (c[2] - c[1]) * ((t - 0.333f) / 0.333f);
+    return c[2] + (c[3] - c[2]) * ((t - 0.666f) / 0.334f);
+}
+
+static void DirectionalBlur(const unsigned char* src, int w, int h, float sx, float sy,
+                            float ax, float ay, float len, float fall, float& r, float& g, float& b) {
+    if (len < 0.4f) return;
+    float tight = 6.0f + (1.1f - 6.0f) * (fall < 0 ? 0 : (fall > 1 ? 1 : fall));
+    float accR = 0, accG = 0, accB = 0, wsum = 0;
+    const int n = 6;
+    for (int i = -n; i <= n; i++) {
+        float t = (float)i / (float)n;
+        float wt = std::exp(-t * t * tight);
+        float fx = sx * (float)(w - 1) + ax * t * len;
+        float fy = sy * (float)(h - 1) + ay * t * len;
+        if (fx < 0) fx = 0;
+        if (fy < 0) fy = 0;
+        if (fx > (float)(w - 1)) fx = (float)(w - 1);
+        if (fy > (float)(h - 1)) fy = (float)(h - 1);
+        float rr, gg, bb;
+        SampleRGBA(src, w, h, fx, fy, rr, gg, bb);
+        accR += rr * wt;
+        accG += gg * wt;
+        accB += bb * wt;
+        wsum += wt;
+    }
+    if (wsum <= 0.0001f) return;
+    r = accR / wsum;
+    g = accG / wsum;
+    b = accB / wsum;
 }
 
 static void FilmGrade(int mode, float amount, float time, float sx, float sy,
@@ -1284,6 +1397,21 @@ void OverlayStamp(unsigned char* canvas, int w, int h, float time) {
                     }
                     if (mode >= 19 && mode <= 25)
                         FilmGrade(mode, e.amount, time, sx, sy, x, y, w, h, work.data(), r, g, b);
+                    if (mode == 26 || mode == 27) {
+                        float ax = std::cos(e.axis);
+                        float ay = std::sin(e.axis);
+                        float len = 0;
+                        float fall = 0.45f;
+                        if (mode == 26) {
+                            len = e.amount * e.curve[0] * 0.12f * (float)w;
+                            fall = e.curve[1];
+                        } else {
+                            float along = (sx - 0.5f) * ax + (sy - 0.5f) * ay;
+                            along = along * 1.15f + 0.5f;
+                            len = CurveAt(e.curve, along) * e.amount * 0.14f * (float)w;
+                        }
+                        DirectionalBlur(work.data(), w, h, sx, sy, ax, ay, len, fall, r, g, b);
+                    }
                 }
                 const unsigned char* base = work.data() + ((size_t)y * w + x) * 4;
                 float k = e.opacity;

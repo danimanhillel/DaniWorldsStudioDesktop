@@ -172,11 +172,24 @@ In order, they asked for and accepted:
     only while a strip on them is open, and the timeline scrolls vertically.
     The zoom fader sits on the right, immediately left of the aspect combo.
     The Effects library is the overlay set dragged onto the FX lane. Kinds
-    stay append-only (`OverlayKindCount` is 26). 3 and 4 are already Zoom In
-    and Zoom Out. 19–25 are Dust, Cassette, Frame, Film Dust, Retro Dust,
-    Old Film, Record. Preview is the GL shader; export is `FilmGrade` in
-    `OverlayStamp`. Do not renumber kinds. The library grid shows 19–25,
-    then Zoom In / Zoom Out, then the older effects. The Media / Effects /
+    stay append-only (`OverlayKindCount` is 28). 3 and 4 are already Zoom In
+    and Zoom Out. 5, 6 and 7 stay the isotropic Blur / Blur In / Blur Out.
+    19–25 are Dust, Cassette, Frame, Film Dust, Retro Dust, Old Film, Record.
+    26 is Motion Blur and 27 is Gradient Blur. Do not renumber kinds.
+    Direction for 26 and 27 is the rotate channel, but `EvalFx` zeros `e.rot`
+    and stores radians in `FxEval.axis`, so the layer does not spin.
+    Strength is `amount`. Motion Blur shutter is `knob[0]` (0.05–1; a stored
+    0 becomes 0.55) and falloff is `knob[1]`. Gradient Blur `knob[0..3]` is
+    the spatial graph Start / Early / Late / End. Trail length is
+    `amount * shutter * 0.12 * width` (motion) or `weight * amount * 0.14 * width`
+    (gradient, weight from the four points along the axis). Preview is the
+    GL shader (`smear` / `ramp4`, uniforms `axis` and `vec4 curve`); export is
+    `DirectionalBlur` in `OverlayStamp` after `FilmGrade`, sampling `work`.
+    Do not set `e.radius` for these (that starts the old box blur). Shutter,
+    falloff, and the graph are plain sliders, not REC channels. Project save
+    writes optional line `N a b c d` only for kinds 26 and 27. Old projects
+    omit it. The library grid shows 26 and 27 first, then 19–25, then Zoom
+    In / Zoom Out, then the older effects. The Media / Effects /
     Solids / Transitions tab bar does not scroll. Each tab's cards sit in
     their own child (`libmedia`, `libfx`, `libsolids`, `libtrans`). The timeline ruler stays pinned.
     Vertical scroll is only `tlbody` (the channels). Horizontal scroll is
@@ -324,14 +337,23 @@ is dragged.
   a solid must see `gSolidTex` already declared.
 - Side panels that hold a look have **SAVE** and **LOAD**: Bus grade, Clip
   color, Transform, Green screen, Audio Effects, Subtitle style, Overlay.
-  Each writes a `.dlook` file (`DWSLOOK` and a kind: `grade`, `xform`, `gs`,
-  `audio`, `style`, `overlay`) through the normal save/open dialog. The file
-  is not inside the project, so it loads in another project. Bus grade and
-  Clip color share `grade`. A file from another panel is rejected. Transform
-  and green screen set `gsFit` to 2. Audio load calls `fx.clear()`. Overlay
-  saves the kind and the sliders, not the recorded keys and not the start.
-  Subtitle text and the library preview have no SAVE/LOAD. Do not put these
-  buttons on the clip right-click menu.
+  There is no file dialog. SAVE asks only for a name. The file is
+  `%USERPROFILE%\DaniWorldsStudio\Looks\<kind>\<name>.dlook`
+  (`DWSLOOK` and a kind: `grade`, `xform`, `gs`, `audio`, `style`, `overlay`).
+  Wide Win32 APIs (`_wfopen`, `CreateDirectoryW`, `FindFirstFileW`) so a
+  Hebrew name round-trips. The name field uses the same visual reverse as
+  subtitle text; the file stores logical UTF-8. `RefreshAllLooks` scans the
+  folders once at startup and again after SAVE or when LOAD opens. LOAD is
+  the list of those names. It does not apply a look by itself at startup.
+  Same name overwrites. The file is not inside the project, so it loads in
+  another project. Bus grade and Clip color share `grade` (and the typed
+  name). A file from another panel is rejected. Transform and green screen
+  set `gsFit` to 2. Audio load calls `fx.clear()`. Overlay saves the kind,
+  the sliders, and `k0`–`k3` (the knobs). It does not save recorded keys or
+  the start and duration. An old overlay look without `k0` still loads;
+  kinds 26 and 27 get their defaults if the knobs are missing. Subtitle
+  text and the library preview have no SAVE/LOAD. Do not put these buttons
+  on the clip right-click menu.
 
 ## Transform drag in the preview (`bef6686`)
 

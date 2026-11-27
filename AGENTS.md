@@ -46,7 +46,10 @@ ripple insert, or panels-above-timeline.
   transition menu back. Do not restore the inverted opacity ramp.
 - Overlay effects stay append-only. Zoom In and Zoom Out are kinds 3 and 4.
   Dust, Cassette, Frame, Film Dust, Retro Dust, Old Film, and Record are
-  19–25 (shader in preview, `FilmGrade` on export). The Media, Effects, Solids,
+  19–25. Motion Blur is 26 and Gradient Blur is 27 (`OverlayKindCount` is 28).
+  Do not renumber them. Direction does not rotate those two layers. Their
+  extra knobs are project line `N`. Isotropic Blur / Blur In / Blur Out stay
+  5 / 6 / 7. The Media, Effects, Solids,
   and Transitions tabs stay pinned; only the cards under them scroll. Effects cards
   show the bundled plate through the real preview shader, not the flat icon.
   Transition cards play the real effect between the two bundled plates
@@ -57,9 +60,11 @@ ripple insert, or panels-above-timeline.
   (cards 192×108, preview readback, export `FxComposite`). There is no
   person detector. Do not renumber or drop the original ten.
 - Side panels Bus grade, Clip color, Transform, Green screen, Audio Effects,
-  Subtitle style, and Overlay have SAVE and LOAD. They write a `.dlook` file
-  that is not part of the project, so it loads in another project. Bus and
-  clip color share one file kind. Do not put SAVE/LOAD on the clip menu.
+  Subtitle style, and Overlay have SAVE and LOAD. SAVE is a name only. The
+  file lands in `%USERPROFILE%\DaniWorldsStudio\Looks\<kind>\<name>.dlook`,
+  not a picked path, and it is not part of the project. Startup scans that
+  folder so LOAD is a list. Bus and clip color share one file kind. Do not
+  put SAVE/LOAD on the clip menu.
 - RIFE queries the CUDA runtime for the GPU, or the NVIDIA driver if that
   runtime cannot name the card. A 5090 (compute capability 12.0) wins over a
   weaker card. TF32 is enabled from capability 8 up so cuDNN can use tensor
