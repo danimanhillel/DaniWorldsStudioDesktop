@@ -7748,6 +7748,268 @@ std::string OpenDialog(HWND owner, const char* filter, const char* title) {
     return {};
 }
 
+static FILE* LookCreate(const std::string& path, const char* kind) {
+    FILE* f = fopen(path.c_str(), "wb");
+    if (!f) return nullptr;
+    fprintf(f, "DWSLOOK %s\n", kind);
+    return f;
+}
+
+static bool LookOpen(const std::string& path, const char* kind, FILE*& f) {
+    f = fopen(path.c_str(), "rb");
+    if (!f) return false;
+    char tag[32] = {};
+    char got[32] = {};
+    if (fscanf(f, "%31s %31s", tag, got) != 2 || strcmp(tag, "DWSLOOK") != 0 || strcmp(got, kind) != 0) {
+        fclose(f);
+        f = nullptr;
+        return false;
+    }
+    return true;
+}
+
+static bool TakeF(FILE* f, const char* key, float& v) {
+    char k[32];
+    float x = 0;
+    if (fscanf(f, "%31s %f", k, &x) != 2) return false;
+    if (strcmp(k, key) != 0) return false;
+    v = x;
+    return true;
+}
+
+static bool TakeI(FILE* f, const char* key, int& v) {
+    char k[32];
+    int x = 0;
+    if (fscanf(f, "%31s %d", k, &x) != 2) return false;
+    if (strcmp(k, key) != 0) return false;
+    v = x;
+    return true;
+}
+
+static float LimRange(float v, float a, float b) {
+    if (v < a) return a;
+    if (v > b) return b;
+    return v;
+}
+
+static bool WriteGradeLook(const std::string& path, const BusSegment& s) {
+    FILE* f = LookCreate(path, "grade");
+    if (!f) return false;
+    fprintf(f, "light %.5f\ncontrast %.5f\nwarm %.5f\ntint %.5f\nsat %.5f\nshadow %.5f\ngrain %.5f\nsharp %.5f\n",
+            s.lightness, s.contrast, s.warmth, s.tint, s.saturation, s.shadow, s.grain, s.sharpen);
+    fclose(f);
+    return true;
+}
+
+static bool ReadGradeLook(const std::string& path, BusSegment& s) {
+    FILE* f = nullptr;
+    if (!LookOpen(path, "grade", f)) return false;
+    float light, contrast, warm, tint, sat, shadow, grain, sharp;
+    bool ok = TakeF(f, "light", light) && TakeF(f, "contrast", contrast) && TakeF(f, "warm", warm)
+        && TakeF(f, "tint", tint) && TakeF(f, "sat", sat) && TakeF(f, "shadow", shadow)
+        && TakeF(f, "grain", grain) && TakeF(f, "sharp", sharp);
+    fclose(f);
+    if (!ok) return false;
+    s.lightness = Lim11(light);
+    s.contrast = Lim11(contrast);
+    s.warmth = Lim11(warm);
+    s.tint = Lim11(tint);
+    s.saturation = Lim11(sat);
+    s.shadow = Lim11(shadow);
+    s.grain = Clamp01(grain);
+    s.sharpen = Clamp01(sharp);
+    return true;
+}
+
+static void StoreClipGrade(Clip& c, const BusSegment& s) {
+    c.gradeLight = s.lightness;
+    c.gradeContrast = s.contrast;
+    c.gradeWarm = s.warmth;
+    c.gradeTint = s.tint;
+    c.gradeSat = s.saturation;
+    c.gradeShadow = s.shadow;
+    c.gradeGrain = s.grain;
+    c.gradeSharp = s.sharpen;
+}
+
+static bool WriteXformLook(const std::string& path, const Clip& c) {
+    FILE* f = LookCreate(path, "xform");
+    if (!f) return false;
+    fprintf(f, "x %.5f\ny %.5f\nsize %.5f\naspect %.5f\nrot %.5f\n", c.gsX, c.gsY, c.gsScale, c.gsAspect, c.gsRot);
+    fclose(f);
+    return true;
+}
+
+static bool ReadXformLook(const std::string& path, Clip& c) {
+    FILE* f = nullptr;
+    if (!LookOpen(path, "xform", f)) return false;
+    float x, y, size, aspect, rot;
+    bool ok = TakeF(f, "x", x) && TakeF(f, "y", y) && TakeF(f, "size", size) && TakeF(f, "aspect", aspect) && TakeF(f, "rot", rot);
+    fclose(f);
+    if (!ok) return false;
+    c.gsX = LimRange(x, -1.0f, 1.0f);
+    c.gsY = LimRange(y, -1.0f, 1.0f);
+    c.gsScale = LimRange(size, 0.05f, 4.0f);
+    c.gsAspect = LimRange(aspect, 0.25f, 4.0f);
+    c.gsRot = LimRange(rot, -180.0f, 180.0f);
+    c.gsFit = 2;
+    return true;
+}
+
+static bool WriteGsLook(const std::string& path, const Clip& c) {
+    FILE* f = LookCreate(path, "gs");
+    if (!f) return false;
+    fprintf(f, "x %.5f\ny %.5f\nsize %.5f\naspect %.5f\nrot %.5f\nsim %.5f\nsoft %.5f\nspill %.5f\nopacity %.5f\n",
+            c.gsX, c.gsY, c.gsScale, c.gsAspect, c.gsRot, c.keySim, c.keySoft, c.keySpill, c.gsOpacity);
+    fclose(f);
+    return true;
+}
+
+static bool ReadGsLook(const std::string& path, Clip& c) {
+    FILE* f = nullptr;
+    if (!LookOpen(path, "gs", f)) return false;
+    float x, y, size, aspect, rot, sim, soft, spill, opacity;
+    bool ok = TakeF(f, "x", x) && TakeF(f, "y", y) && TakeF(f, "size", size) && TakeF(f, "aspect", aspect)
+        && TakeF(f, "rot", rot) && TakeF(f, "sim", sim) && TakeF(f, "soft", soft) && TakeF(f, "spill", spill)
+        && TakeF(f, "opacity", opacity);
+    fclose(f);
+    if (!ok) return false;
+    c.gsX = LimRange(x, -1.0f, 1.0f);
+    c.gsY = LimRange(y, -1.0f, 1.0f);
+    c.gsScale = LimRange(size, 0.05f, 4.0f);
+    c.gsAspect = LimRange(aspect, 0.25f, 4.0f);
+    c.gsRot = LimRange(rot, -180.0f, 180.0f);
+    c.keySim = Clamp01(sim);
+    c.keySoft = Clamp01(soft);
+    c.keySpill = Clamp01(spill);
+    c.gsOpacity = Clamp01(opacity);
+    c.gsFit = 2;
+    return true;
+}
+
+static bool WriteAudioLook(const std::string& path, const Clip& c) {
+    FILE* f = LookCreate(path, "audio");
+    if (!f) return false;
+    fprintf(f, "eq %d\n", c.eqOn ? 1 : 0);
+    for (int i = 0; i < 8; i++) fprintf(f, "g%d %.5f\n", i, c.eqGain[i]);
+    fprintf(f, "reverb %d\ntime %.5f\ndelay %d\ntempo %.5f\n", c.reverbOn ? 1 : 0, c.reverbTime, c.delayOn ? 1 : 0, c.delayTempo);
+    fclose(f);
+    return true;
+}
+
+static bool ReadAudioLook(const std::string& path, Clip& c) {
+    FILE* f = nullptr;
+    if (!LookOpen(path, "audio", f)) return false;
+    int eq = 0, reverb = 0, delay = 0;
+    float g[8], time = 0, tempo = 0;
+    bool ok = TakeI(f, "eq", eq);
+    for (int i = 0; ok && i < 8; i++) {
+        char key[8];
+        snprintf(key, sizeof(key), "g%d", i);
+        ok = TakeF(f, key, g[i]);
+    }
+    ok = ok && TakeI(f, "reverb", reverb) && TakeF(f, "time", time) && TakeI(f, "delay", delay) && TakeF(f, "tempo", tempo);
+    fclose(f);
+    if (!ok) return false;
+    c.eqOn = eq != 0;
+    for (int i = 0; i < 8; i++) c.eqGain[i] = LimRange(g[i], -12.0f, 12.0f);
+    c.reverbOn = reverb != 0;
+    c.reverbTime = LimRange(time, 0.2f, 5.0f);
+    c.delayOn = delay != 0;
+    c.delayTempo = LimRange(tempo, 40.0f, 240.0f);
+    c.fx.clear();
+    return true;
+}
+
+static bool WriteStyleLook(const std::string& path, const SubStyle& s) {
+    FILE* f = LookCreate(path, "style");
+    if (!f) return false;
+    fprintf(f, "tr %.5f\ntg %.5f\ntb %.5f\nborder %d\npx %.5f\ner %.5f\neg %.5f\neb %.5f\nbgon %d\nbr %.5f\nbg %.5f\nbb %.5f\nalpha %.5f\nscale %.5f\n",
+            s.text[0], s.text[1], s.text[2], s.border ? 1 : 0, s.borderPx,
+            s.edge[0], s.edge[1], s.edge[2], s.background ? 1 : 0,
+            s.bg[0], s.bg[1], s.bg[2], s.bgAlpha, s.fontScale);
+    fclose(f);
+    return true;
+}
+
+static bool ReadStyleLook(const std::string& path, SubStyle& s) {
+    FILE* f = nullptr;
+    if (!LookOpen(path, "style", f)) return false;
+    float tr, tg, tb, px, er, eg, eb, br, bg, bb, alpha, scale;
+    int border = 0, bgon = 0;
+    bool ok = TakeF(f, "tr", tr) && TakeF(f, "tg", tg) && TakeF(f, "tb", tb) && TakeI(f, "border", border)
+        && TakeF(f, "px", px) && TakeF(f, "er", er) && TakeF(f, "eg", eg) && TakeF(f, "eb", eb)
+        && TakeI(f, "bgon", bgon) && TakeF(f, "br", br) && TakeF(f, "bg", bg) && TakeF(f, "bb", bb)
+        && TakeF(f, "alpha", alpha) && TakeF(f, "scale", scale);
+    fclose(f);
+    if (!ok) return false;
+    s.text[0] = Clamp01(tr); s.text[1] = Clamp01(tg); s.text[2] = Clamp01(tb);
+    s.border = border != 0;
+    s.borderPx = LimRange(px, 0.0f, 6.0f);
+    s.edge[0] = Clamp01(er); s.edge[1] = Clamp01(eg); s.edge[2] = Clamp01(eb);
+    s.background = bgon != 0;
+    s.bg[0] = Clamp01(br); s.bg[1] = Clamp01(bg); s.bg[2] = Clamp01(bb);
+    s.bgAlpha = Clamp01(alpha);
+    s.fontScale = LimRange(scale, 0.4f, 2.5f);
+    return true;
+}
+
+static bool WriteFxLook(const std::string& path, const OverlayFx& o) {
+    FILE* f = LookCreate(path, "overlay");
+    if (!f) return false;
+    fprintf(f, "kind %d\nx %.5f\ny %.5f\nsize %.5f\nrot %.5f\nopacity %.5f\namount %.5f\ndir %d\n",
+            o.kind, o.x, o.y, o.scale, o.rot, o.opacity, o.amount, o.dir < 0 ? -1 : 1);
+    fclose(f);
+    return true;
+}
+
+static bool ReadFxLook(const std::string& path, OverlayFx& o) {
+    FILE* f = nullptr;
+    if (!LookOpen(path, "overlay", f)) return false;
+    int kind = 0, dir = 1;
+    float x, y, size, rot, opacity, amount;
+    bool ok = TakeI(f, "kind", kind) && TakeF(f, "x", x) && TakeF(f, "y", y) && TakeF(f, "size", size)
+        && TakeF(f, "rot", rot) && TakeF(f, "opacity", opacity) && TakeF(f, "amount", amount) && TakeI(f, "dir", dir);
+    fclose(f);
+    if (!ok || kind < 0 || kind >= OverlayKindCount()) return false;
+    o.kind = kind;
+    o.x = LimRange(x, -1.0f, 1.0f);
+    o.y = LimRange(y, -1.0f, 1.0f);
+    o.scale = LimRange(size, 0.15f, 4.0f);
+    o.rot = LimRange(rot, -180.0f, 180.0f);
+    o.opacity = Clamp01(opacity);
+    o.amount = Clamp01(amount);
+    o.dir = dir < 0 ? -1 : 1;
+    return true;
+}
+
+static std::string AskLook(HWND owner, bool save, const char* title) {
+    const char* filter = "DaniWorlds Look (*.dlook)\0*.dlook\0";
+    if (save) return SaveDialog(owner, filter, "dlook", title);
+    return OpenDialog(owner, filter, title);
+}
+
+static int LookButtons() {
+    int n = 0;
+    if (ImGui::Button("SAVE")) n = 1;
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Save these settings to a file");
+    ImGui::SameLine();
+    if (ImGui::Button("LOAD")) n = 2;
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Load settings saved from any project");
+    return n;
+}
+
+template <typename SaveFn, typename LoadFn>
+static void RunLook(HWND owner, int act, const char* saveTitle, const char* loadTitle, SaveFn save, LoadFn load) {
+    if (act == 1) {
+        std::string p = AskLook(owner, true, saveTitle);
+        if (!p.empty()) previewStatus = save(p) ? "Look saved" : "Could not save look";
+    } else if (act == 2) {
+        std::string p = AskLook(owner, false, loadTitle);
+        if (!p.empty()) previewStatus = load(p) ? "Look loaded" : "Could not load look";
+    }
+}
+
 void ClearProject() {
     for (auto& m : media) {
         if (m.thumb) { glDeleteTextures(1, &m.thumb); m.thumb = 0; }
@@ -10710,6 +10972,9 @@ int main(int argc, char* argv[]) {
                 ImGui::SliderFloat("Film grain", &s.grain, 0.0f, 1.0f, "%.2f");
                 ImGui::SliderFloat("Sharpen", &s.sharpen, 0.0f, 1.0f, "%.2f");
                 ImGui::Separator();
+                RunLook(hwnd, LookButtons(), "Save Bus Grade", "Load Bus Grade",
+                    [&](const std::string& p) { return WriteGradeLook(p, s); },
+                    [&](const std::string& p) { return ReadGradeLook(p, s); });
                 if (ImGui::Button("Reset")) {
                     s.lightness = s.contrast = s.warmth = s.tint = s.saturation = s.shadow = s.grain = s.sharpen = 0;
                 }
@@ -10923,6 +11188,9 @@ int main(int argc, char* argv[]) {
                     colorOpen = true;
                     openedPanelThisFrame = true;
                 }
+                RunLook(hwnd, LookButtons(), "Save Green Screen", "Load Green Screen",
+                    [&](const std::string& p) { return WriteGsLook(p, c); },
+                    [&](const std::string& p) { return ReadGsLook(p, c); });
                 ImVec2 w0 = ImGui::GetWindowPos();
                 gsPanelRect = ImVec4(w0.x, w0.y, w0.x + ImGui::GetWindowSize().x, w0.y + ImGui::GetWindowSize().y);
                 gsPanelHolds = ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem)
@@ -10947,6 +11215,9 @@ int main(int argc, char* argv[]) {
                         ImGui::TextDisabled("Drag in the preview. Corner sizes, top handle rotates, right edge changes aspect.");
                         ImGui::Separator();
                         DrawPictureControls(clips[xformClip]);
+                        RunLook(hwnd, LookButtons(), "Save Transform", "Load Transform",
+                            [&](const std::string& p) { return WriteXformLook(p, clips[xformClip]); },
+                            [&](const std::string& p) { return ReadXformLook(p, clips[xformClip]); });
                         ImVec2 w0 = ImGui::GetWindowPos();
                         xformRect = ImVec4(w0.x, w0.y, w0.x + ImGui::GetWindowSize().x, w0.y + ImGui::GetWindowSize().y);
                         xformHolds = ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem)
@@ -10996,6 +11267,9 @@ int main(int argc, char* argv[]) {
                 ImGui::Checkbox("Background", &subStyle.background);
                 ImGui::ColorEdit3("Background color", subStyle.bg);
                 ImGui::SliderFloat("Background opacity", &subStyle.bgAlpha, 0.0f, 1.0f, "%.2f");
+                RunLook(hwnd, LookButtons(), "Save Subtitle Style", "Load Subtitle Style",
+                    [&](const std::string& p) { return WriteStyleLook(p, subStyle); },
+                    [&](const std::string& p) { return ReadStyleLook(p, subStyle); });
                 ImVec2 w0 = ImGui::GetWindowPos();
                 subStyleRect = ImVec4(w0.x, w0.y, w0.x + ImGui::GetWindowSize().x, w0.y + ImGui::GetWindowSize().y);
                 if (ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem)
@@ -11032,6 +11306,9 @@ int main(int argc, char* argv[]) {
                     ImGui::SliderFloat("Time", &c.reverbTime, 0.2f, 5.0f, "%.2f s");
                     if (ImGui::Checkbox("Delay", &c.delayOn)) c.fx.clear();
                     ImGui::SliderFloat("Tempo", &c.delayTempo, 40.0f, 240.0f, "%.0f BPM");
+                    RunLook(hwnd, LookButtons(), "Save Audio Effects", "Load Audio Effects",
+                        [&](const std::string& p) { return WriteAudioLook(p, c); },
+                        [&](const std::string& p) { return ReadAudioLook(p, c); });
                     ImVec2 w0 = ImGui::GetWindowPos();
                     audioPanelRect = ImVec4(w0.x, w0.y, w0.x + ImGui::GetWindowSize().x, w0.y + ImGui::GetWindowSize().y);
                 }
@@ -11051,6 +11328,14 @@ int main(int argc, char* argv[]) {
                     ImGui::TextUnformatted("Clip color");
                     ImGui::Separator();
                     DrawGradeSliders(c.gradeLight, c.gradeContrast, c.gradeWarm, c.gradeTint, c.gradeSat, c.gradeShadow, c.gradeGrain, c.gradeSharp);
+                    RunLook(hwnd, LookButtons(), "Save Clip Color", "Load Clip Color",
+                        [&](const std::string& p) { return WriteGradeLook(p, ClipGradeOf(c)); },
+                        [&](const std::string& p) {
+                            BusSegment g = ClipGradeOf(c);
+                            if (!ReadGradeLook(p, g)) return false;
+                            StoreClipGrade(c, g);
+                            return true;
+                        });
                     if (ImGui::Button("Reset")) {
                         c.gradeLight = c.gradeContrast = c.gradeWarm = c.gradeTint = 0;
                         c.gradeSat = c.gradeShadow = c.gradeGrain = c.gradeSharp = 0;
@@ -11121,6 +11406,9 @@ int main(int argc, char* argv[]) {
                         gOverlaySel = -1;
                         open = false;
                     }
+                    RunLook(hwnd, LookButtons(), "Save Effect", "Load Effect",
+                        [&](const std::string& p) { return WriteFxLook(p, o); },
+                        [&](const std::string& p) { return ReadFxLook(p, o); });
                     ImVec2 w0 = ImGui::GetWindowPos();
                     ovPanelRect = ImVec4(w0.x, w0.y, w0.x + ImGui::GetWindowSize().x, w0.y + ImGui::GetWindowSize().y);
                     ovPanelHolds = ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem)

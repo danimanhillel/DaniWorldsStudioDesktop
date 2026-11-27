@@ -56,6 +56,10 @@ ripple insert, or panels-above-timeline.
   shapes 1–20, appended after the original ten and painted by `FxPaint`
   (cards 192×108, preview readback, export `FxComposite`). There is no
   person detector. Do not renumber or drop the original ten.
+- Side panels Bus grade, Clip color, Transform, Green screen, Audio Effects,
+  Subtitle style, and Overlay have SAVE and LOAD. They write a `.dlook` file
+  that is not part of the project, so it loads in another project. Bus and
+  clip color share one file kind. Do not put SAVE/LOAD on the clip menu.
 - RIFE queries the CUDA runtime for the GPU, or the NVIDIA driver if that
   runtime cannot name the card. A 5090 (compute capability 12.0) wins over a
   weaker card. TF32 is enabled from capability 8 up so cuDNN can use tensor

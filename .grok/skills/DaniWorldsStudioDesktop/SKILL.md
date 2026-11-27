@@ -322,6 +322,16 @@ is dragged.
 - **Solids** bin: black, letterbox bars, green. Drag onto video tracks and onto
   GS. Textures are `gSolidTex[3]`, created before first use. `MakeThumbnail` of
   a solid must see `gSolidTex` already declared.
+- Side panels that hold a look have **SAVE** and **LOAD**: Bus grade, Clip
+  color, Transform, Green screen, Audio Effects, Subtitle style, Overlay.
+  Each writes a `.dlook` file (`DWSLOOK` and a kind: `grade`, `xform`, `gs`,
+  `audio`, `style`, `overlay`) through the normal save/open dialog. The file
+  is not inside the project, so it loads in another project. Bus grade and
+  Clip color share `grade`. A file from another panel is rejected. Transform
+  and green screen set `gsFit` to 2. Audio load calls `fx.clear()`. Overlay
+  saves the kind and the sliders, not the recorded keys and not the start.
+  Subtitle text and the library preview have no SAVE/LOAD. Do not put these
+  buttons on the clip right-click menu.
 
 ## Transform drag in the preview (`bef6686`)
 
