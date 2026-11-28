@@ -15,7 +15,7 @@ void OverlayClear() {
     gOverlaySel = -1;
 }
 
-int OverlayKindCount() { return 29; }
+int OverlayKindCount() { return 30; }
 
 const char* OverlayKindName(int kind) {
     switch (kind) {
@@ -48,6 +48,7 @@ const char* OverlayKindName(int kind) {
     case 26: return "Motion Blur";
     case 27: return "Gradient Blur";
     case 28: return "Sharpen";
+    case 29: return "Defocus";
     default: return "Effect";
     }
 }
@@ -76,6 +77,9 @@ void OverlayAdd(int kind, float start) {
     } else if (kind == 28) {
         o.amount = 0.75f;
         o.knob[0] = 0.45f;
+    } else if (kind == 29) {
+        o.amount = 0.85f;
+        o.duration = 0.6f;
     } else o.amount = 0.75f;
     o.dir = 1;
     gOverlays.push_back(o);
@@ -224,6 +228,10 @@ static FxEval EvalFx(const OverlayFx& o, float time, float shortSide) {
         e.radius = amount * eased * 0.05f * shortSide;
     } else if (o.kind == 7) {
         e.radius = amount * (1.0f - eased) * 0.05f * shortSide;
+    } else if (o.kind == 29) {
+        float hump = std::sin(local * 3.14159265f);
+        if (hump < 0) hump = 0;
+        e.radius = amount * hump * 0.05f * shortSide;
     } else if (o.kind == 8) {
         e.vhs = 1;
         float n = Hashf(std::floor(time * 12.0f) + 4.0f);

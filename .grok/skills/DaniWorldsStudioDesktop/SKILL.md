@@ -110,7 +110,7 @@ In order, they asked for and accepted:
    stored as a sequence. A reset next to that effect clears only its sequence.
 4. Undo, 20 steps, Ctrl+Z. Not while a text box is focused.
 5. Open panels must not move the timeline under them. Static preview frame.
-   No "+" on the BUS lane. A Solids bin (black, letterbox, green).
+   No "+" on the BUS lane. A Solids bin (black, letterbox, pillarbox, green).
 6. No jump at the end of a transition, in preview or export. Transform handles
    in the preview while that panel is open.
 7. If a transformed clip does not fill the frame, the clip underneath shows,
@@ -172,10 +172,10 @@ In order, they asked for and accepted:
     only while a strip on them is open, and the timeline scrolls vertically.
     The zoom fader sits on the right, immediately left of the aspect combo.
     The Effects library is the overlay set dragged onto the FX lane. Kinds
-    stay append-only (`OverlayKindCount` is 29). 3 and 4 are already Zoom In
+    stay append-only (`OverlayKindCount` is 30). 3 and 4 are already Zoom In
     and Zoom Out. 5, 6 and 7 stay the isotropic Blur / Blur In / Blur Out.
     19–25 are Dust, Cassette, Frame, Film Dust, Retro Dust, Old Film, Record.
-    26 is Motion Blur, 27 is Gradient Blur, and 28 is Sharpen. Do not renumber kinds.
+    26 is Motion Blur, 27 is Gradient Blur, 28 is Sharpen, and 29 is Defocus. Do not renumber kinds.
     Direction for 26 and 27 is the rotate channel, but `EvalFx` zeros `e.rot`
     and stores radians in `FxEval.axis`, so the layer does not spin.
     Strength is `amount`. Motion Blur shutter is `knob[0]` (0.05–1; a stored
@@ -188,9 +188,12 @@ In order, they asked for and accepted:
     Do not set `e.radius` for these (that starts the old box blur). Shutter,
     falloff, and the graph are plain sliders, not REC channels. Sharpen is an
     unsharp mask on luminance: Strength is `amount` (gain `amount * 4`),
-    Radius is `knob[0]`. Do not set `e.radius` for it. Project save
+    Radius is `knob[0]`. Do not set `e.radius` for it. Defocus (29) does set
+    `e.radius`: `amount * sin(pi * local) * 0.05 * shortSide`, so the picture
+    is sharp at both ends of the bar and out of focus in the middle. New
+    Defocus bars start at 0.6s. Do not renumber 29. Project save
     writes optional line `N a b c d` for kinds 26, 27, and 28. Old projects
-    omit it. The library grid shows Sharpen, then 26 and 27, then 19–25, then Zoom
+    omit it. The library grid shows Defocus, then Sharpen, then 26 and 27, then 19–25, then Zoom
     In / Zoom Out, then the older effects. The Media / Effects /
     Solids / Transitions tab bar does not scroll. Each tab's cards sit in
     their own child (`libmedia`, `libfx`, `libsolids`, `libtrans`). The timeline ruler stays pinned.
@@ -338,8 +341,10 @@ is dragged.
   selected — then the click only unselects (see below).
 - The clip right-click **Effects** menu stays gone. Overlay FX on the FX
   lane is separate. Transitions are the tab after Solids, not that menu.
-- **Solids** bin: black, letterbox bars, green. Drag onto video tracks and onto
-  GS. Textures are `gSolidTex[3]`, created before first use. `MakeThumbnail` of
+- **Solids** bin: black, letterbox, green, pillarbox (`solid:sides`). Pillarbox
+  is letterbox turned sideways: 12% black bars on the left and right, clear
+  center, `SolidHasAlpha` like `solid:bars`. Drag onto video tracks and onto
+  GS. Textures are `gSolidTex[4]`, created before first use. `MakeThumbnail` of
   a solid must see `gSolidTex` already declared.
 - Side panels that hold a look have **SAVE** and **LOAD**: Bus grade, Clip
   color, Transform, Green screen, Audio Effects, Subtitle style, Overlay.

@@ -470,7 +470,7 @@ int SolidKindFromPath(const std::string& path);
 bool IsSolidPath(const std::string& path);
 bool SolidHasAlpha(const std::string& path);
 void EnsureSolidThumbs();
-static GLuint gSolidTex[3] = {0, 0, 0};
+static GLuint gSolidTex[4] = {0, 0, 0, 0};
 
 class VideoPlayer {
 public:
@@ -500,6 +500,7 @@ public:
             int kind = 0;
             if (path == "solid:bars") kind = 1;
             else if (path == "solid:green") kind = 2;
+            else if (path == "solid:sides") kind = 3;
             std::vector<uint8_t> px;
             BuildSolidPixels(kind, px, 640, 360);
             still = true;
@@ -3939,6 +3940,7 @@ static ImU32 FxLaneColor(int kind) {
     case 26: return IM_COL32(64, 112, 168, 235);
     case 27: return IM_COL32(72, 146, 126, 235);
     case 28: return IM_COL32(214, 220, 232, 235);
+    case 29: return IM_COL32(98, 132, 186, 235);
     default: return IM_COL32(140, 70, 110, 235);
     }
 }
@@ -4112,6 +4114,15 @@ static void DrawFxIcon(ImDrawList* dl, ImVec2 a, ImVec2 b, int kind) {
         dl->AddLine(ImVec2(c.x - w * 0.34f, c.y), ImVec2(c.x + w * 0.34f, c.y), IM_COL32(236, 240, 246, 255), 1.6f);
         dl->AddLine(ImVec2(c.x, c.y - h * 0.30f), ImVec2(c.x, c.y + h * 0.30f), IM_COL32(236, 240, 246, 255), 1.6f);
         dl->AddCircle(c, h * 0.16f, IM_COL32(236, 240, 246, 255), 16, 1.4f);
+    } else if (kind == 29) {
+        float k = std::sin(t * 2.6f);
+        if (k < 0) k = 0;
+        for (int i = 4; i >= 0; i--) {
+            float grow = i * 4.2f * k;
+            int a = 22 + (int)((4 - i) * 16 * (0.3f + k));
+            dl->AddCircleFilled(c, h * 0.18f + grow, IM_COL32(150, 180, 214, a), 24);
+        }
+        dl->AddCircleFilled(c, h * 0.14f, IM_COL32(88, 118, 158, 235), 20);
     } else {
         quad(c, w * 0.7f, h * 0.7f, 0, IM_COL32(120, 120, 120, 255));
     }
@@ -7245,6 +7256,13 @@ void BuildSolidPixels(int kind, std::vector<uint8_t>& px, int W, int H) {
             for (int x = 0; x < W; x++)
                 put(x, y, 0, 0, 0, stripe ? 255 : 0);
         }
+    } else if (kind == 3) {
+        int bar = std::max(2, W * 12 / 100);
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++) {
+                bool stripe = x < bar || x >= W - bar;
+                put(x, y, 0, 0, 0, stripe ? 255 : 0);
+            }
     } else if (kind == 2) {
         for (int y = 0; y < H; y++)
             for (int x = 0; x < W; x++) put(x, y, 0, 255, 0, 255);
@@ -7257,18 +7275,19 @@ void BuildSolidPixels(int kind, std::vector<uint8_t>& px, int W, int H) {
 int SolidKindFromPath(const std::string& path) {
     if (path == "solid:bars") return 1;
     if (path == "solid:green") return 2;
+    if (path == "solid:sides") return 3;
     if (path == "solid:black") return 0;
     return -1;
 }
 
 bool IsSolidPath(const std::string& path) { return SolidKindFromPath(path) >= 0; }
-bool SolidHasAlpha(const std::string& path) { return path == "solid:bars"; }
+bool SolidHasAlpha(const std::string& path) { return path == "solid:bars" || path == "solid:sides"; }
 
-static const char* kSolidId[] = {"solid:black", "solid:bars", "solid:green"};
-static const char* kSolidName[] = {"Black", "Letterbox", "Green"};
+static const char* kSolidId[] = {"solid:black", "solid:bars", "solid:green", "solid:sides"};
+static const char* kSolidName[] = {"Black", "Letterbox", "Green", "Pillarbox"};
 
 void EnsureSolidThumbs() {
-    for (int k = 0; k < 3; k++) {
+    for (int k = 0; k < 4; k++) {
         if (gSolidTex[k]) continue;
         std::vector<uint8_t> px;
         BuildSolidPixels(k, px, 320, 180);
@@ -7284,7 +7303,7 @@ void EnsureSolidThumbs() {
 }
 
 static int EnsureSolidMedia(int kind) {
-    if (kind < 0 || kind > 2) kind = 0;
+    if (kind < 0 || kind > 3) kind = 0;
     for (int i = 0; i < (int)media.size(); i++)
         if (media[i].path == kSolidId[kind]) return i;
     EnsureSolidThumbs();
@@ -9832,7 +9851,7 @@ int main(int argc, char* argv[]) {
             float cellW = std::max(70.0f, (ImGui::GetContentRegionAvail().x - gap * 2.0f) / 3.0f);
             float thumbH = cellW * 9.0f / 16.0f;
             static const int fxOrder[] = {
-                28, 26, 27,
+                29, 28, 26, 27,
                 19, 20, 21, 22, 23, 24, 25, 3, 4,
                 0, 1, 2, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18
             };
@@ -9876,7 +9895,7 @@ int main(int argc, char* argv[]) {
             float gap = 6.0f;
             float cellW = std::max(70.0f, (ImGui::GetContentRegionAvail().x - gap * 2.0f) / 3.0f);
             float thumbH = cellW * 9.0f / 16.0f;
-            for (int k = 0; k < 3; k++) {
+            for (int k = 0; k < 4; k++) {
                 if (k % 3 != 0) ImGui::SameLine(0, gap);
                 ImGui::PushID(5000 + k);
                 ImGui::BeginGroup();

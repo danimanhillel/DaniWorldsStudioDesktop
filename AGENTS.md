@@ -46,11 +46,14 @@ ripple insert, or panels-above-timeline.
   transition menu back. Do not restore the inverted opacity ramp.
 - Overlay effects stay append-only. Zoom In and Zoom Out are kinds 3 and 4.
   Dust, Cassette, Frame, Film Dust, Retro Dust, Old Film, and Record are
-  19–25. Motion Blur is 26, Gradient Blur is 27, and Sharpen is 28
-  (`OverlayKindCount` is 29). Do not renumber them. Direction does not rotate
-  the blur layers. Sharpen is a strong luminance unsharp mask. Their
-  extra knobs are project line `N`. Isotropic Blur / Blur In / Blur Out stay
-  5 / 6 / 7. The Media, Effects, Solids,
+  19–25. Motion Blur is 26, Gradient Blur is 27, Sharpen is 28, and Defocus
+  is 29 (`OverlayKindCount` is 30). Do not renumber them. Direction does not rotate
+  the blur layers. Sharpen is a strong luminance unsharp mask. Defocus is
+  the same isotropic blur as kinds 5–7, but the radius follows a sine hump:
+  sharp at both ends, out of focus in the middle. Its default length is 0.6s.
+  Their extra knobs are project line `N` (26–28 only). Isotropic Blur / Blur In / Blur Out stay
+  5 / 6 / 7. Pillarbox is the fourth solid (`solid:sides`): black bars on the
+  left and right, clear center, same alpha path as Letterbox. `gSolidTex` has 4 slots. The Media, Effects, Solids,
   and Transitions tabs stay pinned; only the cards under them scroll. Effects cards
   show the bundled plate through the real preview shader, not the flat icon.
   Transition cards play the real effect between the two bundled plates
