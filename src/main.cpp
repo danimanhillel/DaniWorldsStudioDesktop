@@ -10196,14 +10196,9 @@ int main(int argc, char* argv[]) {
 
         busHover = false;
         ImGui::BeginChild("buslane", ImVec2(timeW + 90.0f, 58.0f), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-        ImVec2 lane0 = ImGui::GetCursorScreenPos();
-        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(1, 0));
-        ImGui::BeginGroup();
         ImGui::TextUnformatted("BUS");
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Click the empty lane for the whole project");
-        ImGui::EndGroup();
-        ImGui::PopStyleVar();
-        ImGui::SetCursorScreenPos(ImVec2(lane0.x + 46.0f, lane0.y));
+        ImGui::SameLine(46.0f);
         ImVec2 busStart = ImGui::GetCursorScreenPos();
         busOriginX = busStart.x;
         float busW = ImGui::GetContentRegionAvail().x;

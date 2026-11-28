@@ -196,7 +196,11 @@ In order, they asked for and accepted:
     their own child (`libmedia`, `libfx`, `libsolids`, `libtrans`). The timeline ruler stays pinned.
     Vertical scroll is only `tlbody` (the channels). Horizontal scroll is
     that same body; the ruler copies it with `SetNextWindowScroll`. Do not
-    put the ruler back inside the vertical scroller. Effects cards show the
+    put the ruler back inside the vertical scroller. Time 0 is the same
+    vertical line on every lane, including BUS: `SameLine(46)` from the
+    child window, not the cursor plus 46. The old BUS path added the child
+    padding, so a segment already at start 0 sat to the right of V1 and
+    could not be dragged onto that line. Do not put that offset back. Effects cards show the
     bundled plate (`fx_plate.cpp`, the mountain image) through the real
     preview shader (`OverlayPreviewTick`, amount 0.85, ping-pong 3s).
     `DrawFxIcon` is only the fallback if that plate did not upload. Do not

@@ -89,7 +89,10 @@ ripple insert, or panels-above-timeline.
   Export can also write audio only (`exOutKind` 1): MP3 of the timeline mix,
   48 kHz stereo. Video radios stay unchanged.
 - The timeline ruler stays pinned while the channels scroll vertically.
-  Horizontal scroll stays shared (`tlbody` scroll, ruler follows).
+  Horizontal scroll stays shared (`tlbody` scroll, ruler follows). BUS uses
+  the same `SameLine(46)` time origin as FX, GS, SUBS, and V/A. Do not add
+  the child padding on top of that, or time 0 sits to the right and cannot
+  be dragged back onto the other lanes.
 - Preview keeps more seconds ahead (small clips 14s, large clips 9s / 11s
   source). An empty click unselects only when more than one object is
   selected. Dropping an effect does not open its side panel.
